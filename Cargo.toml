@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+config = "0.15"
+dotenvy = "0.15"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_with = "3"
+toml = "0.9"
+async-trait = "0.1"
