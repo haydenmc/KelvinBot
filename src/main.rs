@@ -1,12 +1,14 @@
 mod config;
 mod service;
-mod services { pub mod dummy; }
+mod services {
+    pub mod dummy;
+}
 
 use anyhow::Result;
+use service::Service;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
-use service::Service;
 
 use crate::config::ServiceKind;
 

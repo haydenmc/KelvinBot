@@ -22,7 +22,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct ServiceCfg {
     pub kind: ServiceKind,
-    pub interval_ms: Option<u64>
+    pub interval_ms: Option<u64>,
 }
 
 pub fn load_from_env() -> anyhow::Result<Config> {
