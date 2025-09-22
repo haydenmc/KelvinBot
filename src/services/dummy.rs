@@ -2,9 +2,12 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::message::{Message, Address};
+
 pub struct DummyService {
     pub name: String,
     pub interval_ms: u64,
+    pub tx: tokio::sync::mpsc::Sender<Message>,
 }
 
 #[async_trait::async_trait]
@@ -23,7 +26,18 @@ impl crate::service::Service for DummyService {
                     break;
                 }
                 _ = interval.tick() => {
-                    info!(service=%self.name, "tick")
+                    let msg = Message {
+                        from: Address {
+                            service: self.name.clone(),
+                            room_id: "room-1".into(),
+                            user_id: None,
+                        },
+                        body: "hello from dummy".into(),
+                    };
+                    if let Err(e) = self.tx.send(msg).await {
+                        tracing::warn!(?e, "bus receiver dropped; stopping");
+                        break;
+                    }
                 }
             }
         }
