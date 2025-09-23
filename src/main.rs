@@ -1,24 +1,29 @@
-mod config;
-mod service;
+mod core {
+    pub mod bus;
+    pub mod config;
+    pub mod event;
+    pub mod middleware;
+    pub mod service;
+}
 mod services {
     pub mod dummy;
 }
-mod message;
-mod middleware;
 mod middlewares {
     pub mod logger;
 }
-mod bus;
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use service::Service;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::{config::ServiceKind, middleware::Middleware, middlewares::logger::Logger};
+use crate::core::{
+    bus,
+    config::{Config, load_from_env},
+    middleware, service,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -27,67 +32,37 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("starting...");
 
     info!("loading configuration...");
-    let cfg = config::load_from_env()?;
+    let cfg = load_from_env()?;
 
-    // Bus channel: many producers (services) -> one consumer (bus)
-    let (tx, rx) = bus::channel(1024);
+    // Event channel: many producers (services) -> one consumer (bus)
+    let (cmd_tx, cmd_rx) = bus::create_command_channel(1024);
+    // Command channel: many producers (middleware) -> one consumer (bus)
+    let (evt_tx, evt_rx) = bus::create_event_channel(1024);
 
-    // Middlewares (just the logger for now)
-    let middlewares: Vec<Arc<dyn middleware::Middleware>> = vec![Arc::new(Logger)];
+    info!("instantiating services...");
+    let services = service::instantiate_services_from_config(&cfg, &evt_tx);
+
+    info!("instantiating middlewares...");
+    let middlewares: Vec<Arc<dyn middleware::Middleware>> =
+        middleware::instantiate_middleware_from_config(&cfg, &cmd_tx);
 
     // Start bus
     let cancel_all = CancellationToken::new();
     let bus_cancel = cancel_all.child_token();
     let bus_task = tokio::spawn({
-        let middlewares = middlewares.clone();
-        async move { bus::Bus::new(rx, middlewares).run(bus_cancel).await }
+        async move { bus::Bus::new(evt_rx, cmd_rx, services, middlewares).run(bus_cancel).await }
     });
-
-    // Build and start services
-    let mut handles = Vec::new();
-    for (name, scfg) in &cfg.services {
-        match scfg.kind {
-            ServiceKind::Dummy => {
-                let svc = services::dummy::DummyService {
-                    name: name.clone(),
-                    interval_ms: scfg.interval_ms.unwrap_or(1000),
-                    tx: tx.clone(),
-                };
-                let child_token = cancel_all.child_token();
-                handles.push(tokio::spawn(async move { svc.run(child_token).await }));
-            }
-            _ => warn!("unknown service kind, skipping"),
-        }
-    }
 
     // Graceful shutdown on Ctrl+C
     tokio::signal::ctrl_c().await?;
-    warn!("Ctrl+C received; shutting down…");
+    info!("Ctrl+C received; shutting down…");
     cancel_all.cancel();
-
-    // Join services
-    for h in handles {
-        match h.await {
-            // Task joined OK, and the task returned Ok(())
-            Ok(Ok(())) => {}
-
-            // Task joined OK, but your task code returned an error
-            Ok(Err(run_err)) => {
-                warn!(?run_err, "task returned error");
-            }
-
-            // Join failed (panic or abort)
-            Err(join_err) => {
-                warn!(?join_err, "task panicked or was aborted");
-            }
-        }
-    }
 
     // Join bus
     match bus_task.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => warn!(?e, "bus error"),
-        Err(e) => warn!(?e, "bus panicked/aborted"),
+        Err(e) => warn!(?e, "bus task panicked/aborted"),
     }
 
     info!("goodbye");

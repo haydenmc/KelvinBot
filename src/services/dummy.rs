@@ -2,19 +2,17 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::message::{Message, Address};
+use crate::core::{event::{Address, Event}, service::{self, Service, ServiceId}};
 
 pub struct DummyService {
-    pub name: String,
+    pub id: ServiceId,
     pub interval_ms: u64,
-    pub tx: tokio::sync::mpsc::Sender<Message>,
+    pub evt_tx: tokio::sync::mpsc::Sender<Event>,
 }
 
 #[async_trait::async_trait]
-impl crate::service::Service for DummyService {
-    fn name(&self) -> &str {
-        &self.name
-    }
+impl Service for DummyService {
+    fn id(&self) -> service::ServiceId { self.id.clone() }
 
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         let mut interval =
@@ -22,21 +20,21 @@ impl crate::service::Service for DummyService {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!(service=%self.name, "shutdown requested");
+                    info!(service=%self.id, "shutdown requested");
                     break;
                 }
                 _ = interval.tick() => {
-                    let msg = Message {
+                    let msg = Event::Message{
                         from: Address {
-                            service: self.name.clone(),
+                            service_id: self.id.clone(),
                             room_id: "room-1".into(),
                             user_id: None,
                         },
                         body: "hello from dummy".into(),
                     };
-                    if let Err(e) = self.tx.send(msg).await {
-                        tracing::warn!(?e, "bus receiver dropped; stopping");
-                        break;
+                    if let Err(e) = self.evt_tx.send(msg).await {
+                        tracing::warn!(?e, "bus receiver dropped");
+                        //break;
                     }
                 }
             }
