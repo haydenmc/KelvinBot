@@ -17,7 +17,7 @@ impl Middleware for Logger {
     }
 
     fn on_event(&self, evt: &Event) -> anyhow::Result<Verdict> {
-        tracing::info!("inbound event");
+        tracing::info!(event=%evt, "inbound event");
         Ok(Verdict::Continue)
     }
 }

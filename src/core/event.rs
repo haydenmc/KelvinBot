@@ -1,15 +1,31 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::core::service::ServiceId;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Address {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Event {
     pub service_id: ServiceId,
-    pub room_id: String,
-    pub user_id: Option<String>,
+    pub kind: EventKind,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Event {
-    Message { from: Address, body: String },
+pub enum EventKind {
+    DirectMessage { user_id: String, body: String },
+    RoomMessage { room_id: String, body: String },
+}
+
+impl fmt::Display for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}]", &self.service_id)?;
+        match &self.kind {
+            EventKind::DirectMessage { user_id, body } => {
+                write!(f, "[DM] {user_id}: {body}")
+            }
+            EventKind::RoomMessage { room_id, body } => {
+                write!(f, "[RM] {room_id}: {body}")
+            }
+        }
+    }
 }

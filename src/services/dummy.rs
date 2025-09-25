@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::core::{event::{Address, Event}, service::{self, Service, ServiceId}};
+use crate::core::{event::{Event, EventKind}, service::{self, Service, ServiceId}};
 
 pub struct DummyService {
     pub id: ServiceId,
@@ -24,17 +24,16 @@ impl Service for DummyService {
                     break;
                 }
                 _ = interval.tick() => {
-                    let msg = Event::Message{
-                        from: Address {
-                            service_id: self.id.clone(),
-                            room_id: "room-1".into(),
-                            user_id: None,
-                        },
-                        body: "hello from dummy".into(),
+                    let msg = Event {
+                        service_id: self.id.clone(),
+                        kind: EventKind::RoomMessage{
+                            room_id: "1".into(),
+                            body: "hello from dummy".into()
+                        }
                     };
                     if let Err(e) = self.evt_tx.send(msg).await {
-                        tracing::warn!(?e, "bus receiver dropped");
-                        //break;
+                        tracing::error!(?e, "bus event receiver dropped");
+                        break;
                     }
                 }
             }
