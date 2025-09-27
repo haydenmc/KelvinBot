@@ -65,7 +65,7 @@ impl Bus {
                     for mw in &self.middlewares {
                         match mw.on_event(&evt)? {
                             Verdict::Continue => {},
-                            Verdict::Drop => { break; }
+                            Verdict::Stop => { break; }
                         }
                     }
                 }

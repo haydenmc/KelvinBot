@@ -1,15 +1,26 @@
 use std::collections::HashMap;
 
+use secrecy::SecretString;
 use serde::Deserialize;
+use serde_with::{DisplayFromStr, serde_as};
+use url::Url;
 
 pub const ENV_PREFIX: &str = "KELVIN";
 pub const ENV_SEPARATOR: &str = "__";
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde_as]
+#[derive(Debug, Deserialize)]
+#[serde(tag="kind", rename_all = "lowercase")]
 pub enum ServiceKind {
-    Dummy,
-    Matrix,
+    Dummy{
+        #[serde_as(as = "Option<DisplayFromStr>")]
+        interval_ms: Option<u64>,
+    },
+    Matrix{
+        homeserver_url: Url,
+        user_id: String,
+        password: SecretString,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -21,8 +32,8 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct ServiceCfg {
+    #[serde(flatten)]
     pub kind: ServiceKind,
-    pub interval_ms: Option<u64>,
 }
 
 pub fn load_from_env() -> anyhow::Result<Config> {

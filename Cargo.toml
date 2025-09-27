@@ -15,3 +15,6 @@ serde = { version = "1", features = ["derive"] }
 serde_with = "3"
 toml = "0.9"
 async-trait = "0.1"
+matrix-sdk = { version = "0.14", features = ["anyhow", "bundled-sqlite"] }
+secrecy = { version = "0.10", features = ["serde"] }
+url = { version = "2.5", features = ["serde"] }

@@ -7,6 +7,7 @@ mod core {
 }
 mod services {
     pub mod dummy;
+    pub mod matrix;
 }
 mod middlewares {
     pub mod logger;

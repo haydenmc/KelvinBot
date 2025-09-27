@@ -11,7 +11,10 @@ use crate::{
         config::{Config, ServiceKind},
         event::Event,
     },
-    services::dummy::DummyService,
+    services::{
+        dummy::DummyService,
+        matrix::{MatrixService, MatrixUserId},
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,13 +41,23 @@ pub fn instantiate_services_from_config(
     let mut services: HashMap<ServiceId, Arc<dyn Service>> = HashMap::new();
     for (id, scfg) in &config.services {
         let service_id = ServiceId(id.clone());
-        match scfg.kind {
-            ServiceKind::Dummy => {
+        match &scfg.kind {
+            ServiceKind::Dummy { interval_ms } => {
                 let svc = Arc::new(DummyService {
                     id: service_id.clone(),
-                    interval_ms: scfg.interval_ms.unwrap_or(1000),
+                    interval_ms: interval_ms.unwrap_or(1000),
                     evt_tx: evt_tx.clone(),
                 });
+                services.insert(service_id, svc);
+            }
+            ServiceKind::Matrix { homeserver_url, user_id, password } => {
+                let svc = Arc::new(MatrixService::new(
+                    service_id.clone(),
+                    homeserver_url.clone(),
+                    MatrixUserId(user_id.clone()),
+                    password.clone(),
+                    evt_tx.clone(),
+                ));
                 services.insert(service_id, svc);
             }
             _ => error!(id=%id, "unknown service kind, skipping"),

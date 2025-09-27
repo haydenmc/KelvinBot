@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy)]
 pub enum Verdict {
     Continue,
-    Drop,
+    Stop,
 }
 
 #[async_trait]
