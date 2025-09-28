@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  kelvinbot:
+    image: ghcr.io/haydenmc/kelvinbot:latest
+    container_name: kelvinbot
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    # Uncomment and modify if you need to expose ports
+    # ports:
+    #   - "8080:8080"
+
+    # Optional: Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
+    # Optional: Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "kelvin-bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# Optional: If you want to use a custom network
+# networks:
+#   kelvinbot-network:
+#     driver: bridge
