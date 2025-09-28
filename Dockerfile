@@ -31,7 +31,10 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -r -s /bin/false kelvinbot
 
 # Create data directory
-RUN mkdir -p /app/data && chown kelvinbot:kelvinbot /app/data
+RUN mkdir -p /data && chown kelvinbot:kelvinbot /data
+
+# Expose data directory as volume
+VOLUME ["/data"]
 
 # Copy the binary from builder stage
 COPY --from=builder /app/target/release/kelvin-bot /usr/local/bin/kelvin-bot
@@ -47,7 +50,7 @@ USER kelvinbot
 WORKDIR /app
 
 # Set default data directory
-ENV KELVIN__DATA_DIRECTORY=/app/data
+ENV KELVIN__DATA_DIRECTORY=/data
 
 # Expose any ports if needed (currently none)
 # EXPOSE 8080
