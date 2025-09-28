@@ -2,13 +2,20 @@ use std::{fmt, path::PathBuf};
 
 use anyhow::{Result, bail};
 use matrix_sdk::{
-    config::SyncSettings, encryption::{self, EncryptionSettings}, ruma::{
-        events::room::{
-            member::{MembershipState, StrippedRoomMemberEvent},
-            message::SyncRoomMessageEvent,
+    Client, Room, RoomState,
+    config::SyncSettings,
+    encryption::{self, EncryptionSettings},
+    ruma::{
+        events::{
+            True,
+            message::OriginalSyncMessageEvent,
+            room::{
+                member::{MembershipState, StrippedRoomMemberEvent},
+                message::{MessageType, OriginalSyncRoomMessageEvent, SyncRoomMessageEvent},
+            },
         },
         user_id,
-    }, Client, Room
+    },
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -17,7 +24,10 @@ use tracing::{error, info, warn};
 use url::Url;
 
 use crate::core::{
-    event::Event,
+    event::{
+        Event,
+        EventKind::{self, RoomMessage},
+    },
     service::{self, Service, ServiceId},
 };
 
@@ -59,7 +69,16 @@ impl MatrixService {
         sqlite_path.push(format!("{}", id.0));
         std::fs::create_dir_all(&sqlite_path).expect("Failed to create storage directory");
 
-        Self { id, homeserver_url, user_id, password, device_id, evt_tx, db_directory: sqlite_path, db_passphrase }
+        Self {
+            id,
+            homeserver_url,
+            user_id,
+            password,
+            device_id,
+            evt_tx,
+            db_directory: sqlite_path,
+            db_passphrase,
+        }
     }
 
     async fn setup_event_handlers(&self, client: &Client) -> anyhow::Result<()> {
@@ -93,6 +112,50 @@ impl MatrixService {
                 }
             },
         );
+        // Handle room messages
+        let service_id = self.id.clone();
+        let evt_tx = self.evt_tx.clone();
+        client.add_event_handler(
+            |event: OriginalSyncRoomMessageEvent, room: Room, client: Client| async move {
+                if room.state() != RoomState::Joined {
+                    return;
+                }
+
+                let MessageType::Text(text_content) = event.content.msgtype else {
+                    return;
+                };
+
+                let Ok(is_direct) = room.is_direct().await else {
+                    warn!("could not determine if message was a direct message");
+                    return;
+                };
+
+                match is_direct {
+                    true => {
+                        let event = Event {
+                            service_id: service_id,
+                            kind: EventKind::DirectMessage {
+                                user_id: event.sender.to_string(),
+                                body: text_content.body,
+                            },
+                        };
+
+                        let _ = evt_tx.send(event).await;
+                    }
+                    false => {
+                        let event = Event {
+                            service_id: service_id,
+                            kind: EventKind::RoomMessage {
+                                room_id: room.room_id().to_string(),
+                                body: text_content.body,
+                            },
+                        };
+
+                        let _ = evt_tx.send(event).await;
+                    }
+                }
+            },
+        );
         Ok(())
     }
 }
@@ -107,7 +170,7 @@ impl Service for MatrixService {
         let client = Client::builder()
             .homeserver_url(self.homeserver_url.clone())
             .sqlite_store(&self.db_directory, self.db_passphrase.expose_secret().into())
-            .with_encryption_settings(EncryptionSettings{
+            .with_encryption_settings(EncryptionSettings {
                 backup_download_strategy: encryption::BackupDownloadStrategy::Manual,
                 auto_enable_cross_signing: false,
                 auto_enable_backups: false,
@@ -129,8 +192,6 @@ impl Service for MatrixService {
                 bail!("login error")
             }
         }
-        // Disable backups
-        client.encryption().backups().disable().await?;
         // An initial sync to set up state and so our bot doesn't respond to old messages.
         client.sync_once(SyncSettings::default()).await?;
         self.setup_event_handlers(&client).await?;

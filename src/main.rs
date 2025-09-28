@@ -73,6 +73,11 @@ async fn main() -> Result<(), anyhow::Error> {
 fn init_tracing() {
     // RUST_LOG controls log level (ex. RUST_LOG=debug)
     // otherwise, default to "info"
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info")
+            .add_directive("matrix_sdk=error".parse().unwrap())
+            .add_directive("matrix_sdk_crypto=error".parse().unwrap())
+            .add_directive("matrix_sdk_base=error".parse().unwrap())
+    });
     fmt().with_env_filter(filter).init();
 }

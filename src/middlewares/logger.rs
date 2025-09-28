@@ -1,13 +1,18 @@
+use crate::{
+    core::{event::Event, middleware::Middleware},
+    middleware::Verdict,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
-use crate::{core::{event::Event, middleware::Middleware}, middleware::Verdict};
 
 pub struct Logger;
 
 #[async_trait]
 impl Middleware for Logger {
-    fn name(&self) -> &str { "logger" }
+    fn name(&self) -> &str {
+        "logger"
+    }
 
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         tracing::info!("logger running...");

@@ -10,13 +10,13 @@ pub const ENV_SEPARATOR: &str = "__";
 
 #[serde_as]
 #[derive(Debug, Deserialize)]
-#[serde(tag="kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ServiceKind {
-    Dummy{
+    Dummy {
         #[serde_as(as = "Option<DisplayFromStr>")]
         interval_ms: Option<u64>,
     },
-    Matrix{
+    Matrix {
         homeserver_url: Url,
         user_id: String,
         password: SecretString,

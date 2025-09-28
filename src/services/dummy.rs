@@ -2,7 +2,10 @@ use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::core::{event::{Event, EventKind}, service::{self, Service, ServiceId}};
+use crate::core::{
+    event::{Event, EventKind},
+    service::{self, Service, ServiceId},
+};
 
 pub struct DummyService {
     pub id: ServiceId,
@@ -12,7 +15,9 @@ pub struct DummyService {
 
 #[async_trait::async_trait]
 impl Service for DummyService {
-    fn id(&self) -> service::ServiceId { self.id.clone() }
+    fn id(&self) -> service::ServiceId {
+        self.id.clone()
+    }
 
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         let mut interval =
