@@ -50,13 +50,16 @@ pub fn instantiate_services_from_config(
                 });
                 services.insert(service_id, svc);
             }
-            ServiceKind::Matrix { homeserver_url, user_id, password } => {
+            ServiceKind::Matrix { homeserver_url, user_id, password, device_id, db_passphrase } => {
                 let svc = Arc::new(MatrixService::new(
                     service_id.clone(),
                     homeserver_url.clone(),
                     MatrixUserId(user_id.clone()),
                     password.clone(),
+                    device_id.clone(),
                     evt_tx.clone(),
+                    config.data_directory.clone(),
+                    db_passphrase.clone(),
                 ));
                 services.insert(service_id, svc);
             }

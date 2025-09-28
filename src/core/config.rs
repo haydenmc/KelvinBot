@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -20,6 +20,8 @@ pub enum ServiceKind {
         homeserver_url: Url,
         user_id: String,
         password: SecretString,
+        device_id: String,
+        db_passphrase: SecretString,
     },
     #[serde(other)]
     Unknown,
@@ -28,6 +30,12 @@ pub enum ServiceKind {
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub services: HashMap<String, ServiceCfg>, // key = service name
+    #[serde(default = "default_data_directory")]
+    pub data_directory: PathBuf,
+}
+
+fn default_data_directory() -> PathBuf {
+    PathBuf::from("./data")
 }
 
 #[derive(Debug, Deserialize)]
