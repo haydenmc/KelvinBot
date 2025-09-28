@@ -8,7 +8,7 @@ fn test_command_channel_creation() {
     let _cmd_tx_clone = cmd_tx.clone();
 
     // Channel should be created successfully with specified capacity
-    assert!(true); // Basic smoke test - if we get here, channel creation worked
+    // Basic smoke test - if we get here, channel creation worked
 }
 
 #[test]
@@ -19,5 +19,5 @@ fn test_event_channel_creation() {
     let _evt_tx_clone = evt_tx.clone();
 
     // Channel should be created successfully with specified capacity
-    assert!(true); // Basic smoke test - if we get here, channel creation worked
+    // Basic smoke test - if we get here, channel creation worked
 }

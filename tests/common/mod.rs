@@ -85,7 +85,7 @@ impl Service for MockService {
                             },
                         };
 
-                        if let Err(_) = self.evt_tx.send(event).await {
+                        if (self.evt_tx.send(event).await).is_err() {
                             // Channel closed, service should stop
                             break;
                         }
