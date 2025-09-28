@@ -43,6 +43,7 @@ pub struct MatrixService {
 }
 
 impl MatrixService {
+    #[allow(clippy::too_many_arguments)] // TODO: make this less gross
     pub fn new(
         id: ServiceId,
         homeserver_url: Url,
@@ -56,7 +57,7 @@ impl MatrixService {
         // Create storage directory
         let mut sqlite_path = data_directory.clone();
         sqlite_path.push("matrix");
-        sqlite_path.push(format!("{}", id.0));
+        sqlite_path.push(id.to_string());
         std::fs::create_dir_all(&sqlite_path).expect("Failed to create storage directory");
 
         Self {
@@ -123,7 +124,7 @@ impl MatrixService {
                 match is_direct {
                     true => {
                         let event = Event {
-                            service_id: service_id,
+                            service_id,
                             kind: EventKind::DirectMessage {
                                 user_id: event.sender.to_string(),
                                 body: text_content.body,
@@ -134,7 +135,7 @@ impl MatrixService {
                     }
                     false => {
                         let event = Event {
-                            service_id: service_id,
+                            service_id,
                             kind: EventKind::RoomMessage {
                                 room_id: room.room_id().to_string(),
                                 body: text_content.body,

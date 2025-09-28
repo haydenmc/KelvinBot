@@ -36,17 +36,20 @@ impl Bus {
         // Start all services
         info!("starting services...");
         let mut service_handles = Vec::new();
-        for service in self.services.values().cloned() {
+        for service in self.services.values() {
             let child_token = cancel.child_token();
-            service_handles.push(tokio::spawn(async move { service.run(child_token).await }));
+            let service_clone = service.clone();
+            service_handles.push(tokio::spawn(async move { service_clone.run(child_token).await }));
         }
 
         // Start all middlewares
         info!("starting middlewares...");
         let mut middleware_handles = Vec::new();
-        for middleware in self.middlewares.iter().cloned() {
+        for middleware in self.middlewares.iter() {
             let child_token = cancel.child_token();
-            middleware_handles.push(tokio::spawn(async move { middleware.run(child_token).await }));
+            let middleware_clone = middleware.clone();
+            middleware_handles
+                .push(tokio::spawn(async move { middleware_clone.run(child_token).await }));
         }
 
         // Begin command/event processing
