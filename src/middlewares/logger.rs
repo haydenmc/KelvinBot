@@ -1,6 +1,6 @@
-use crate::{
-    core::{event::Event, middleware::Middleware},
-    middleware::Verdict,
+use crate::core::{
+    event::Event,
+    middleware::{Middleware, Verdict},
 };
 use anyhow::Result;
 use async_trait::async_trait;
