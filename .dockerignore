@@ -47,7 +47,6 @@ Thumbs.db
 
 # Rust specific
 **/*.rs.bk
-Cargo.lock
 
 # Claude Code
 .claude/
