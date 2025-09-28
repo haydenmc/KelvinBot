@@ -91,6 +91,7 @@ KELVIN__DATA_DIRECTORY=/opt/kelvinbot/data
 
 ## Running
 
+### Local Development
 ```bash
 # Development with dummy service
 cp .env.example .env
@@ -99,6 +100,45 @@ cargo run
 
 # Production
 RUST_LOG=info cargo run --release
+```
+
+### Docker
+```bash
+# Pull from GitHub Container Registry
+docker pull ghcr.io/haydenmc/kelvinbot:latest
+
+# Run with environment file
+docker run -d \
+  --name kelvinbot \
+  --env-file .env \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/haydenmc/kelvinbot:latest
+
+# Or with individual environment variables
+docker run -d \
+  --name kelvinbot \
+  -e KELVIN__SERVICES__dummy__KIND=dummy \
+  -e KELVIN__SERVICES__dummy__INTERVAL_MS=5000 \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/haydenmc/kelvinbot:latest
+
+# View logs
+docker logs kelvinbot
+
+# Stop and remove
+docker stop kelvinbot && docker rm kelvinbot
+```
+
+### Docker Compose
+```yaml
+version: '3.8'
+services:
+  kelvinbot:
+    image: ghcr.io/haydenmc/kelvinbot:latest
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
 ```
 
 ## Testing
@@ -131,8 +171,10 @@ The project uses GitHub Actions for automated testing:
   - Code coverage reporting on PRs
   - Release binary building (main branch only)
 - **PR Quick Check**: Fast feedback on pull requests
+- **Docker Publishing**: Builds and publishes container images on release tags
 
 [![CI](https://github.com/haydenmc/KelvinBot/workflows/CI/badge.svg)](https://github.com/haydenmc/KelvinBot/actions)
+[![Docker Publish](https://github.com/haydenmc/KelvinBot/workflows/Docker%20Publish/badge.svg)](https://github.com/haydenmc/KelvinBot/actions)
 [![codecov](https://codecov.io/gh/haydenmc/KelvinBot/branch/main/graph/badge.svg)](https://codecov.io/gh/haydenmc/KelvinBot)
 
 ## Event Flow
