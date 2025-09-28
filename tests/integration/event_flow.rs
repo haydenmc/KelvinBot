@@ -12,7 +12,6 @@ use std::time::Duration;
 use tokio_test::assert_ok;
 use tokio_util::sync::CancellationToken;
 
-
 #[tokio::test]
 async fn test_end_to_end_event_processing_pipeline() {
     // Create a test middleware that counts events
@@ -47,7 +46,8 @@ async fn test_end_to_end_event_processing_pipeline() {
 
     // Create services map with our mock service
     let mut services = HashMap::new();
-    services.insert(service_id, Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>);
+    services
+        .insert(service_id, Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>);
 
     // Use our custom middleware
     let middlewares: Vec<Arc<dyn Middleware>> = vec![counting_middleware];
@@ -105,11 +105,7 @@ async fn test_middleware_pipeline_order_and_stopping() {
             let mut order = self.order.lock().unwrap();
             order.push(self.id);
 
-            if self.should_stop {
-                Ok(Verdict::Stop)
-            } else {
-                Ok(Verdict::Continue)
-            }
+            if self.should_stop { Ok(Verdict::Stop) } else { Ok(Verdict::Continue) }
         }
     }
 
@@ -142,7 +138,8 @@ async fn test_middleware_pipeline_order_and_stopping() {
 
     // Create services map with our mock service
     let mut services = HashMap::new();
-    services.insert(service_id, Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>);
+    services
+        .insert(service_id, Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>);
 
     // Create middleware pipeline: first -> second (stops) -> third (should not execute)
     let middlewares: Vec<Arc<dyn Middleware>> = vec![middleware1, middleware2, middleware3];
@@ -173,18 +170,34 @@ async fn test_middleware_pipeline_order_and_stopping() {
 
     // We sent exactly 3 events, so we should have exactly 6 middleware executions
     // (first, second) for each of the 3 events = 6 total
-    assert_eq!(final_order.len(), 6, "Expected exactly 6 middleware executions (3 events × 2 middlewares), got {}", final_order.len());
+    assert_eq!(
+        final_order.len(),
+        6,
+        "Expected exactly 6 middleware executions (3 events × 2 middlewares), got {}",
+        final_order.len()
+    );
 
     // Check that we see the expected pattern: first, second, first, second, first, second
     // (third should never appear because second stops the pipeline)
     for (i, &middleware_name) in final_order.iter().enumerate() {
         if i % 2 == 0 {
-            assert_eq!(middleware_name, "first", "Expected 'first' middleware at position {}, got '{}'", i, middleware_name);
+            assert_eq!(
+                middleware_name, "first",
+                "Expected 'first' middleware at position {}, got '{}'",
+                i, middleware_name
+            );
         } else {
-            assert_eq!(middleware_name, "second", "Expected 'second' middleware at position {}, got '{}'", i, middleware_name);
+            assert_eq!(
+                middleware_name, "second",
+                "Expected 'second' middleware at position {}, got '{}'",
+                i, middleware_name
+            );
         }
     }
 
     // Verify that third middleware never executed (pipeline was stopped)
-    assert!(!final_order.contains(&"third"), "Third middleware should not execute because second middleware stops the pipeline");
+    assert!(
+        !final_order.contains(&"third"),
+        "Third middleware should not execute because second middleware stops the pipeline"
+    );
 }

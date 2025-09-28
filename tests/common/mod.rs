@@ -1,12 +1,12 @@
+use async_trait::async_trait;
 use kelvin_bot::core::config::{Config, ServiceCfg, ServiceKind};
-use kelvin_bot::core::service::{Service, ServiceId};
 use kelvin_bot::core::event::{Event, EventKind};
+use kelvin_bot::core::service::{Service, ServiceId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
-use async_trait::async_trait;
 
 /// Creates a test configuration with a dummy service for testing
 #[allow(dead_code)] // Suppress spurious warning - some compilation units don't include this code.
@@ -56,11 +56,7 @@ impl MockService {
     pub fn new(id: ServiceId, evt_tx: mpsc::Sender<Event>) -> (Self, mpsc::Sender<usize>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(10);
 
-        let service = MockService {
-            id,
-            evt_tx,
-            command_rx: Arc::new(Mutex::new(cmd_rx)),
-        };
+        let service = MockService { id, evt_tx, command_rx: Arc::new(Mutex::new(cmd_rx)) };
 
         (service, cmd_tx)
     }
