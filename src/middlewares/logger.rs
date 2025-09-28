@@ -10,10 +10,6 @@ pub struct Logger;
 
 #[async_trait]
 impl Middleware for Logger {
-    fn name(&self) -> &str {
-        "logger"
-    }
-
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         tracing::info!("logger running...");
         cancel.cancelled().await;

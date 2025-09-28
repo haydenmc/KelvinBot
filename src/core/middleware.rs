@@ -12,20 +12,20 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy)]
 pub enum Verdict {
     Continue,
-    Stop,
+    #[allow(dead_code)]
+    Stop, // This will be used eventually.
 }
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
-    fn name(&self) -> &str;
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
     fn on_event(&self, event: &Event) -> Result<Verdict>;
 }
 
 /// Instantiates a list of Middleware based on given config
 pub fn instantiate_middleware_from_config(
-    config: &Config,
-    cmd_tx: &Sender<Command>,
+    _config: &Config,
+    _cmd_tx: &Sender<Command>,
 ) -> Vec<Arc<dyn Middleware>> {
     // TODO
     vec![Arc::new(Logger {})]

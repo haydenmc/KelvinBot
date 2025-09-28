@@ -5,16 +5,9 @@ use matrix_sdk::{
     Client, Room, RoomState,
     config::SyncSettings,
     encryption::{self, EncryptionSettings},
-    ruma::{
-        events::{
-            True,
-            message::OriginalSyncMessageEvent,
-            room::{
-                member::{MembershipState, StrippedRoomMemberEvent},
-                message::{MessageType, OriginalSyncRoomMessageEvent, SyncRoomMessageEvent},
-            },
-        },
-        user_id,
+    ruma::events::room::{
+        member::{MembershipState, StrippedRoomMemberEvent},
+        message::{MessageType, OriginalSyncRoomMessageEvent},
     },
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -24,11 +17,8 @@ use tracing::{error, info, warn};
 use url::Url;
 
 use crate::core::{
-    event::{
-        Event,
-        EventKind::{self, RoomMessage},
-    },
-    service::{self, Service, ServiceId},
+    event::{Event, EventKind},
+    service::{Service, ServiceId},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -116,7 +106,7 @@ impl MatrixService {
         let service_id = self.id.clone();
         let evt_tx = self.evt_tx.clone();
         client.add_event_handler(
-            |event: OriginalSyncRoomMessageEvent, room: Room, client: Client| async move {
+            |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| async move {
                 if room.state() != RoomState::Joined {
                     return;
                 }
@@ -161,9 +151,6 @@ impl MatrixService {
 }
 #[async_trait::async_trait]
 impl Service for MatrixService {
-    fn id(&self) -> service::ServiceId {
-        self.id.clone()
-    }
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         info!(service_id=%self.id, homeserver_url=%self.homeserver_url, user_id=%self.user_id,
             "starting matrix service");
@@ -201,7 +188,7 @@ impl Service for MatrixService {
                     info!(service=%self.id, "shutdown requested");
                     break;
                 }
-                result = client.sync(SyncSettings::default()) => {
+                _result = client.sync(SyncSettings::default()) => {
                     warn!("matrix sync returned");
                 }
             }

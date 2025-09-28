@@ -29,7 +29,6 @@ impl fmt::Display for ServiceId {
 
 #[async_trait::async_trait]
 pub trait Service: Send + Sync {
-    fn id(&self) -> ServiceId;
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
 }
 

@@ -8,9 +8,7 @@ use crate::core::event::Event;
 use crate::core::middleware::{Middleware, Verdict};
 use crate::core::service::{Service, ServiceId};
 
-pub enum Command {
-    Unknown,
-}
+pub enum Command {}
 
 pub struct Bus {
     // Receive events from services
@@ -69,7 +67,7 @@ impl Bus {
                         }
                     }
                 }
-                maybe_cmd = self.cmd_rx.recv() => {
+                _maybe_cmd = self.cmd_rx.recv() => {
                     info!("command received");
                     // let Some(cmd) = maybe_cmd else { break };
                     // TODO: match command, dispatch to service

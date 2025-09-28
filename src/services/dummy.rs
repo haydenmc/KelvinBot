@@ -4,7 +4,7 @@ use tracing::info;
 
 use crate::core::{
     event::{Event, EventKind},
-    service::{self, Service, ServiceId},
+    service::{Service, ServiceId},
 };
 
 pub struct DummyService {
@@ -15,10 +15,6 @@ pub struct DummyService {
 
 #[async_trait::async_trait]
 impl Service for DummyService {
-    fn id(&self) -> service::ServiceId {
-        self.id.clone()
-    }
-
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_millis(self.interval_ms));

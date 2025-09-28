@@ -20,11 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::core::{
-    bus,
-    config::{Config, load_from_env},
-    middleware, service,
-};
+use crate::core::{bus, config::load_from_env, middleware, service};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
