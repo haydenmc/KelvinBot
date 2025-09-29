@@ -10,7 +10,6 @@ on:
         required: true
         default: 'latest'
 
-  id: push
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: haydenmc/kelvin-bot
