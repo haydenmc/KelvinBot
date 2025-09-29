@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: kelvin-bot
+  IMAGE_NAME: haydenmc/kelvin-bot
 
 jobs:
   build-and-push:
