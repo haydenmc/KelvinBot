@@ -10,6 +10,7 @@ on:
         required: true
         default: 'latest'
 
+  id: push
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: haydenmc/kelvin-bot
@@ -49,9 +50,11 @@ jobs:
           type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
     - name: Build and push Docker image
+      id: push
       uses: docker/build-push-action@v5
       with:
         context: .
+        file: ./Dockerfile
         platforms: linux/amd64,linux/arm64
         push: true
         tags: ${{ steps.meta.outputs.tags }}
@@ -63,5 +66,5 @@ jobs:
       uses: actions/attest-build-provenance@v3
       with:
         subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        subject-digest: ${{ steps.build.outputs.digest }}
+        subject-digest: ${{ steps.push.outputs.digest }}
         push-to-registry: true
