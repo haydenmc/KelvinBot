@@ -67,7 +67,7 @@ impl MatrixService {
             .sqlite_store(sqlite_path, db_passphrase.expose_secret().into())
             .with_encryption_settings(EncryptionSettings {
                 backup_download_strategy: encryption::BackupDownloadStrategy::Manual,
-                auto_enable_cross_signing: false,
+                auto_enable_cross_signing: true,
                 auto_enable_backups: false,
             })
             .build()
@@ -181,6 +181,7 @@ impl Service for MatrixService {
         info!(service_id=%self.id, homeserver_url=%self.client.homeserver(), user_id=%self.user_id,
             "starting matrix service");
 
+        // Attempt to authenticate
         match self
             .client
             .matrix_auth()
@@ -197,9 +198,30 @@ impl Service for MatrixService {
                 bail!("login error")
             }
         }
+
         // An initial sync to set up state and so our bot doesn't respond to old messages.
         self.client.sync_once(SyncSettings::default()).await?;
+
+        // Verify our own device
+        if let Some(device) = self.client.encryption().get_own_device().await? {
+            if !device.is_verified() {
+                info!("matrix device is not verified; self-verifying...");
+                if let Err(e) = device.verify().await {
+                    error!(error=%e, "could not self-verify device");
+                } else {
+                    info!("device self-verified!");
+                }
+            } else {
+                info!("matrix device is already verified");
+            }
+        } else {
+            error!("could not fetch matrix device");
+        }
+
+        // Set up event handlers
         self.setup_event_handlers().await?;
+
+        // Begin listening
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
