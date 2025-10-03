@@ -1,19 +1,3 @@
-pub mod core {
-    pub mod bus;
-    pub mod config;
-    pub mod event;
-    pub mod middleware;
-    pub mod service;
-}
-pub mod services {
-    pub mod dummy;
-    pub mod matrix;
-}
-pub mod middlewares {
-    pub mod echo;
-    pub mod logger;
-}
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::core::{bus, config::load_from_env, middleware, service};
+use kelvin_bot::core::{bus, config::load_from_env, middleware, service};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
