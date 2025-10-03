@@ -96,4 +96,10 @@ impl Service for MockService {
 
         Ok(())
     }
+
+    async fn handle_command(&self, command: kelvin_bot::core::bus::Command) -> anyhow::Result<()> {
+        // For mock service, just log the command - tests can verify behavior through other means
+        tracing::debug!(?command, "mock service received command");
+        Ok(())
+    }
 }

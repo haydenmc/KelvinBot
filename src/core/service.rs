@@ -8,6 +8,7 @@ use tracing::error;
 
 use crate::{
     core::{
+        bus::Command,
         config::{Config, ServiceKind},
         event::Event,
     },
@@ -30,13 +31,14 @@ impl fmt::Display for ServiceId {
 #[async_trait::async_trait]
 pub trait Service: Send + Sync {
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
+    async fn handle_command(&self, command: Command) -> Result<()>;
 }
 
 /// Instantiates a map of Services based on given config
-pub fn instantiate_services_from_config(
+pub async fn instantiate_services_from_config(
     config: &Config,
     evt_tx: &Sender<Event>,
-) -> HashMap<ServiceId, Arc<dyn Service>> {
+) -> Result<HashMap<ServiceId, Arc<dyn Service>>> {
     let mut services: HashMap<ServiceId, Arc<dyn Service>> = HashMap::new();
     for (id, scfg) in &config.services {
         let service_id = ServiceId(id.clone());
@@ -50,7 +52,7 @@ pub fn instantiate_services_from_config(
                 services.insert(service_id, svc);
             }
             ServiceKind::Matrix { homeserver_url, user_id, password, device_id, db_passphrase } => {
-                let svc = Arc::new(MatrixService::new(
+                match MatrixService::create(
                     service_id.clone(),
                     homeserver_url.clone(),
                     MatrixUserId(user_id.clone()),
@@ -59,11 +61,19 @@ pub fn instantiate_services_from_config(
                     evt_tx.clone(),
                     config.data_directory.clone(),
                     db_passphrase.clone(),
-                ));
-                services.insert(service_id, svc);
+                )
+                .await
+                {
+                    Ok(svc) => {
+                        services.insert(service_id, Arc::new(svc));
+                    }
+                    Err(e) => {
+                        error!(id=%id, error=%e, "could not instantiate matrix service");
+                    }
+                }
             }
             _ => error!(id=%id, "unknown service kind, skipping"),
         }
     }
-    services
+    Ok(services)
 }

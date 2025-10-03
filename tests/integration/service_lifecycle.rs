@@ -13,7 +13,9 @@ async fn test_service_instantiation_from_config() {
     let config = create_test_config();
     let (evt_tx, _evt_rx) = create_event_channel(10);
 
-    let services = instantiate_services_from_config(&config, &evt_tx);
+    let services = instantiate_services_from_config(&config, &evt_tx)
+        .await
+        .expect("Failed to instantiate services");
 
     assert_eq!(services.len(), 1);
     assert!(services.contains_key(&kelvin_bot::core::service::ServiceId("test_dummy".to_string())));
@@ -24,7 +26,9 @@ async fn test_service_instantiation_with_multiple_services() {
     let config = create_multi_service_config();
     let (evt_tx, _evt_rx) = create_event_channel(10);
 
-    let services = instantiate_services_from_config(&config, &evt_tx);
+    let services = instantiate_services_from_config(&config, &evt_tx)
+        .await
+        .expect("Failed to instantiate services");
 
     assert_eq!(services.len(), 2);
     assert!(services.contains_key(&kelvin_bot::core::service::ServiceId("dummy1".to_string())));
@@ -48,7 +52,9 @@ async fn test_bus_creation_and_startup() {
     let (cmd_tx, cmd_rx) = create_command_channel(10);
     let (evt_tx, evt_rx) = create_event_channel(10);
 
-    let services = instantiate_services_from_config(&config, &evt_tx);
+    let services = instantiate_services_from_config(&config, &evt_tx)
+        .await
+        .expect("Failed to instantiate services");
     let middlewares = instantiate_middleware_from_config(&config, &cmd_tx);
 
     let mut bus = Bus::new(evt_rx, cmd_rx, services, middlewares);
@@ -76,7 +82,9 @@ async fn test_cancellation_propagates_to_services() {
     let (cmd_tx, cmd_rx) = create_command_channel(10);
     let (evt_tx, evt_rx) = create_event_channel(10);
 
-    let services = instantiate_services_from_config(&config, &evt_tx);
+    let services = instantiate_services_from_config(&config, &evt_tx)
+        .await
+        .expect("Failed to instantiate services");
     let middlewares = instantiate_middleware_from_config(&config, &cmd_tx);
 
     let mut bus = Bus::new(evt_rx, cmd_rx, services, middlewares);

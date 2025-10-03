@@ -8,7 +8,11 @@ use crate::core::event::Event;
 use crate::core::middleware::{Middleware, Verdict};
 use crate::core::service::{Service, ServiceId};
 
-pub enum Command {}
+#[derive(Debug, Clone)]
+pub enum Command {
+    SendDirectMessage { service_id: ServiceId, user_id: String, body: String },
+    SendRoomMessage { service_id: ServiceId, room_id: String, body: String },
+}
 
 pub struct Bus {
     // Receive events from services
@@ -70,10 +74,24 @@ impl Bus {
                         }
                     }
                 }
-                _maybe_cmd = self.cmd_rx.recv() => {
+                maybe_cmd = self.cmd_rx.recv() => {
                     info!("command received");
-                    // let Some(cmd) = maybe_cmd else { break };
-                    // TODO: match command, dispatch to service
+                    let Some(cmd) = maybe_cmd else { break };
+
+                    // Extract service_id from command
+                    let service_id = match &cmd {
+                        Command::SendDirectMessage { service_id, .. } => service_id.clone(),
+                        Command::SendRoomMessage { service_id, .. } => service_id.clone(),
+                    };
+
+                    // Dispatch command to appropriate service
+                    if let Some(service) = self.services.get(&service_id) {
+                        if let Err(e) = service.handle_command(cmd).await {
+                            tracing::error!(service_id=%service_id, error=%e, "failed to handle command");
+                        }
+                    } else {
+                        tracing::warn!(service_id=%service_id, "command sent to unknown service");
+                    }
                 }
             }
         }

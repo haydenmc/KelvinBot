@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::core::bus::Command;
 use crate::core::config::Config;
 use crate::core::event::Event;
-use crate::middlewares::logger::Logger;
+use crate::middlewares::{echo::Echo, logger::Logger};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
@@ -25,8 +25,7 @@ pub trait Middleware: Send + Sync {
 /// Instantiates a list of Middleware based on given config
 pub fn instantiate_middleware_from_config(
     _config: &Config,
-    _cmd_tx: &Sender<Command>,
+    cmd_tx: &Sender<Command>,
 ) -> Vec<Arc<dyn Middleware>> {
-    // TODO
-    vec![Arc::new(Logger {})]
+    vec![Arc::new(Logger {}), Arc::new(Echo::new(cmd_tx.clone()))]
 }

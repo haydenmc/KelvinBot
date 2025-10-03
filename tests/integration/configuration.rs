@@ -16,7 +16,9 @@ async fn test_unknown_service_kind_handling() {
     let config: Config = toml::from_str(config_str).expect("Failed to parse config");
     let (evt_tx, _evt_rx) = create_event_channel(10);
 
-    let services = instantiate_services_from_config(&config, &evt_tx);
+    let services = instantiate_services_from_config(&config, &evt_tx)
+        .await
+        .expect("Failed to instantiate services");
 
     // Unknown service types should be skipped
     assert_eq!(services.len(), 0);
@@ -38,7 +40,9 @@ async fn test_configuration_with_mixed_service_types() {
     let config = Config { services, data_directory: TempDir::new().unwrap().path().to_path_buf() };
 
     let (evt_tx, _evt_rx) = create_event_channel(10);
-    let instantiated_services = instantiate_services_from_config(&config, &evt_tx);
+    let instantiated_services = instantiate_services_from_config(&config, &evt_tx)
+        .await
+        .expect("Failed to instantiate services");
 
     // Only the valid dummy service should be instantiated
     assert_eq!(instantiated_services.len(), 1);
