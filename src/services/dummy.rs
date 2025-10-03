@@ -3,6 +3,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::core::{
+    bus::Command,
     event::{Event, EventKind},
     service::{Service, ServiceId},
 };
@@ -40,6 +41,18 @@ impl Service for DummyService {
             }
         }
         // Perform final cleanup here
+        Ok(())
+    }
+
+    async fn handle_command(&self, command: Command) -> Result<()> {
+        match command {
+            Command::SendDirectMessage { user_id, body, .. } => {
+                info!(service=%self.id, user_id=%user_id, body=%body, "dummy service: would send DM");
+            }
+            Command::SendRoomMessage { room_id, body, .. } => {
+                info!(service=%self.id, room_id=%room_id, body=%body, "dummy service: would send room message");
+            }
+        }
         Ok(())
     }
 }

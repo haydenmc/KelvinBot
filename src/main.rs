@@ -10,6 +10,7 @@ pub mod services {
     pub mod matrix;
 }
 pub mod middlewares {
+    pub mod echo;
     pub mod logger;
 }
 
@@ -37,7 +38,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let (evt_tx, evt_rx) = bus::create_event_channel(1024);
 
     info!("instantiating services...");
-    let services = service::instantiate_services_from_config(&cfg, &evt_tx);
+    let services = service::instantiate_services_from_config(&cfg, &evt_tx).await?;
 
     info!("instantiating middlewares...");
     let middlewares: Vec<Arc<dyn middleware::Middleware>> =
