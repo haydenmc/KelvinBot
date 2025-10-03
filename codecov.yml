@@ -1,0 +1,8 @@
+coverage:
+  # We only want coverage reports -- don't block PRs
+  status:
+    project: off
+    patch: off
+comment:
+    layout: "condensed_header, condensed_files, condensed_footer"
+    hide_project_coverage: TRUE
