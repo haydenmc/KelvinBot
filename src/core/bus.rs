@@ -10,16 +10,8 @@ use crate::core::service::{Service, ServiceId};
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    SendDirectMessage {
-        service_id: ServiceId,
-        user_id: String,
-        body: String,
-    },
-    SendRoomMessage {
-        service_id: ServiceId,
-        room_id: String,
-        body: String,
-    },
+    SendDirectMessage { service_id: ServiceId, user_id: String, body: String },
+    SendRoomMessage { service_id: ServiceId, room_id: String, body: String },
 }
 
 pub struct Bus {

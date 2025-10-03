@@ -27,8 +27,5 @@ pub fn instantiate_middleware_from_config(
     _config: &Config,
     cmd_tx: &Sender<Command>,
 ) -> Vec<Arc<dyn Middleware>> {
-    vec![
-        Arc::new(Logger {}),
-        Arc::new(Echo::new(cmd_tx.clone())),
-    ]
+    vec![Arc::new(Logger {}), Arc::new(Echo::new(cmd_tx.clone()))]
 }

@@ -2,18 +2,21 @@ use std::{fmt, path::PathBuf};
 
 use anyhow::{Result, bail};
 use matrix_sdk::{
-    Client, Room, RoomState,
+    Client, Room, RoomMemberships, RoomState,
     config::SyncSettings,
     encryption::{self, EncryptionSettings},
-    ruma::events::room::{
-        member::{MembershipState, StrippedRoomMemberEvent},
-        message::{MessageType, OriginalSyncRoomMessageEvent},
+    ruma::{
+        RoomId, UserId,
+        events::room::{
+            member::{MembershipState, StrippedRoomMemberEvent},
+            message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+        },
     },
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 use crate::core::{
@@ -71,6 +74,27 @@ impl MatrixService {
             .await?;
 
         Ok(Self { id, user_id, password, device_id, evt_tx, client })
+    }
+
+    async fn find_or_create_dm(&self, user_id: &UserId) -> Result<Room, matrix_sdk::Error> {
+        // First, try to find existing DM room
+        for room in self.client.rooms() {
+            if room.state() == RoomState::Joined {
+                // Check if it's a DM with this specific user
+                if let Ok(true) = room.is_direct().await
+                    && let Ok(members) = room.members(RoomMemberships::ACTIVE).await
+                    && members.len() == 2
+                    && members.iter().any(|m| m.user_id() == user_id)
+                {
+                    debug!("found existing DM room: {}", room.room_id());
+                    return Ok(room);
+                }
+            }
+        }
+
+        // If not found, create new DM room
+        debug!("creating new DM room for {}", user_id);
+        self.client.create_dm(user_id).await
     }
 
     async fn setup_event_handlers(&self) -> anyhow::Result<()> {
@@ -191,16 +215,57 @@ impl Service for MatrixService {
     }
 
     async fn handle_command(&self, command: Command) -> Result<()> {
-        // For now, just log the command since implementing actual Matrix sending
-        // requires storing the client instance, which would require architectural changes
         match command {
             Command::SendDirectMessage { user_id, body, .. } => {
-                info!(service=%self.id, user_id=%user_id, body=%body,
-                    "matrix service: would send DM");
+                info!(service=%self.id, user_id=%user_id, body=%body, "sending DM");
+
+                // Parse the user ID
+                let user_id = match UserId::parse(&user_id) {
+                    Ok(uid) => uid,
+                    Err(e) => {
+                        error!(user_id=%user_id, error=%e, "invalid user ID");
+                        return Ok(());
+                    }
+                };
+
+                // Find existing or create new DM room
+                match self.find_or_create_dm(&user_id).await {
+                    Ok(room) => {
+                        let content = RoomMessageEventContent::text_plain(&body);
+                        if let Err(e) = room.send(content).await {
+                            error!(error=%e, "failed to send DM");
+                        } else {
+                            debug!("DM sent successfully");
+                        }
+                    }
+                    Err(e) => {
+                        error!(error=%e, user_id=%user_id, "failed to find/create DM room");
+                    }
+                }
             }
             Command::SendRoomMessage { room_id, body, .. } => {
-                info!(service=%self.id, room_id=%room_id, body=%body,
-                    "matrix service: would send room message");
+                info!(service=%self.id, room_id=%room_id, body=%body, "sending room message");
+
+                // Parse the room ID
+                let room_id = match RoomId::parse(&room_id) {
+                    Ok(rid) => rid,
+                    Err(e) => {
+                        error!(room_id=%room_id, error=%e, "invalid room ID");
+                        return Ok(());
+                    }
+                };
+
+                // Get the room and send message
+                if let Some(room) = self.client.get_room(&room_id) {
+                    let content = RoomMessageEventContent::text_plain(&body);
+                    if let Err(e) = room.send(content).await {
+                        error!(error=%e, "failed to send room message");
+                    } else {
+                        debug!("room message sent successfully");
+                    }
+                } else {
+                    warn!(room_id=%room_id, "room not found or not joined");
+                }
             }
         }
         Ok(())
