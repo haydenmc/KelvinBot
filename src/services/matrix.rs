@@ -69,8 +69,8 @@ impl MatrixService {
             .sqlite_store(sqlite_path, db_passphrase.expose_secret().into())
             .with_encryption_settings(EncryptionSettings {
                 backup_download_strategy: encryption::BackupDownloadStrategy::Manual,
-                auto_enable_cross_signing: false,
-                auto_enable_backups: false,
+                auto_enable_cross_signing: true,  // Auto-load existing keys from DB
+                auto_enable_backups: false,        // Manual backup control
             })
             .build()
             .await?;
@@ -81,6 +81,8 @@ impl MatrixService {
     async fn setup_encryption(&self) -> Result<()> {
         let encryption = self.client.encryption();
         let recovery = encryption.recovery();
+
+        encryption.wait_for_e2ee_initialization_tasks().await;
 
         // Check cross-signing status (no auto-enable, so we fully control it)
         if let Some(status) = encryption.cross_signing_status().await {
@@ -115,9 +117,29 @@ impl MatrixService {
         };
 
         if already_setup {
-            info!("device already cross-signed, keys are valid");
+            info!("device already cross-signed with valid keys - skipping setup");
         } else {
-            // Need to set up or recover keys
+            // Check if we have keys locally but device isn't cross-signed yet
+            let has_local_keys = if let Some(status) = encryption.cross_signing_status().await {
+                status.has_master && status.has_self_signing && status.has_user_signing
+            } else {
+                false
+            };
+
+            if has_local_keys {
+                info!("have local cross-signing keys, just need to verify device");
+                // Self-verify device to sign it with existing keys
+                if let Some(dev) = encryption.get_own_device().await? {
+                    if !dev.is_verified() {
+                        info!("self-verifying device with existing keys...");
+                        dev.verify().await?;
+                        info!("device verified and cross-signed");
+                    }
+                }
+                return Ok(());
+            }
+
+            // No local keys - need to set up or recover
             let backup_exists = encryption
                 .backups()
                 .fetch_exists_on_server()
@@ -127,7 +149,7 @@ impl MatrixService {
             let mut recovered = false;
 
             if backup_exists {
-                info!("backup exists on server, attempting recovery...");
+                info!("no local keys but backup exists, attempting recovery...");
                 match recovery.recover(self.recovery_passphrase.expose_secret()).await {
                     Ok(_) => {
                         info!("successfully recovered from backup");
@@ -141,9 +163,19 @@ impl MatrixService {
 
             if !recovered {
                 if backup_exists {
-                    warn!("recovery failed - local keys don't match server backup");
-                    warn!("delete ./data/matrix directory and restart to create fresh identity");
-                    bail!("incompatible encryption state - manual cleanup required");
+                    warn!("recovery failed - backup has incompatible keys, deleting backup...");
+
+                    // Delete the incompatible backup so we can create fresh
+                    if let Err(e) = encryption.backups().disable_and_delete().await {
+                        error!(error=%e, "failed to disable/delete backup");
+                    }
+
+                    // Reset identity to clear any partial state
+                    if let Err(e) = recovery.reset_identity().await {
+                        error!(error=%e, "failed to reset identity");
+                    } else {
+                        info!("identity reset, will create fresh backup");
+                    }
                 } else {
                     info!("no backup found, creating new identity...");
                 }
@@ -300,14 +332,15 @@ impl Service for MatrixService {
             }
         }
 
-        // Set up encryption with recovery
+        // An initial sync to set up state and so our bot doesn't respond to old messages.
+        // This also fetches cross-signing keys from the server.
+        self.client.sync_once(SyncSettings::default()).await?;
+
+        // Set up encryption with recovery (after sync so keys are fetched)
         if let Err(e) = self.setup_encryption().await {
             error!(error=%e, "failed to set up encryption");
             bail!("failed to set up encryption")
         }
-
-        // An initial sync to set up state and so our bot doesn't respond to old messages.
-        self.client.sync_once(SyncSettings::default()).await?;
 
         // Set up event handlers
         self.setup_event_handlers().await?;

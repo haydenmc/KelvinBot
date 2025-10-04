@@ -149,30 +149,46 @@ The Matrix service (`src/services/matrix.rs`) has special considerations:
 
 ### E2E Encryption & Cross-Signing (CURRENT WORK IN PROGRESS)
 
-**Status:** Implementing manual cross-signing setup with recovery passphrase for cross-device verification.
+**Status:** Cross-signing keys now persist correctly across restarts, but devices still show as unverified to recipients.
 
 **Current Implementation (`src/services/matrix.rs:setup_encryption()`):**
-- `auto_enable_cross_signing: false` - Manual control to avoid SDK auto-enable races
-- `auto_enable_backups: false` - Manual backup creation with passphrase
-- `backup_download_strategy: Manual` - We explicitly handle recovery
+- `auto_enable_cross_signing: true` - Let SDK auto-load existing keys from local DB
+- `auto_enable_backups: false` - Manual backup creation with passphrase for control
+- `backup_download_strategy: Manual` - Explicit recovery handling
+- **CRITICAL:** `setup_encryption()` must be called AFTER first sync (line 337-343)
 
 **Setup Flow:**
-1. **Check local state:** If device has all cross-signing keys (`has_master/has_self_signing/has_user_signing=true`) AND is cross-signed by owner (`is_cross_signed_by_owner()=true`), skip setup
-2. **Check server backup:** Use `encryption.backups().fetch_exists_on_server()` to detect backup
-3. **Recovery path:** If backup exists, call `recovery.recover(RECOVERY_PASSPHRASE)` to import keys from server
-4. **Fresh setup path:** If no backup OR recovery fails, call `recovery.enable().with_passphrase(RECOVERY_PASSPHRASE)` to create new identity
-5. **Self-verify:** Call `device.verify()` on own device
+1. **Login** to Matrix homeserver with credentials
+2. **Sync once** - SDK fetches cross-signing public keys from server and loads private keys from local DB
+3. **Check if already setup:** If device has all cross-signing keys (`has_master/has_self_signing/has_user_signing=true`) AND is cross-signed by owner (`is_cross_signed_by_owner()=true`), skip setup
+4. **Check if has local keys:** If has all 3 keys locally but device not cross-signed, just verify the device
+5. **Check server backup:** Use `encryption.backups().fetch_exists_on_server()` to detect backup
+6. **Recovery path:** If backup exists, call `recovery.recover(RECOVERY_PASSPHRASE)` to import keys from server
+7. **Handle recovery failure:** If recovery fails due to key mismatch, delete incompatible backup and reset identity
+8. **Fresh setup path:** If no backup OR after reset, call `recovery.enable().with_passphrase(RECOVERY_PASSPHRASE)` to create new identity
+9. **Self-verify:** Call `device.verify()` on own device to mark it as verified
 
-**Key Discovery:**
+**Key Discovery - Critical SDK Behavior:**
 - Cross-signing keys are stored in TWO places: local SQLite DB AND server's secret storage (encrypted backup)
-- The SDK will auto-import from secret storage if `auto_enable_*: true`, but this races with our manual logic
-- Local DB keys can be DIFFERENT from server backup keys, causing mismatch errors
+- **The SDK REQUIRES a sync before cross-signing status is available** - keys won't show as present until after the first sync, even if they exist in the local DB
+- Calling `setup_encryption()` before first sync will always see `has_master=false` and trigger unnecessary recovery/reset
+- With `auto_enable_cross_signing: true`, the SDK will automatically load existing keys from the DB during sync
 - When mismatch detected: "The public key of the imported private key doesn't match to the public key that was uploaded to the server"
 
+**Fixed Issues:**
+- ✅ Keys not persisting across restarts - Fixed by moving `setup_encryption()` after first sync
+- ✅ Infinite backup version incrementing - Fixed by proper timing of encryption setup
+- ✅ Race conditions with SDK auto-enable - Using `auto_enable_cross_signing: true` with manual backup control
+
 **Current Issue:**
-- After multiple resets, local DB may have stale cross-signing keys that don't match server backup
-- Recovery attempts import server keys, SDK detects public key mismatch with what's on server, clears local keys
-- **Solution:** Delete `./data/matrix/` directory completely when getting mismatch errors to start fresh
+- ❌ Device shows as unverified to message recipients even though:
+  - Cross-signing keys are set up correctly
+  - Device is self-verified via `device.verify()`
+  - Recovery backup exists and works across device changes
+- **Next Steps:** Need to investigate why `device.verify()` isn't making the device show as verified to other users
+  - Possible causes: Device needs to be verified by another device, not just self-verified
+  - May need to use SAS verification or other verification methods
+  - Could be timing issue where verification state hasn't synced to other users yet
 
 **Configuration Required:**
 ```bash
@@ -185,11 +201,13 @@ The setup logs key status:
 - `has_master/has_self_signing/has_user_signing` - Which cross-signing keys exist locally
 - `is_verified` - Whether device is locally verified
 - `is_cross_signed` - Whether device is signed by cross-signing keys (KEY INDICATOR for other users)
+- All three cross-signing key flags should be `true` after first setup
 
 **Testing Cross-Device Verification:**
 1. First run: Creates cross-signing identity + backup with passphrase
-2. Change `DEVICE_ID` and restart: Should recover from backup, device gets auto-signed
-3. Users who verified bot's identity once will trust all future devices automatically
+2. Change `DEVICE_ID` and restart: Should recover from backup, load keys successfully
+3. Verify that `has_master=true` on subsequent restarts (keys persisting correctly)
+4. Check with message recipient whether device shows as verified (currently failing)
 
 ## Current Branch Context
 
