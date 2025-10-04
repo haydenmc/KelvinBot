@@ -40,6 +40,7 @@ pub struct MatrixService {
     user_id: MatrixUserId,
     password: SecretString,
     device_id: String,
+    recovery_passphrase: SecretString,
     evt_tx: tokio::sync::mpsc::Sender<Event>,
     client: Client,
 }
@@ -55,6 +56,7 @@ impl MatrixService {
         evt_tx: tokio::sync::mpsc::Sender<Event>,
         data_directory: PathBuf,
         db_passphrase: SecretString,
+        recovery_passphrase: SecretString,
     ) -> Result<Self> {
         // Create storage directory
         let mut sqlite_path = data_directory.clone();
@@ -67,13 +69,112 @@ impl MatrixService {
             .sqlite_store(sqlite_path, db_passphrase.expose_secret().into())
             .with_encryption_settings(EncryptionSettings {
                 backup_download_strategy: encryption::BackupDownloadStrategy::Manual,
-                auto_enable_cross_signing: true,
+                auto_enable_cross_signing: false,
                 auto_enable_backups: false,
             })
             .build()
             .await?;
 
-        Ok(Self { id, user_id, password, device_id, evt_tx, client })
+        Ok(Self { id, user_id, password, device_id, recovery_passphrase, evt_tx, client })
+    }
+
+    async fn setup_encryption(&self) -> Result<()> {
+        let encryption = self.client.encryption();
+        let recovery = encryption.recovery();
+
+        // Check cross-signing status (no auto-enable, so we fully control it)
+        if let Some(status) = encryption.cross_signing_status().await {
+            info!(
+                has_master=%status.has_master,
+                has_self_signing=%status.has_self_signing,
+                has_user_signing=%status.has_user_signing,
+                "cross-signing status"
+            );
+        }
+
+        // Check if we already have valid keys locally
+        let device = encryption.get_own_device().await?;
+        let already_setup = if let Some(ref dev) = device {
+            let is_cross_signed = dev.is_cross_signed_by_owner();
+            let is_verified = dev.is_verified();
+            info!(
+                device_id=%dev.device_id(),
+                is_verified=%is_verified,
+                is_cross_signed=%is_cross_signed,
+                "own device status (before any recovery)"
+            );
+
+            // Device is fully set up if it has cross-signing keys AND is cross-signed
+            if let Some(status) = encryption.cross_signing_status().await {
+                is_cross_signed && status.has_master && status.has_self_signing && status.has_user_signing
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if already_setup {
+            info!("device already cross-signed, keys are valid");
+        } else {
+            // Need to set up or recover keys
+            let backup_exists = encryption
+                .backups()
+                .fetch_exists_on_server()
+                .await
+                .unwrap_or(false);
+
+            let mut recovered = false;
+
+            if backup_exists {
+                info!("backup exists on server, attempting recovery...");
+                match recovery.recover(self.recovery_passphrase.expose_secret()).await {
+                    Ok(_) => {
+                        info!("successfully recovered from backup");
+                        recovered = true;
+                    }
+                    Err(e) => {
+                        error!(error=%e, "recovery failed - will reset identity");
+                    }
+                }
+            }
+
+            if !recovered {
+                if backup_exists {
+                    warn!("recovery failed - local keys don't match server backup");
+                    warn!("delete ./data/matrix directory and restart to create fresh identity");
+                    bail!("incompatible encryption state - manual cleanup required");
+                } else {
+                    info!("no backup found, creating new identity...");
+                }
+
+                // Create fresh backup with passphrase
+                match recovery
+                    .enable()
+                    .wait_for_backups_to_upload()
+                    .with_passphrase(self.recovery_passphrase.expose_secret())
+                    .await
+                {
+                    Ok(_recovery_key) => {
+                        info!("recovery enabled successfully with passphrase");
+                    }
+                    Err(e) => {
+                        error!(error=%e, "failed to enable recovery");
+                    }
+                }
+            }
+
+            // Self-verify device after setup/recovery
+            if let Some(dev) = encryption.get_own_device().await? {
+                if !dev.is_verified() {
+                    info!("self-verifying device...");
+                    dev.verify().await?;
+                    info!("device verified");
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn find_or_create_dm(&self, user_id: &UserId) -> Result<Room, matrix_sdk::Error> {
@@ -199,24 +300,14 @@ impl Service for MatrixService {
             }
         }
 
+        // Set up encryption with recovery
+        if let Err(e) = self.setup_encryption().await {
+            error!(error=%e, "failed to set up encryption");
+            bail!("failed to set up encryption")
+        }
+
         // An initial sync to set up state and so our bot doesn't respond to old messages.
         self.client.sync_once(SyncSettings::default()).await?;
-
-        // Verify our own device
-        if let Some(device) = self.client.encryption().get_own_device().await? {
-            if !device.is_verified() {
-                info!("matrix device is not verified; self-verifying...");
-                if let Err(e) = device.verify().await {
-                    error!(error=%e, "could not self-verify device");
-                } else {
-                    info!("device self-verified!");
-                }
-            } else {
-                info!("matrix device is already verified");
-            }
-        } else {
-            error!("could not fetch matrix device");
-        }
 
         // Set up event handlers
         self.setup_event_handlers().await?;

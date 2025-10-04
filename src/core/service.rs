@@ -51,7 +51,14 @@ pub async fn instantiate_services_from_config(
                 });
                 services.insert(service_id, svc);
             }
-            ServiceKind::Matrix { homeserver_url, user_id, password, device_id, db_passphrase } => {
+            ServiceKind::Matrix {
+                homeserver_url,
+                user_id,
+                password,
+                device_id,
+                db_passphrase,
+                recovery_passphrase,
+            } => {
                 match MatrixService::create(
                     service_id.clone(),
                     homeserver_url.clone(),
@@ -61,6 +68,7 @@ pub async fn instantiate_services_from_config(
                     evt_tx.clone(),
                     config.data_directory.clone(),
                     db_passphrase.clone(),
+                    recovery_passphrase.clone(),
                 )
                 .await
                 {
