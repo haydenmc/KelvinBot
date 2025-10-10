@@ -31,7 +31,7 @@ KELVIN__SERVICES__<name>__INTERVAL_MS=1000  # Optional, defaults to 1000ms
 ```
 
 ### Matrix Service
-Connects to Matrix homeservers for real-time messaging.
+Connects to Matrix homeservers for real-time messaging with E2EE support.
 
 **Configuration:**
 ```bash
@@ -41,7 +41,45 @@ KELVIN__SERVICES__<name>__USER_ID=@bot:example.com
 KELVIN__SERVICES__<name>__PASSWORD=your_password
 KELVIN__SERVICES__<name>__DEVICE_ID=KELVINBOT_01
 KELVIN__SERVICES__<name>__DB_PASSPHRASE=encryption_key
+KELVIN__SERVICES__<name>__VERIFICATION_DEVICE_ID=YOURDEVICEID
 ```
+
+**Setting up E2EE Verification:**
+
+The Matrix service requires interactive device verification to send/receive encrypted messages. Follow these steps:
+
+1. **Log in to Element with the bot's account:**
+   - Open Element (web, desktop, or mobile) in a separate session
+   - Log in using the **same credentials as the bot** (`USER_ID` and `PASSWORD`)
+   - Complete the initial security setup if this is the first time logging in
+   - Ensure this Element session is verified (you may need to verify with another existing session or use the recovery key)
+
+2. **Get your Element device ID:**
+   - In Element, go to Settings → Security & Privacy → Session
+   - Find your Element device ID (e.g., `ABCDEFGHIJ`)
+   - This is the device ID of your verified Element session
+
+3. **Configure the bot:**
+   - Add `VERIFICATION_DEVICE_ID` to your `.env` with your Element device ID from step 2
+   - This tells the bot which device to verify against
+
+4. **Start the bot and verify:**
+   - Start the bot: `cargo run`
+   - The bot will send a verification request to your Element session
+   - In Element, accept the verification request
+   - Click "Start verification" when prompted
+   - **Watch the bot logs for emoji codes** - they will be printed to the console
+   - Compare the emojis in the bot logs with those shown in Element
+   - If they match, click "They match" in Element
+   - The bot will automatically confirm and complete verification
+
+5. **Verification persists:**
+   - Once verified, the bot's device is cross-signed
+   - Future restarts won't require re-verification (unless you change `DEVICE_ID`)
+   - The bot will refuse to start if verification fails
+   - You can close your Element session after verification is complete
+
+**Important:** The bot will **not start** if it cannot complete verification. This ensures all encrypted messages are properly secured.
 
 ## Middlewares
 
@@ -84,6 +122,7 @@ KELVIN__SERVICES__matrix_main__USER_ID=@kelvinbot:matrix.org
 KELVIN__SERVICES__matrix_main__PASSWORD=secret_password
 KELVIN__SERVICES__matrix_main__DEVICE_ID=KELVIN_PROD
 KELVIN__SERVICES__matrix_main__DB_PASSPHRASE=encryption_secret
+KELVIN__SERVICES__matrix_main__VERIFICATION_DEVICE_ID=DEVICEIDHERE
 
 # Custom data directory
 KELVIN__DATA_DIRECTORY=/opt/kelvinbot/data
