@@ -69,8 +69,8 @@ impl MatrixService {
             .sqlite_store(sqlite_path, db_passphrase.expose_secret().into())
             .with_encryption_settings(EncryptionSettings {
                 backup_download_strategy: encryption::BackupDownloadStrategy::Manual,
-                auto_enable_cross_signing: true,  // Auto-load existing keys from DB
-                auto_enable_backups: false,        // Manual backup control
+                auto_enable_cross_signing: true, // Auto-load existing keys from DB
+                auto_enable_backups: false,      // Manual backup control
             })
             .build()
             .await?;
@@ -126,7 +126,8 @@ impl MatrixService {
             let device_id: OwnedDeviceId = target_device_id.as_str().into();
 
             // Get the target device
-            let target_device = encryption.get_device(self.client.user_id().unwrap(), &device_id).await?;
+            let target_device =
+                encryption.get_device(self.client.user_id().unwrap(), &device_id).await?;
 
             if let Some(device) = target_device {
                 info!("found target device, requesting verification");
@@ -134,11 +135,12 @@ impl MatrixService {
                 // Request verification with emoji SAS method
                 use matrix_sdk::ruma::events::key::verification::VerificationMethod;
                 let methods = vec![VerificationMethod::SasV1];
-                let verification_request = device.request_verification_with_methods(methods).await?;
+                let verification_request =
+                    device.request_verification_with_methods(methods).await?;
                 info!("verification request sent, waiting for acceptance...");
 
                 // Wait for the request to transition to "ready" state
-                use tokio::time::{timeout, Duration};
+                use tokio::time::{Duration, timeout};
 
                 let result = timeout(Duration::from_secs(120), async {
                     loop {
