@@ -40,6 +40,7 @@ pub struct MatrixService {
     user_id: MatrixUserId,
     password: SecretString,
     device_id: String,
+    verification_device_id: Option<String>,
     evt_tx: tokio::sync::mpsc::Sender<Event>,
     client: Client,
 }
@@ -55,6 +56,7 @@ impl MatrixService {
         evt_tx: tokio::sync::mpsc::Sender<Event>,
         data_directory: PathBuf,
         db_passphrase: SecretString,
+        verification_device_id: Option<String>,
     ) -> Result<Self> {
         // Create storage directory
         let mut sqlite_path = data_directory.clone();
@@ -67,13 +69,166 @@ impl MatrixService {
             .sqlite_store(sqlite_path, db_passphrase.expose_secret().into())
             .with_encryption_settings(EncryptionSettings {
                 backup_download_strategy: encryption::BackupDownloadStrategy::Manual,
-                auto_enable_cross_signing: false,
-                auto_enable_backups: false,
+                auto_enable_cross_signing: true, // Auto-load existing keys from DB
+                auto_enable_backups: false,      // Manual backup control
             })
             .build()
             .await?;
 
-        Ok(Self { id, user_id, password, device_id, evt_tx, client })
+        Ok(Self { id, user_id, password, device_id, verification_device_id, evt_tx, client })
+    }
+
+    async fn setup_encryption(&self) -> Result<()> {
+        let encryption = self.client.encryption();
+
+        encryption.wait_for_e2ee_initialization_tasks().await;
+
+        // Check cross-signing status
+        if let Some(status) = encryption.cross_signing_status().await {
+            info!(
+                has_master=%status.has_master,
+                has_self_signing=%status.has_self_signing,
+                has_user_signing=%status.has_user_signing,
+                "cross-signing status"
+            );
+        }
+
+        // Check if we already have valid keys locally
+        let device = encryption.get_own_device().await?;
+        let already_setup = if let Some(ref dev) = device {
+            let is_cross_signed = dev.is_cross_signed_by_owner();
+            let is_verified = dev.is_verified();
+            info!(
+                device_id=%dev.device_id(),
+                is_verified=%is_verified,
+                is_cross_signed=%is_cross_signed,
+                "own device status"
+            );
+
+            // Device is fully set up if it's cross-signed
+            is_cross_signed
+        } else {
+            false
+        };
+
+        if already_setup {
+            info!("device already cross-signed - setup complete");
+            return Ok(());
+        }
+
+        // Device needs verification - perform interactive verification
+        info!("device needs verification");
+
+        if let Some(ref target_device_id) = self.verification_device_id {
+            info!(target_device_id=%target_device_id, "requesting interactive verification");
+
+            use matrix_sdk::ruma::OwnedDeviceId;
+            let device_id: OwnedDeviceId = target_device_id.as_str().into();
+
+            // Get the target device
+            let target_device =
+                encryption.get_device(self.client.user_id().unwrap(), &device_id).await?;
+
+            if let Some(device) = target_device {
+                info!("found target device, requesting verification");
+
+                // Request verification with emoji SAS method
+                use matrix_sdk::ruma::events::key::verification::VerificationMethod;
+                let methods = vec![VerificationMethod::SasV1];
+                let verification_request =
+                    device.request_verification_with_methods(methods).await?;
+                info!("verification request sent, waiting for acceptance...");
+
+                // Wait for the request to transition to "ready" state
+                use tokio::time::{Duration, timeout};
+
+                let result = timeout(Duration::from_secs(120), async {
+                    loop {
+                        if verification_request.is_ready() {
+                            break;
+                        }
+                        if verification_request.is_cancelled() || verification_request.is_done() {
+                            bail!("verification request was cancelled or failed");
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+
+                    info!("verification request ready, waiting for other device to start SAS...");
+
+                    // Wait for the other side to start SAS verification
+                    let sas = loop {
+                        // Check if there's an active SAS verification
+                        if let Some(verification) = verification_request.start_sas().await? {
+                            info!("SAS verification started by other device");
+                            break verification;
+                        }
+
+                        if verification_request.is_cancelled() {
+                            bail!("verification was cancelled");
+                        }
+
+                        if verification_request.is_done() {
+                            bail!("verification completed without SAS");
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    };
+
+                    // Accept the SAS verification
+                    sas.accept().await?;
+                    info!("SAS verification accepted, waiting for key agreement...");
+
+                    // Wait for emoji/decimal to be ready
+                    loop {
+                        if let Some(emoji) = sas.emoji() {
+                            info!("Emoji verification codes: {:?}", emoji);
+                            info!("Please confirm these emojis match on the other device and accept there");
+                            break;
+                        }
+                        if sas.is_cancelled() || sas.is_done() {
+                            bail!("SAS verification was cancelled");
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+
+                    // Auto-confirm on this side
+                    sas.confirm().await?;
+                    info!("confirmed on bot side, waiting for other device to confirm...");
+
+                    // Wait for verification to complete
+                    loop {
+                        if sas.is_done() {
+                            info!("verification complete!");
+                            break;
+                        }
+                        if sas.is_cancelled() {
+                            bail!("verification was cancelled");
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+
+                    Ok::<(), anyhow::Error>(())
+                }).await;
+
+                match result {
+                    Ok(Ok(())) => {
+                        info!("interactive verification completed successfully");
+                    }
+                    Ok(Err(e)) => {
+                        bail!("verification failed: {}", e);
+                    }
+                    Err(_) => {
+                        bail!("verification timed out after 120 seconds");
+                    }
+                }
+            } else {
+                bail!("target device {} not found", target_device_id);
+            }
+        } else {
+            bail!("device needs verification but no verification_device_id configured");
+        }
+
+        Ok(())
     }
 
     async fn find_or_create_dm(&self, user_id: &UserId) -> Result<Room, matrix_sdk::Error> {
@@ -181,6 +336,7 @@ impl Service for MatrixService {
         info!(service_id=%self.id, homeserver_url=%self.client.homeserver(), user_id=%self.user_id,
             "starting matrix service");
 
+        // Attempt to authenticate
         match self
             .client
             .matrix_auth()
@@ -197,17 +353,52 @@ impl Service for MatrixService {
                 bail!("login error")
             }
         }
+
         // An initial sync to set up state and so our bot doesn't respond to old messages.
+        // This also fetches cross-signing keys from the server.
         self.client.sync_once(SyncSettings::default()).await?;
+
+        // Set up event handlers before encryption setup so verification events are processed
         self.setup_event_handlers().await?;
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!(service=%self.id, "shutdown requested");
-                    break;
+
+        // Spawn sync task in background so verification events can be processed
+        let client_for_sync = self.client.clone();
+        let cancel_for_sync = cancel.child_token();
+        let sync_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_for_sync.cancelled() => {
+                        info!("background sync shutting down");
+                        break;
+                    }
+                    result = client_for_sync.sync(SyncSettings::default()) => {
+                        if let Err(e) = result {
+                            error!(error=%e, "background sync error");
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        }
+                    }
                 }
-                _result = self.client.sync(SyncSettings::default()) => {
-                    warn!("matrix sync returned");
+            }
+        });
+
+        // Set up encryption with verification (sync running in background)
+        if let Err(e) = self.setup_encryption().await {
+            error!(error=%e, "failed to set up encryption");
+            cancel.cancel(); // Stop background sync
+            bail!("failed to set up encryption")
+        }
+
+        info!("encryption setup complete, service ready");
+
+        // Wait for shutdown or sync task to exit
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!(service=%self.id, "shutdown requested");
+            }
+            result = sync_handle => {
+                match result {
+                    Ok(_) => info!("sync task completed"),
+                    Err(e) => error!(error=%e, "sync task panicked"),
                 }
             }
         }
