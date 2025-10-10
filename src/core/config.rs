@@ -22,7 +22,7 @@ pub enum ServiceKind {
         password: SecretString,
         device_id: String,
         db_passphrase: SecretString,
-        recovery_passphrase: SecretString,
+        verification_device_id: Option<String>,
     },
     #[serde(other)]
     Unknown,

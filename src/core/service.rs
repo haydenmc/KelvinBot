@@ -57,7 +57,7 @@ pub async fn instantiate_services_from_config(
                 password,
                 device_id,
                 db_passphrase,
-                recovery_passphrase,
+                verification_device_id,
             } => {
                 match MatrixService::create(
                     service_id.clone(),
@@ -68,7 +68,7 @@ pub async fn instantiate_services_from_config(
                     evt_tx.clone(),
                     config.data_directory.clone(),
                     db_passphrase.clone(),
-                    recovery_passphrase.clone(),
+                    verification_device_id.clone(),
                 )
                 .await
                 {
