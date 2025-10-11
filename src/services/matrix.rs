@@ -320,13 +320,12 @@ impl MatrixService {
             },
         );
         // Handle room membership changes to detect when bot becomes the only member
-        let client_for_cleanup = self.client.clone();
+        let bot_user_id = self.client.user_id().expect("client should have user_id after login").to_owned();
         self.client.add_event_handler(|_event: SyncRoomMemberEvent, room: Room| async move {
             // Check if the bot is now the only member in the room
             if room.state() == RoomState::Joined
                 && let Ok(members) = room.members(RoomMemberships::ACTIVE).await
                 && members.len() == 1
-                && let Some(bot_user_id) = client_for_cleanup.user_id()
                 && members.iter().any(|m| m.user_id() == bot_user_id)
             {
                 info!(room_id=%room.room_id(), "detected bot as only member, leaving room");
