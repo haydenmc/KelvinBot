@@ -8,7 +8,7 @@ use matrix_sdk::{
     ruma::{
         RoomId, UserId,
         events::room::{
-            member::{MembershipState, StrippedRoomMemberEvent},
+            member::{MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent},
             message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
         },
     },
@@ -252,6 +252,42 @@ impl MatrixService {
         self.client.create_dm(user_id).await
     }
 
+    async fn check_and_leave_empty_room(&self, room: &Room) {
+        // Only check joined rooms
+        if room.state() != RoomState::Joined {
+            return;
+        }
+
+        // Get active members in the room
+        match room.members(RoomMemberships::ACTIVE).await {
+            Ok(members) => {
+                // If the bot is the only member, leave the room
+                if members.len() == 1
+                    && let Some(bot_user_id) = self.client.user_id()
+                    && members.iter().any(|m| m.user_id() == bot_user_id)
+                {
+                    info!(room_id=%room.room_id(), "leaving room with only bot as member");
+                    if let Err(e) = room.leave().await {
+                        error!(room_id=%room.room_id(), error=%e, "failed to leave empty room");
+                    } else {
+                        debug!(room_id=%room.room_id(), "successfully left empty room");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(room_id=%room.room_id(), error=%e, "failed to get room members");
+            }
+        }
+    }
+
+    async fn cleanup_empty_rooms(&self) {
+        info!("checking for empty rooms to leave");
+        let rooms = self.client.rooms();
+        for room in rooms {
+            self.check_and_leave_empty_room(&room).await;
+        }
+    }
+
     async fn setup_event_handlers(&self) -> anyhow::Result<()> {
         // Handle room invites
         self.client.add_event_handler(
@@ -283,6 +319,24 @@ impl MatrixService {
                 }
             },
         );
+        // Handle room membership changes to detect when bot becomes the only member
+        let bot_user_id =
+            self.client.user_id().expect("client should have user_id after login").to_owned();
+        self.client.add_event_handler(|_event: SyncRoomMemberEvent, room: Room| async move {
+            // Check if the bot is now the only member in the room
+            if room.state() == RoomState::Joined
+                && let Ok(members) = room.members(RoomMemberships::ACTIVE).await
+                && members.len() == 1
+                && members.iter().any(|m| m.user_id() == bot_user_id)
+            {
+                info!(room_id=%room.room_id(), "detected bot as only member, leaving room");
+                if let Err(e) = room.leave().await {
+                    error!(room_id=%room.room_id(), error=%e, "failed to leave empty room");
+                } else {
+                    debug!(room_id=%room.room_id(), "successfully left empty room");
+                }
+            }
+        });
         // Handle room messages
         let service_id = self.id.clone();
         let evt_tx = self.evt_tx.clone();
@@ -389,6 +443,9 @@ impl Service for MatrixService {
         }
 
         info!("encryption setup complete, service ready");
+
+        // Clean up any rooms where the bot is the only member
+        self.cleanup_empty_rooms().await;
 
         // Wait for shutdown or sync task to exit
         tokio::select! {
