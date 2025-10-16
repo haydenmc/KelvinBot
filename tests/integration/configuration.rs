@@ -32,10 +32,7 @@ async fn test_configuration_with_mixed_service_types() {
     // Add a valid dummy service
     services.insert(
         "dummy1".to_string(),
-        ServiceCfg {
-            kind: ServiceKind::Dummy { interval_ms: Some(100) },
-            middleware: None,
-        },
+        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(100) }, middleware: None },
     );
 
     // Add an unknown service type
@@ -112,14 +109,10 @@ async fn test_service_with_middleware_list_configuration() {
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
         "echo1".to_string(),
-        MiddlewareCfg {
-            kind: MiddlewareKind::Echo { command_string: "!test".to_string() },
-        },
+        MiddlewareCfg { kind: MiddlewareKind::Echo { command_string: "!test".to_string() } },
     );
-    middlewares_map.insert(
-        "logger1".to_string(),
-        MiddlewareCfg { kind: MiddlewareKind::Logger {} },
-    );
+    middlewares_map
+        .insert("logger1".to_string(), MiddlewareCfg { kind: MiddlewareKind::Logger {} });
 
     let config = Config {
         services,
@@ -144,4 +137,66 @@ async fn test_service_with_middleware_list_configuration() {
     let service2_cfg = config.services.get("service2").unwrap();
     assert!(service2_cfg.middleware.is_some());
     assert_eq!(service2_cfg.middleware.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn test_middleware_configuration_from_env_vars() {
+    use kelvin_bot::core::config::{ENV_PREFIX, ENV_SEPARATOR};
+
+    // Clear any existing KELVIN__ environment variables first
+    let existing_vars: Vec<String> =
+        std::env::vars().filter(|(k, _)| k.starts_with("KELVIN__")).map(|(k, _)| k).collect();
+
+    unsafe {
+        for var in &existing_vars {
+            std::env::remove_var(var);
+        }
+    }
+
+    // Set up environment variables for middleware configuration
+    unsafe {
+        std::env::set_var("KELVIN__MIDDLEWARES__testecho__KIND", "echo");
+        std::env::set_var("KELVIN__MIDDLEWARES__testecho__COMMAND_STRING", "!testcmd");
+        std::env::set_var("KELVIN__MIDDLEWARES__testlogger__KIND", "logger");
+        std::env::set_var("KELVIN__SERVICES__testservice__KIND", "dummy");
+        std::env::set_var("KELVIN__SERVICES__testservice__MIDDLEWARE", "testecho,testlogger");
+        std::env::set_var("KELVIN__DATA_DIRECTORY", "./test_data");
+    }
+
+    // Build config directly without loading .env file
+    let cfg = config::Config::builder()
+        .add_source(config::Environment::with_prefix(ENV_PREFIX).separator(ENV_SEPARATOR))
+        .build()
+        .expect("Failed to build config");
+
+    let config: Config = cfg.try_deserialize().expect("Failed to deserialize config from env vars");
+
+    // Verify middlewares were parsed correctly
+    assert_eq!(config.middlewares.len(), 2);
+
+    let echo_cfg = config.middlewares.get("testecho").expect("testecho middleware not found");
+    assert!(
+        matches!(echo_cfg.kind, MiddlewareKind::Echo { ref command_string } if command_string == "!testcmd")
+    );
+
+    let logger_cfg = config.middlewares.get("testlogger").expect("testlogger middleware not found");
+    assert!(matches!(logger_cfg.kind, MiddlewareKind::Logger {}));
+
+    // Verify service middleware list was parsed correctly
+    let service_cfg = config.services.get("testservice").expect("testservice not found");
+    assert!(service_cfg.middleware.is_some());
+    let middleware_list = service_cfg.middleware.as_ref().unwrap();
+    assert_eq!(middleware_list.len(), 2);
+    assert_eq!(middleware_list[0], "testecho");
+    assert_eq!(middleware_list[1], "testlogger");
+
+    // Clean up environment variables and restore originals
+    unsafe {
+        std::env::remove_var("KELVIN__MIDDLEWARES__testecho__KIND");
+        std::env::remove_var("KELVIN__MIDDLEWARES__testecho__COMMAND_STRING");
+        std::env::remove_var("KELVIN__MIDDLEWARES__testlogger__KIND");
+        std::env::remove_var("KELVIN__SERVICES__testservice__KIND");
+        std::env::remove_var("KELVIN__SERVICES__testservice__MIDDLEWARE");
+        std::env::remove_var("KELVIN__DATA_DIRECTORY");
+    }
 }

@@ -95,8 +95,8 @@ Middlewares are configured in two steps:
 **Configuration format:**
 ```bash
 # Define a middleware instance
-KELVIN__MIDDLEWARE__<name>__KIND=<middleware_type>
-KELVIN__MIDDLEWARE__<name>__<type_specific_options>=<value>
+KELVIN__MIDDLEWARES__<name>__KIND=<middleware_type>
+KELVIN__MIDDLEWARES__<name>__<type_specific_options>=<value>
 
 # Assign middlewares to a service (comma-separated)
 KELVIN__SERVICES__<service_name>__MIDDLEWARE=<middleware1>,<middleware2>,...
@@ -109,12 +109,12 @@ Logs all incoming events to the console using the configured log level.
 
 **Configuration:**
 ```bash
-KELVIN__MIDDLEWARE__<name>__KIND=logger
+KELVIN__MIDDLEWARES__<name>__KIND=logger
 ```
 
 **Example:**
 ```bash
-KELVIN__MIDDLEWARE__logger__KIND=logger
+KELVIN__MIDDLEWARES__logger__KIND=logger
 KELVIN__SERVICES__matrix_main__MIDDLEWARE=logger
 ```
 
@@ -123,15 +123,15 @@ Responds to messages starting with a specified command string by echoing back th
 
 **Configuration:**
 ```bash
-KELVIN__MIDDLEWARE__<name>__KIND=echo
-KELVIN__MIDDLEWARE__<name>__COMMAND_STRING=<command_prefix>
+KELVIN__MIDDLEWARES__<name>__KIND=echo
+KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=<command_prefix>
 ```
 
 **Example:**
 ```bash
 # Define an echo middleware that responds to "!echo"
-KELVIN__MIDDLEWARE__myecho__KIND=echo
-KELVIN__MIDDLEWARE__myecho__COMMAND_STRING=!echo
+KELVIN__MIDDLEWARES__myecho__KIND=echo
+KELVIN__MIDDLEWARES__myecho__COMMAND_STRING=!echo
 
 # Assign to service
 KELVIN__SERVICES__matrix_main__MIDDLEWARE=myecho,logger
@@ -145,11 +145,11 @@ Services can have multiple middlewares that process events sequentially:
 
 ```bash
 # Define multiple middleware instances
-KELVIN__MIDDLEWARE__logger__KIND=logger
-KELVIN__MIDDLEWARE__echo1__KIND=echo
-KELVIN__MIDDLEWARE__echo1__COMMAND_STRING=!echo
-KELVIN__MIDDLEWARE__echo2__KIND=echo
-KELVIN__MIDDLEWARE__echo2__COMMAND_STRING=!test
+KELVIN__MIDDLEWARES__logger__KIND=logger
+KELVIN__MIDDLEWARES__echo1__KIND=echo
+KELVIN__MIDDLEWARES__echo1__COMMAND_STRING=!echo
+KELVIN__MIDDLEWARES__echo2__KIND=echo
+KELVIN__MIDDLEWARES__echo2__COMMAND_STRING=!test
 
 # Service 1 uses all three middlewares
 KELVIN__SERVICES__matrix_main__MIDDLEWARE=logger,echo1,echo2
@@ -196,11 +196,11 @@ KELVIN__DATA_DIRECTORY=./data  # Default: ./data
 KELVIN__DATA_DIRECTORY=/opt/kelvinbot/data
 
 # Define middleware instances
-KELVIN__MIDDLEWARE__logger__KIND=logger
-KELVIN__MIDDLEWARE__myecho__KIND=echo
-KELVIN__MIDDLEWARE__myecho__COMMAND_STRING=!echo
-KELVIN__MIDDLEWARE__testcmd__KIND=echo
-KELVIN__MIDDLEWARE__testcmd__COMMAND_STRING=!test
+KELVIN__MIDDLEWARES__logger__KIND=logger
+KELVIN__MIDDLEWARES__myecho__KIND=echo
+KELVIN__MIDDLEWARES__myecho__COMMAND_STRING=!echo
+KELVIN__MIDDLEWARES__testcmd__KIND=echo
+KELVIN__MIDDLEWARES__testcmd__COMMAND_STRING=!test
 
 # Dummy service for testing
 KELVIN__SERVICES__test_dummy__KIND=dummy

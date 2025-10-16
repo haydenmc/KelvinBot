@@ -1,10 +1,12 @@
 use assert_matches::assert_matches;
 use kelvin_bot::core::{
-    bus::{create_command_channel, Command},
-    event::{Event, EventKind},
-    middleware::{build_middleware_pipeline, instantiate_middleware_from_config, Middleware, Verdict},
-    service::ServiceId,
+    bus::{Command, create_command_channel},
     config::{Config, MiddlewareCfg, MiddlewareKind},
+    event::{Event, EventKind},
+    middleware::{
+        Middleware, Verdict, build_middleware_pipeline, instantiate_middleware_from_config,
+    },
+    service::ServiceId,
 };
 use kelvin_bot::middlewares::{echo::Echo, logger::Logger};
 use std::collections::HashMap;
@@ -109,14 +111,10 @@ async fn test_middleware_instantiation_with_echo() {
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
         "test_echo".to_string(),
-        MiddlewareCfg {
-            kind: MiddlewareKind::Echo { command_string: "!mycommand".to_string() },
-        },
+        MiddlewareCfg { kind: MiddlewareKind::Echo { command_string: "!mycommand".to_string() } },
     );
-    middlewares_map.insert(
-        "test_logger".to_string(),
-        MiddlewareCfg { kind: MiddlewareKind::Logger {} },
-    );
+    middlewares_map
+        .insert("test_logger".to_string(), MiddlewareCfg { kind: MiddlewareKind::Logger {} });
 
     let config = Config {
         services: HashMap::new(),
@@ -138,10 +136,8 @@ fn test_build_middleware_pipeline() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 
     let mut all_middlewares: HashMap<String, Arc<dyn Middleware>> = HashMap::new();
-    all_middlewares.insert(
-        "echo1".to_string(),
-        Arc::new(Echo::new(cmd_tx.clone(), "!echo".to_string())),
-    );
+    all_middlewares
+        .insert("echo1".to_string(), Arc::new(Echo::new(cmd_tx.clone(), "!echo".to_string())));
     all_middlewares.insert("logger1".to_string(), Arc::new(Logger {}));
 
     let middleware_names = vec!["echo1".to_string(), "logger1".to_string()];

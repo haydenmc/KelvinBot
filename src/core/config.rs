@@ -31,7 +31,9 @@ pub enum ServiceKind {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MiddlewareKind {
-    Echo { command_string: String },
+    Echo {
+        command_string: String,
+    },
     Logger {},
     #[serde(other)]
     Unknown,
@@ -54,8 +56,36 @@ fn default_data_directory() -> PathBuf {
 pub struct ServiceCfg {
     #[serde(flatten)]
     pub kind: ServiceKind,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_middleware_list")]
     pub middleware: Option<Vec<String>>, // List of middleware names
+}
+
+fn deserialize_middleware_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    let value: Option<StringOrVec> = Option::deserialize(deserializer)?;
+
+    match value {
+        None => Ok(None),
+        Some(StringOrVec::Vec(vec)) => Ok(Some(vec)),
+        Some(StringOrVec::String(s)) => {
+            // Parse comma-separated string into Vec
+            let items: Vec<String> = s
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect();
+            Ok(Some(items))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,12 +97,7 @@ pub struct MiddlewareCfg {
 pub fn load_from_env() -> anyhow::Result<Config> {
     dotenvy::dotenv().ok(); // Load from .env file first
     let cfg = config::Config::builder()
-        .add_source(
-            config::Environment::with_prefix(ENV_PREFIX)
-                .separator(ENV_SEPARATOR)
-                .list_separator(",")
-                .with_list_parse_key("services.*.middleware"),
-        )
+        .add_source(config::Environment::with_prefix(ENV_PREFIX).separator(ENV_SEPARATOR))
         .build()?;
     Ok(cfg.try_deserialize()?)
 }

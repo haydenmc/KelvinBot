@@ -4,7 +4,7 @@ use crate::core::bus::Command;
 use crate::core::config::{Config, MiddlewareKind};
 use crate::core::event::Event;
 use crate::middlewares::{echo::Echo, logger::Logger};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;

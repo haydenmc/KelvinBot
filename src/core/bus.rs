@@ -62,9 +62,8 @@ impl Bus {
                     started_middlewares.push(middleware.clone());
                     let child_token = cancel.child_token();
                     let middleware_clone = middleware.clone();
-                    middleware_handles.push(tokio::spawn(async move {
-                        middleware_clone.run(child_token).await
-                    }));
+                    middleware_handles
+                        .push(tokio::spawn(async move { middleware_clone.run(child_token).await }));
                 }
             }
         }

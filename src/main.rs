@@ -29,7 +29,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut service_middlewares = std::collections::HashMap::new();
     for (service_name, service_cfg) in &cfg.services {
         if let Some(ref middleware_list) = service_cfg.middleware {
-            let pipeline = middleware::build_middleware_pipeline(middleware_list, &all_middlewares)?;
+            let pipeline =
+                middleware::build_middleware_pipeline(middleware_list, &all_middlewares)?;
             service_middlewares.insert(service::ServiceId(service_name.clone()), pipeline);
         }
     }
@@ -38,9 +39,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let cancel_all = CancellationToken::new();
     let bus_cancel = cancel_all.child_token();
     let bus_task = tokio::spawn({
-        async move {
-            bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares).run(bus_cancel).await
-        }
+        async move { bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares).run(bus_cancel).await }
     });
 
     // Graceful shutdown on Ctrl+C

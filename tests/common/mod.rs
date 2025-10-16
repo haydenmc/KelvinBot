@@ -34,17 +34,11 @@ pub fn create_multi_service_config() -> Config {
     let mut services = HashMap::new();
     services.insert(
         "dummy1".to_string(),
-        ServiceCfg {
-            kind: ServiceKind::Dummy { interval_ms: Some(100) },
-            middleware: None,
-        },
+        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(100) }, middleware: None },
     );
     services.insert(
         "dummy2".to_string(),
-        ServiceCfg {
-            kind: ServiceKind::Dummy { interval_ms: Some(200) },
-            middleware: None,
-        },
+        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(200) }, middleware: None },
     );
 
     Config {
