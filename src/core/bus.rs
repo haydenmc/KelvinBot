@@ -23,7 +23,8 @@ pub struct Bus {
 
     services: HashMap<ServiceId, Arc<dyn Service>>,
 
-    middlewares: Vec<Arc<dyn Middleware>>,
+    // Per-service middleware pipelines
+    service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
 }
 
 impl Bus {
@@ -31,9 +32,9 @@ impl Bus {
         evt_rx: Receiver<Event>,
         cmd_rx: Receiver<Command>,
         services: HashMap<ServiceId, Arc<dyn Service>>,
-        middlewares: Vec<Arc<dyn Middleware>>,
+        service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
     ) -> Self {
-        Self { evt_rx, cmd_rx, services, middlewares }
+        Self { evt_rx, cmd_rx, services, service_middlewares }
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) -> anyhow::Result<()> {
@@ -46,14 +47,25 @@ impl Bus {
             service_handles.push(tokio::spawn(async move { service_clone.run(child_token).await }));
         }
 
-        // Start all middlewares
+        // Start all middlewares (collect unique instances across all services)
         info!("starting middlewares...");
         let mut middleware_handles = Vec::new();
-        for middleware in self.middlewares.iter() {
-            let child_token = cancel.child_token();
-            let middleware_clone = middleware.clone();
-            middleware_handles
-                .push(tokio::spawn(async move { middleware_clone.run(child_token).await }));
+        let mut started_middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
+
+        for pipeline in self.service_middlewares.values() {
+            for middleware in pipeline {
+                // Use Arc::ptr_eq to track unique instances
+                let already_started =
+                    started_middlewares.iter().any(|started| Arc::ptr_eq(started, middleware));
+
+                if !already_started {
+                    started_middlewares.push(middleware.clone());
+                    let child_token = cancel.child_token();
+                    let middleware_clone = middleware.clone();
+                    middleware_handles
+                        .push(tokio::spawn(async move { middleware_clone.run(child_token).await }));
+                }
+            }
         }
 
         // Begin command/event processing
@@ -67,11 +79,17 @@ impl Bus {
                 maybe_evt = self.evt_rx.recv() => {
                     info!("event received");
                     let Some(evt) = maybe_evt else { break };
-                    for mw in &self.middlewares {
-                        match mw.on_event(&evt)? {
-                            Verdict::Continue => {},
-                            Verdict::Stop => { break; }
+
+                    // Get the middleware pipeline for this service
+                    if let Some(pipeline) = self.service_middlewares.get(&evt.service_id) {
+                        for mw in pipeline {
+                            match mw.on_event(&evt)? {
+                                Verdict::Continue => {},
+                                Verdict::Stop => { break; }
+                            }
                         }
+                    } else {
+                        tracing::debug!(service_id=%evt.service_id, "no middleware pipeline configured for service");
                     }
                 }
                 maybe_cmd = self.cmd_rx.recv() => {

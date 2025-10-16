@@ -16,10 +16,14 @@ pub fn create_test_config() -> Config {
             let mut services = HashMap::new();
             services.insert(
                 "test_dummy".to_string(),
-                ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(100) } },
+                ServiceCfg {
+                    kind: ServiceKind::Dummy { interval_ms: Some(100) },
+                    middleware: None,
+                },
             );
             services
         },
+        middlewares: HashMap::new(),
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
     }
 }
@@ -30,14 +34,18 @@ pub fn create_multi_service_config() -> Config {
     let mut services = HashMap::new();
     services.insert(
         "dummy1".to_string(),
-        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(100) } },
+        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(100) }, middleware: None },
     );
     services.insert(
         "dummy2".to_string(),
-        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(200) } },
+        ServiceCfg { kind: ServiceKind::Dummy { interval_ms: Some(200) }, middleware: None },
     );
 
-    Config { services, data_directory: TempDir::new().unwrap().path().to_path_buf() }
+    Config {
+        services,
+        middlewares: HashMap::new(),
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+    }
 }
 
 /// A controllable mock service for testing that can send specific events on command

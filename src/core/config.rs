@@ -29,8 +29,21 @@ pub enum ServiceKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MiddlewareKind {
+    Echo {
+        command_string: String,
+    },
+    Logger {},
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub services: HashMap<String, ServiceCfg>, // key = service name
+    #[serde(default)]
+    pub middlewares: HashMap<String, MiddlewareCfg>, // key = middleware name
     #[serde(default = "default_data_directory")]
     pub data_directory: PathBuf,
 }
@@ -43,6 +56,42 @@ fn default_data_directory() -> PathBuf {
 pub struct ServiceCfg {
     #[serde(flatten)]
     pub kind: ServiceKind,
+    #[serde(default, deserialize_with = "deserialize_middleware_list")]
+    pub middleware: Option<Vec<String>>, // List of middleware names
+}
+
+fn deserialize_middleware_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    let value: Option<StringOrVec> = Option::deserialize(deserializer)?;
+
+    match value {
+        None => Ok(None),
+        Some(StringOrVec::Vec(vec)) => Ok(Some(vec)),
+        Some(StringOrVec::String(s)) => {
+            // Parse comma-separated string into Vec
+            let items: Vec<String> = s
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect();
+            Ok(Some(items))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MiddlewareCfg {
+    #[serde(flatten)]
+    pub kind: MiddlewareKind,
 }
 
 pub fn load_from_env() -> anyhow::Result<Config> {

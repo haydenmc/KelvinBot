@@ -83,16 +83,97 @@ The Matrix service requires interactive device verification to send/receive encr
 
 ## Middlewares
 
-Middlewares process events and can perform actions or stop further processing.
+Middlewares process events and can perform actions or stop further processing. Each middleware instance is defined in configuration and can be assigned to specific services.
 
-### Logger Middleware
-Logs all incoming events (automatically enabled).
+### Configuring Middlewares
 
-**Future middlewares might include:**
-- Command processor (`!help`, `!weather`, etc.)
-- AI response generator
+Middlewares are configured in two steps:
+
+1. **Define middleware instances** with their configuration
+2. **Assign middlewares to services** using a comma-separated list
+
+**Configuration format:**
+```bash
+# Define a middleware instance
+KELVIN__MIDDLEWARES__<name>__KIND=<middleware_type>
+KELVIN__MIDDLEWARES__<name>__<type_specific_options>=<value>
+
+# Assign middlewares to a service (comma-separated)
+KELVIN__SERVICES__<service_name>__MIDDLEWARE=<middleware1>,<middleware2>,...
+```
+
+### Available Middleware Types
+
+#### Logger Middleware
+Logs all incoming events to the console using the configured log level.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=logger
+```
+
+**Example:**
+```bash
+KELVIN__MIDDLEWARES__logger__KIND=logger
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=logger
+```
+
+#### Echo Middleware
+Responds to messages starting with a specified command string by echoing back the rest of the message.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=echo
+KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=<command_prefix>
+```
+
+**Example:**
+```bash
+# Define an echo middleware that responds to "!echo"
+KELVIN__MIDDLEWARES__myecho__KIND=echo
+KELVIN__MIDDLEWARES__myecho__COMMAND_STRING=!echo
+
+# Assign to service
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=myecho,logger
+```
+
+When a user sends `!echo hello world`, the bot will respond with `hello world`.
+
+### Middleware Pipelines
+
+Services can have multiple middlewares that process events sequentially:
+
+```bash
+# Define multiple middleware instances
+KELVIN__MIDDLEWARES__logger__KIND=logger
+KELVIN__MIDDLEWARES__echo1__KIND=echo
+KELVIN__MIDDLEWARES__echo1__COMMAND_STRING=!echo
+KELVIN__MIDDLEWARES__echo2__KIND=echo
+KELVIN__MIDDLEWARES__echo2__COMMAND_STRING=!test
+
+# Service 1 uses all three middlewares
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=logger,echo1,echo2
+
+# Service 2 uses only the logger
+KELVIN__SERVICES__test_dummy__MIDDLEWARE=logger
+```
+
+**Processing order:**
+1. Events flow through middlewares in the order specified
+2. Each middleware returns a `Verdict`:
+   - `Continue`: Pass event to next middleware
+   - `Stop`: Halt processing for this event
+3. Middleware instances can be reused across multiple services
+
+### Future Middleware Ideas
+
+Potential middlewares for future development:
+- Command processor with help system (`!help`, `!weather`, etc.)
+- AI response generator using LLMs
 - Message filtering and moderation
+- Sentiment analysis
 - Cross-platform message bridging
+- Rate limiting and spam prevention
 
 ## Configuration
 
@@ -109,11 +190,22 @@ KELVIN__<SECTION>__<SUBSECTION>__<KEY>=<VALUE>
 KELVIN__DATA_DIRECTORY=./data  # Default: ./data
 ```
 
-### Example: Multi-Service Setup
+### Example: Multi-Service Setup with Middlewares
 ```bash
+# Data directory
+KELVIN__DATA_DIRECTORY=/opt/kelvinbot/data
+
+# Define middleware instances
+KELVIN__MIDDLEWARES__logger__KIND=logger
+KELVIN__MIDDLEWARES__myecho__KIND=echo
+KELVIN__MIDDLEWARES__myecho__COMMAND_STRING=!echo
+KELVIN__MIDDLEWARES__testcmd__KIND=echo
+KELVIN__MIDDLEWARES__testcmd__COMMAND_STRING=!test
+
 # Dummy service for testing
 KELVIN__SERVICES__test_dummy__KIND=dummy
 KELVIN__SERVICES__test_dummy__INTERVAL_MS=5000
+KELVIN__SERVICES__test_dummy__MIDDLEWARE=logger
 
 # Matrix service for production
 KELVIN__SERVICES__matrix_main__KIND=matrix
@@ -123,9 +215,7 @@ KELVIN__SERVICES__matrix_main__PASSWORD=secret_password
 KELVIN__SERVICES__matrix_main__DEVICE_ID=KELVIN_PROD
 KELVIN__SERVICES__matrix_main__DB_PASSPHRASE=encryption_secret
 KELVIN__SERVICES__matrix_main__VERIFICATION_DEVICE_ID=DEVICEIDHERE
-
-# Custom data directory
-KELVIN__DATA_DIRECTORY=/opt/kelvinbot/data
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=myecho,testcmd,logger
 ```
 
 ## Running
@@ -269,9 +359,45 @@ The project uses GitHub Actions for automated testing:
 
 ### Adding a New Middleware
 
-1. Create middleware struct implementing the `Middleware` trait
-2. Update `instantiate_middleware_from_config()` function
-3. Add tests in `tests/unit/middleware.rs`
+1. Create middleware struct in `src/middlewares/` implementing the `Middleware` trait
+2. Add configuration variant to `MiddlewareKind` enum in `src/core/config.rs`
+3. Update `instantiate_middleware_from_config()` in `src/core/middleware.rs` to handle the new kind
+4. Add tests in `tests/unit/middleware.rs`
+5. Update README.md with configuration examples
+
+**Example: Adding a new "Greeter" middleware**
+
+```rust
+// src/middlewares/greeter.rs
+use crate::core::{event::Event, middleware::{Middleware, Verdict}};
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
+pub struct Greeter {
+    greeting: String,
+}
+
+impl Greeter {
+    pub fn new(greeting: String) -> Self {
+        Self { greeting }
+    }
+}
+
+#[async_trait]
+impl Middleware for Greeter {
+    async fn run(&self, cancel: CancellationToken) -> anyhow::Result<()> {
+        cancel.cancelled().await;
+        Ok(())
+    }
+
+    fn on_event(&self, event: &Event) -> anyhow::Result<Verdict> {
+        // Process event and potentially send greeting
+        Ok(Verdict::Continue)
+    }
+}
+```
+
+Then update `MiddlewareKind` enum and `instantiate_middleware_from_config()` to support it.
 
 ### Event Types
 
@@ -297,6 +423,7 @@ src/
 │   ├── dummy.rs          # Test service for development
 │   └── matrix.rs         # Matrix homeserver integration
 └── middlewares/          # Event processors
+    ├── echo.rs          # Command echo middleware
     └── logger.rs        # Event logging middleware
 
 tests/                    # Comprehensive test suite
