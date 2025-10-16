@@ -29,8 +29,19 @@ pub enum ServiceKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MiddlewareKind {
+    Echo { command_string: String },
+    Logger {},
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub services: HashMap<String, ServiceCfg>, // key = service name
+    #[serde(default)]
+    pub middlewares: HashMap<String, MiddlewareCfg>, // key = middleware name
     #[serde(default = "default_data_directory")]
     pub data_directory: PathBuf,
 }
@@ -43,12 +54,25 @@ fn default_data_directory() -> PathBuf {
 pub struct ServiceCfg {
     #[serde(flatten)]
     pub kind: ServiceKind,
+    #[serde(default)]
+    pub middleware: Option<Vec<String>>, // List of middleware names
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MiddlewareCfg {
+    #[serde(flatten)]
+    pub kind: MiddlewareKind,
 }
 
 pub fn load_from_env() -> anyhow::Result<Config> {
     dotenvy::dotenv().ok(); // Load from .env file first
     let cfg = config::Config::builder()
-        .add_source(config::Environment::with_prefix(ENV_PREFIX).separator(ENV_SEPARATOR))
+        .add_source(
+            config::Environment::with_prefix(ENV_PREFIX)
+                .separator(ENV_SEPARATOR)
+                .list_separator(",")
+                .with_list_parse_key("services.*.middleware"),
+        )
         .build()?;
     Ok(cfg.try_deserialize()?)
 }

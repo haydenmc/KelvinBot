@@ -46,13 +46,16 @@ async fn test_end_to_end_event_processing_pipeline() {
 
     // Create services map with our mock service
     let mut services = HashMap::new();
-    services
-        .insert(service_id, Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>);
+    services.insert(
+        service_id.clone(),
+        Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>,
+    );
 
-    // Use our custom middleware
-    let middlewares: Vec<Arc<dyn Middleware>> = vec![counting_middleware];
+    // Configure middleware pipeline for our service
+    let mut service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>> = HashMap::new();
+    service_middlewares.insert(service_id, vec![counting_middleware as Arc<dyn Middleware>]);
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, middlewares);
+    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
 
     let cancel_token = CancellationToken::new();
 
@@ -138,13 +141,23 @@ async fn test_middleware_pipeline_order_and_stopping() {
 
     // Create services map with our mock service
     let mut services = HashMap::new();
-    services
-        .insert(service_id, Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>);
+    services.insert(
+        service_id.clone(),
+        Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>,
+    );
 
-    // Create middleware pipeline: first -> second (stops) -> third (should not execute)
-    let middlewares: Vec<Arc<dyn Middleware>> = vec![middleware1, middleware2, middleware3];
+    // Create middleware pipeline for our service: first -> second (stops) -> third (should not execute)
+    let mut service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>> = HashMap::new();
+    service_middlewares.insert(
+        service_id,
+        vec![
+            middleware1 as Arc<dyn Middleware>,
+            middleware2 as Arc<dyn Middleware>,
+            middleware3 as Arc<dyn Middleware>,
+        ],
+    );
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, middlewares);
+    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
 
     let cancel_token = CancellationToken::new();
 

@@ -10,11 +10,12 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Echo {
     cmd_tx: Sender<Command>,
+    command_string: String,
 }
 
 impl Echo {
-    pub fn new(cmd_tx: Sender<Command>) -> Self {
-        Self { cmd_tx }
+    pub fn new(cmd_tx: Sender<Command>, command_string: String) -> Self {
+        Self { cmd_tx, command_string }
     }
 }
 
@@ -28,13 +29,15 @@ impl Middleware for Echo {
     }
 
     fn on_event(&self, evt: &Event) -> Result<Verdict> {
-        // Check if the message starts with "!echo "
+        // Check if the message starts with the configured command string
         let body = match &evt.kind {
             EventKind::DirectMessage { body, .. } => body,
             EventKind::RoomMessage { body, .. } => body,
         };
 
-        if let Some(echo_content) = body.strip_prefix("!echo ") {
+        // Build the prefix with a trailing space
+        let prefix = format!("{} ", self.command_string);
+        if let Some(echo_content) = body.strip_prefix(&prefix) {
             // Create the appropriate command based on the event type
             let command = match &evt.kind {
                 EventKind::DirectMessage { user_id, .. } => Command::SendDirectMessage {

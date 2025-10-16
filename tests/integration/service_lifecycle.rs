@@ -40,10 +40,11 @@ async fn test_middleware_instantiation_from_config() {
     let config = create_test_config();
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 
-    let middlewares = instantiate_middleware_from_config(&config, &cmd_tx);
+    let middlewares =
+        instantiate_middleware_from_config(&config, &cmd_tx).expect("Failed to instantiate");
 
-    // Should at least have the logger middleware
-    assert!(!middlewares.is_empty());
+    // With no middlewares defined in config, should be empty
+    assert!(middlewares.is_empty());
 }
 
 #[tokio::test]
@@ -55,9 +56,13 @@ async fn test_bus_creation_and_startup() {
     let services = instantiate_services_from_config(&config, &evt_tx)
         .await
         .expect("Failed to instantiate services");
-    let middlewares = instantiate_middleware_from_config(&config, &cmd_tx);
+    let _middlewares = instantiate_middleware_from_config(&config, &cmd_tx)
+        .expect("Failed to instantiate middlewares");
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, middlewares);
+    // No middleware pipelines configured for services in test
+    let service_middlewares = std::collections::HashMap::new();
+
+    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
 
     let cancel_token = CancellationToken::new();
 
@@ -85,9 +90,13 @@ async fn test_cancellation_propagates_to_services() {
     let services = instantiate_services_from_config(&config, &evt_tx)
         .await
         .expect("Failed to instantiate services");
-    let middlewares = instantiate_middleware_from_config(&config, &cmd_tx);
+    let _middlewares = instantiate_middleware_from_config(&config, &cmd_tx)
+        .expect("Failed to instantiate middlewares");
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, middlewares);
+    // No middleware pipelines configured for services in test
+    let service_middlewares = std::collections::HashMap::new();
+
+    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
 
     let cancel_token = CancellationToken::new();
 

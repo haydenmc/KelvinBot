@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -25,14 +23,24 @@ async fn main() -> Result<(), anyhow::Error> {
     let services = service::instantiate_services_from_config(&cfg, &evt_tx).await?;
 
     info!("instantiating middlewares...");
-    let middlewares: Vec<Arc<dyn middleware::Middleware>> =
-        middleware::instantiate_middleware_from_config(&cfg, &cmd_tx);
+    let all_middlewares = middleware::instantiate_middleware_from_config(&cfg, &cmd_tx)?;
+
+    info!("building service middleware pipelines...");
+    let mut service_middlewares = std::collections::HashMap::new();
+    for (service_name, service_cfg) in &cfg.services {
+        if let Some(ref middleware_list) = service_cfg.middleware {
+            let pipeline = middleware::build_middleware_pipeline(middleware_list, &all_middlewares)?;
+            service_middlewares.insert(service::ServiceId(service_name.clone()), pipeline);
+        }
+    }
 
     // Start bus
     let cancel_all = CancellationToken::new();
     let bus_cancel = cancel_all.child_token();
     let bus_task = tokio::spawn({
-        async move { bus::Bus::new(evt_rx, cmd_rx, services, middlewares).run(bus_cancel).await }
+        async move {
+            bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares).run(bus_cancel).await
+        }
     });
 
     // Graceful shutdown on Ctrl+C
