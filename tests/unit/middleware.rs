@@ -42,6 +42,7 @@ fn test_logger_middleware_on_event() {
         kind: EventKind::DirectMessage {
             user_id: "@user:example.com".to_string(),
             body: "Test message".to_string(),
+            is_local_user: false,
         },
     };
 
@@ -60,6 +61,7 @@ async fn test_echo_middleware_with_custom_command() {
         kind: EventKind::DirectMessage {
             user_id: "@user:example.com".to_string(),
             body: "!test hello world".to_string(),
+            is_local_user: false,
         },
     };
 
@@ -92,6 +94,7 @@ async fn test_echo_middleware_ignores_wrong_command() {
         kind: EventKind::DirectMessage {
             user_id: "@user:example.com".to_string(),
             body: "!different command".to_string(),
+            is_local_user: false,
         },
     };
 

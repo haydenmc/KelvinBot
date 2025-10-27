@@ -34,6 +34,9 @@ pub enum MiddlewareKind {
     Echo {
         command_string: String,
     },
+    Invite {
+        command_string: String,
+    },
     Logger {},
     #[serde(other)]
     Unknown,

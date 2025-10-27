@@ -288,6 +288,46 @@ impl MatrixService {
         }
     }
 
+    async fn generate_registration_token(&self) -> Result<String> {
+        // Call Synapse admin API to create a registration token
+        let homeserver = self.client.homeserver();
+        let url = format!("{}/_synapse/admin/v1/registration_tokens/new", homeserver);
+
+        // Get access token from the client session
+        let access_token = self
+            .client
+            .session()
+            .ok_or_else(|| anyhow::anyhow!("not logged in"))?
+            .access_token()
+            .to_owned();
+
+        // Create HTTP client
+        let http_client = reqwest::Client::new();
+
+        // Call the admin API
+        let response = http_client
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({})) // Empty body to use defaults
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("failed to generate registration token: HTTP {} - {}", status, body);
+        }
+
+        // Parse response
+        let json: serde_json::Value = response.json().await?;
+        let token = json["token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("response missing 'token' field"))?
+            .to_string();
+
+        Ok(token)
+    }
+
     async fn setup_event_handlers(&self) -> anyhow::Result<()> {
         // Handle room invites
         self.client.add_event_handler(
@@ -340,6 +380,8 @@ impl MatrixService {
         // Handle room messages
         let service_id = self.id.clone();
         let evt_tx = self.evt_tx.clone();
+        let bot_user_id_for_handler =
+            self.client.user_id().expect("client should have user_id after login").to_owned();
         self.client.add_event_handler(
             |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| async move {
                 if room.state() != RoomState::Joined {
@@ -355,6 +397,10 @@ impl MatrixService {
                     return;
                 };
 
+                // Check if user is from the same homeserver as the bot
+                let is_local_user =
+                    event.sender.server_name() == bot_user_id_for_handler.server_name();
+
                 match is_direct {
                     true => {
                         let event = Event {
@@ -362,6 +408,7 @@ impl MatrixService {
                             kind: EventKind::DirectMessage {
                                 user_id: event.sender.to_string(),
                                 body: text_content.body,
+                                is_local_user,
                             },
                         };
 
@@ -373,6 +420,7 @@ impl MatrixService {
                             kind: EventKind::RoomMessage {
                                 room_id: room.room_id().to_string(),
                                 body: text_content.body,
+                                is_local_user,
                             },
                         };
 
@@ -514,6 +562,26 @@ impl Service for MatrixService {
                 } else {
                     warn!(room_id=%room_id, "room not found or not joined");
                 }
+            }
+            Command::GenerateInviteToken { user_id, response_tx, .. } => {
+                info!(service=%self.id, user_id=%user_id, "generating invite token");
+
+                // Generate the registration token
+                let result = self.generate_registration_token().await;
+
+                // Log the result
+                match &result {
+                    Ok(token) => {
+                        info!(token=%token, "registration token generated successfully");
+                    }
+                    Err(e) => {
+                        error!(error=%e, "failed to generate registration token");
+                    }
+                }
+
+                // Send response back through oneshot channel
+                // Ignore send errors (receiver may have been dropped)
+                let _ = response_tx.send(result);
             }
         }
         Ok(())

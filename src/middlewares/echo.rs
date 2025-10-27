@@ -29,7 +29,7 @@ impl Middleware for Echo {
     }
 
     fn on_event(&self, evt: &Event) -> Result<Verdict> {
-        // Check if the message starts with the configured command string
+        // Only handle message events
         let body = match &evt.kind {
             EventKind::DirectMessage { body, .. } => body,
             EventKind::RoomMessage { body, .. } => body,

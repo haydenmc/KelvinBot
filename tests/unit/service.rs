@@ -57,7 +57,7 @@ async fn test_dummy_service_sends_events() {
     assert_eq!(received_event.service_id, service_id);
     assert_matches!(received_event.kind, EventKind::RoomMessage { .. });
 
-    if let EventKind::RoomMessage { room_id, body } = received_event.kind {
+    if let EventKind::RoomMessage { room_id, body, .. } = received_event.kind {
         assert_eq!(room_id, "1");
         assert_eq!(body, "hello from dummy");
     }
