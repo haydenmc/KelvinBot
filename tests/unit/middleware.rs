@@ -8,9 +8,10 @@ use kelvin_bot::core::{
     },
     service::ServiceId,
 };
-use kelvin_bot::middlewares::{echo::Echo, logger::Logger};
+use kelvin_bot::middlewares::{echo::Echo, invite::Invite, logger::Logger};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio_test::assert_ok;
 use tokio_util::sync::CancellationToken;
@@ -171,4 +172,229 @@ fn test_build_middleware_pipeline_empty() {
     let result = build_middleware_pipeline(&middleware_names, &all_middlewares);
     assert_ok!(&result);
     assert_eq!(result.unwrap().len(), 0);
+}
+
+// Invite Middleware Tests
+
+#[tokio::test]
+async fn test_invite_middleware_run() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let invite =
+        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let cancel_token = CancellationToken::new();
+
+    // Invite run should complete immediately when cancelled
+    cancel_token.cancel();
+    let result = invite.run(cancel_token).await;
+    assert_ok!(result);
+}
+
+#[tokio::test]
+async fn test_invite_middleware_accepts_local_user() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let invite =
+        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@user:example.com".to_string(),
+            body: "!invite".to_string(),
+            is_local_user: true, // Local user
+        },
+    };
+
+    let result = invite.on_event(&event);
+    assert_ok!(&result);
+    assert_matches!(result.unwrap(), Verdict::Continue);
+
+    // Give async command sending time to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Should have sent a GenerateInviteToken command
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::GenerateInviteToken { user_id, uses_allowed, expiry, .. } => {
+            assert_eq!(user_id, "@user:example.com");
+            assert_eq!(uses_allowed, Some(1));
+            assert_eq!(expiry, Some(Duration::from_secs(604800)));
+        }
+        _ => panic!("Expected GenerateInviteToken command"),
+    }
+}
+
+#[tokio::test]
+async fn test_invite_middleware_rejects_non_local_user() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let invite =
+        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@user:different.com".to_string(),
+            body: "!invite".to_string(),
+            is_local_user: false, // Non-local user
+        },
+    };
+
+    let result = invite.on_event(&event);
+    assert_ok!(&result);
+    assert_matches!(result.unwrap(), Verdict::Continue);
+
+    // Give async command sending time to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Should have sent a rejection message, not a GenerateInviteToken
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendDirectMessage { user_id, body, .. } => {
+            assert_eq!(user_id, "@user:different.com");
+            assert!(body.contains("only be generated for users from this server"));
+        }
+        _ => panic!("Expected SendDirectMessage command for rejection"),
+    }
+}
+
+#[tokio::test]
+async fn test_invite_middleware_ignores_wrong_command() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let invite =
+        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@user:example.com".to_string(),
+            body: "!different".to_string(),
+            is_local_user: true,
+        },
+    };
+
+    let result = invite.on_event(&event);
+    assert_ok!(&result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Should NOT have sent any command
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_invite_middleware_ignores_room_messages() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let invite =
+        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::RoomMessage {
+            room_id: "!room:example.com".to_string(),
+            body: "!invite".to_string(),
+            is_local_user: true,
+        },
+    };
+
+    let result = invite.on_event(&event);
+    assert_ok!(&result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Should NOT process invite commands in rooms
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_invite_middleware_with_default_config() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    // Create invite with no explicit config (will use defaults)
+    let invite = Invite::new(cmd_tx, "!invite".to_string(), None, None);
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@user:example.com".to_string(),
+            body: "!invite".to_string(),
+            is_local_user: true,
+        },
+    };
+
+    let result = invite.on_event(&event);
+    assert_ok!(&result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::GenerateInviteToken { uses_allowed, expiry, .. } => {
+            // Should pass None values, letting service apply defaults
+            assert_eq!(uses_allowed, None);
+            assert_eq!(expiry, None);
+        }
+        _ => panic!("Expected GenerateInviteToken command"),
+    }
+}
+
+#[tokio::test]
+async fn test_invite_middleware_with_custom_expiry() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let custom_expiry = Duration::from_secs(3600); // 1 hour
+    let invite = Invite::new(cmd_tx, "!invite".to_string(), Some(5), Some(custom_expiry));
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@user:example.com".to_string(),
+            body: "!invite".to_string(),
+            is_local_user: true,
+        },
+    };
+
+    let result = invite.on_event(&event);
+    assert_ok!(&result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::GenerateInviteToken { uses_allowed, expiry, .. } => {
+            assert_eq!(uses_allowed, Some(5));
+            assert_eq!(expiry, Some(custom_expiry));
+        }
+        _ => panic!("Expected GenerateInviteToken command"),
+    }
+}
+
+#[tokio::test]
+async fn test_invite_middleware_instantiation_from_config() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "test_invite".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::Invite {
+                command_string: "!token".to_string(),
+                uses_allowed: Some(3),
+                expiry: Some(Duration::from_secs(86400)), // 1 day
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    assert_ok!(&result);
+
+    let middlewares = result.unwrap();
+    assert_eq!(middlewares.len(), 1);
+    assert!(middlewares.contains_key("test_invite"));
 }
