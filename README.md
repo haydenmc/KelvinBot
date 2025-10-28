@@ -139,6 +139,56 @@ KELVIN__SERVICES__matrix_main__MIDDLEWARE=myecho,logger
 
 When a user sends `!echo hello world`, the bot will respond with `hello world`.
 
+#### Invite Middleware
+Generates registration tokens for chat services (currently only implemented
+for Matrix). Only accepts requests from local users (same server as the bot).
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=invite
+KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=<command_trigger>
+KELVIN__MIDDLEWARES__<name>__USES_ALLOWED=<number>      # Optional, default: 1
+KELVIN__MIDDLEWARES__<name>__EXPIRY=<duration>          # Optional, default: 7d
+```
+
+**Duration Format:**
+The `EXPIRY` parameter accepts human-readable durations:
+- `7d` - 7 days
+- `1w` - 1 week
+- `24h` - 24 hours
+- `30m` - 30 minutes
+- `2h30m` - 2 hours and 30 minutes
+- `1w2d` - 1 week and 2 days
+
+**Example:**
+```bash
+# Define an invite middleware with custom settings
+KELVIN__MIDDLEWARES__myinvite__KIND=invite
+KELVIN__MIDDLEWARES__myinvite__COMMAND_STRING=!invite
+KELVIN__MIDDLEWARES__myinvite__USES_ALLOWED=1    # Token can be used once
+KELVIN__MIDDLEWARES__myinvite__EXPIRY=7d         # Token expires in 7 days
+
+# Assign to Matrix service
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=myecho,myinvite,logger
+```
+
+**Usage:**
+When a local user sends `!invite`, the bot generates a Matrix registration token and responds with:
+```
+Registration token generated: abc123xyz
+
+Uses allowed: 1
+Expires: 2025-11-04 15:30:00 UTC
+
+Use this token when registering a new account on this server.
+```
+
+**Requirements:**
+- Currently only works with Matrix services
+- Bot user must have requisite permissions to generate tokens
+- Only local users (same homeserver on Matrix) can request tokens
+- Tokens are single-use by default for security
+
 ### Middleware Pipelines
 
 Services can have multiple middlewares that process events sequentially:
@@ -199,8 +249,10 @@ KELVIN__DATA_DIRECTORY=/opt/kelvinbot/data
 KELVIN__MIDDLEWARES__logger__KIND=logger
 KELVIN__MIDDLEWARES__myecho__KIND=echo
 KELVIN__MIDDLEWARES__myecho__COMMAND_STRING=!echo
-KELVIN__MIDDLEWARES__testcmd__KIND=echo
-KELVIN__MIDDLEWARES__testcmd__COMMAND_STRING=!test
+KELVIN__MIDDLEWARES__myinvite__KIND=invite
+KELVIN__MIDDLEWARES__myinvite__COMMAND_STRING=!invite
+KELVIN__MIDDLEWARES__myinvite__USES_ALLOWED=1
+KELVIN__MIDDLEWARES__myinvite__EXPIRY=7d
 
 # Dummy service for testing
 KELVIN__SERVICES__test_dummy__KIND=dummy
