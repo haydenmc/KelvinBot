@@ -11,6 +11,7 @@ fn test_event_display_direct_message() {
         kind: EventKind::DirectMessage {
             user_id: "@user:example.com".to_string(),
             body: "Hello world".to_string(),
+            is_local_user: true,
         },
     };
 
@@ -28,6 +29,7 @@ fn test_event_display_room_message() {
         kind: EventKind::RoomMessage {
             room_id: "!room123:example.com".to_string(),
             body: "Test message".to_string(),
+            is_local_user: false,
         },
     };
 
@@ -45,6 +47,7 @@ fn test_event_serialization() {
         kind: EventKind::RoomMessage {
             room_id: "!room:example.com".to_string(),
             body: "Hello".to_string(),
+            is_local_user: true,
         },
     };
 

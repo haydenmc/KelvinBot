@@ -12,18 +12,18 @@ pub struct Event {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum EventKind {
-    DirectMessage { user_id: String, body: String },
-    RoomMessage { room_id: String, body: String },
+    DirectMessage { user_id: String, body: String, is_local_user: bool },
+    RoomMessage { room_id: String, body: String, is_local_user: bool },
 }
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}]", &self.service_id)?;
         match &self.kind {
-            EventKind::DirectMessage { user_id, body } => {
+            EventKind::DirectMessage { user_id, body, .. } => {
                 write!(f, "[DM] {user_id}: {body}")
             }
-            EventKind::RoomMessage { room_id, body } => {
+            EventKind::RoomMessage { room_id, body, .. } => {
                 write!(f, "[RM] {room_id}: {body}")
             }
         }

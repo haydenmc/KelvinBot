@@ -13,5 +13,6 @@ pub mod services {
 
 pub mod middlewares {
     pub mod echo;
+    pub mod invite;
     pub mod logger;
 }

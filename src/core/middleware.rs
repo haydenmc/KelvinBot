@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::core::bus::Command;
 use crate::core::config::{Config, MiddlewareKind};
 use crate::core::event::Event;
-use crate::middlewares::{echo::Echo, logger::Logger};
+use crate::middlewares::{echo::Echo, invite::Invite, logger::Logger};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
@@ -35,6 +35,9 @@ pub fn instantiate_middleware_from_config(
             MiddlewareKind::Echo { command_string } => {
                 Arc::new(Echo::new(cmd_tx.clone(), command_string.clone()))
             }
+            MiddlewareKind::Invite { command_string, uses_allowed, expiry } => Arc::new(
+                Invite::new(cmd_tx.clone(), command_string.clone(), *uses_allowed, *expiry),
+            ),
             MiddlewareKind::Logger {} => Arc::new(Logger {}),
             MiddlewareKind::Unknown => {
                 warn!(middleware_name=%name, "unknown middleware kind, skipping");

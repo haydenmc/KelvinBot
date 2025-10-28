@@ -90,6 +90,7 @@ impl Service for MockService {
                             kind: EventKind::RoomMessage {
                                 room_id: format!("room_{}", i),
                                 body: format!("test message {}", i),
+                                is_local_user: false,
                             },
                         };
 

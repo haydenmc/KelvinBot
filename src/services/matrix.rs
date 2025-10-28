@@ -288,6 +288,59 @@ impl MatrixService {
         }
     }
 
+    async fn generate_registration_token(
+        &self,
+        uses_allowed: Option<u32>,
+        expiry: Option<std::time::Duration>,
+    ) -> Result<String> {
+        // Call Synapse admin API to create a registration token
+        let homeserver = self.client.homeserver();
+        let url = format!("{}/_synapse/admin/v1/registration_tokens/new", homeserver);
+
+        // Get access token from the client session
+        let access_token = self
+            .client
+            .session()
+            .ok_or_else(|| anyhow::anyhow!("not logged in"))?
+            .access_token()
+            .to_owned();
+
+        // Build request body with optional parameters
+        let mut body = serde_json::Map::new();
+
+        // Set uses_allowed (defaults to 1 if not provided)
+        let uses_allowed = uses_allowed.unwrap_or(1);
+        body.insert("uses_allowed".to_string(), serde_json::json!(uses_allowed));
+
+        // Set expiry_time (defaults to 7 days if not provided)
+        let expiry_duration = expiry.unwrap_or(std::time::Duration::from_secs(7 * 24 * 60 * 60));
+        let expiry_ms =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64
+                + expiry_duration.as_millis() as u64;
+        body.insert("expiry_time".to_string(), serde_json::json!(expiry_ms));
+
+        // Create HTTP client
+        let http_client = reqwest::Client::new();
+
+        // Call the admin API
+        let response = http_client.post(&url).bearer_auth(access_token).json(&body).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("failed to generate registration token: HTTP {} - {}", status, body);
+        }
+
+        // Parse response
+        let json: serde_json::Value = response.json().await?;
+        let token = json["token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("response missing 'token' field"))?
+            .to_string();
+
+        Ok(token)
+    }
+
     async fn setup_event_handlers(&self) -> anyhow::Result<()> {
         // Handle room invites
         self.client.add_event_handler(
@@ -340,6 +393,8 @@ impl MatrixService {
         // Handle room messages
         let service_id = self.id.clone();
         let evt_tx = self.evt_tx.clone();
+        let bot_user_id_for_handler =
+            self.client.user_id().expect("client should have user_id after login").to_owned();
         self.client.add_event_handler(
             |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| async move {
                 if room.state() != RoomState::Joined {
@@ -355,6 +410,10 @@ impl MatrixService {
                     return;
                 };
 
+                // Check if user is from the same homeserver as the bot
+                let is_local_user =
+                    event.sender.server_name() == bot_user_id_for_handler.server_name();
+
                 match is_direct {
                     true => {
                         let event = Event {
@@ -362,6 +421,7 @@ impl MatrixService {
                             kind: EventKind::DirectMessage {
                                 user_id: event.sender.to_string(),
                                 body: text_content.body,
+                                is_local_user,
                             },
                         };
 
@@ -373,6 +433,7 @@ impl MatrixService {
                             kind: EventKind::RoomMessage {
                                 room_id: room.room_id().to_string(),
                                 body: text_content.body,
+                                is_local_user,
                             },
                         };
 
@@ -514,6 +575,26 @@ impl Service for MatrixService {
                 } else {
                     warn!(room_id=%room_id, "room not found or not joined");
                 }
+            }
+            Command::GenerateInviteToken { user_id, uses_allowed, expiry, response_tx, .. } => {
+                info!(service=%self.id, user_id=%user_id, uses_allowed=?uses_allowed, expiry=?expiry, "generating invite token");
+
+                // Generate the registration token
+                let result = self.generate_registration_token(uses_allowed, expiry).await;
+
+                // Log the result
+                match &result {
+                    Ok(token) => {
+                        info!(token=%token, "registration token generated successfully");
+                    }
+                    Err(e) => {
+                        error!(error=%e, "failed to generate registration token");
+                    }
+                }
+
+                // Send response back through oneshot channel
+                // Ignore send errors (receiver may have been dropped)
+                let _ = response_tx.send(result);
             }
         }
         Ok(())

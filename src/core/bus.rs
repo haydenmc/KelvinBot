@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -8,10 +9,52 @@ use crate::core::event::Event;
 use crate::core::middleware::{Middleware, Verdict};
 use crate::core::service::{Service, ServiceId};
 
-#[derive(Debug, Clone)]
 pub enum Command {
-    SendDirectMessage { service_id: ServiceId, user_id: String, body: String },
-    SendRoomMessage { service_id: ServiceId, room_id: String, body: String },
+    SendDirectMessage {
+        service_id: ServiceId,
+        user_id: String,
+        body: String,
+    },
+    SendRoomMessage {
+        service_id: ServiceId,
+        room_id: String,
+        body: String,
+    },
+    GenerateInviteToken {
+        service_id: ServiceId,
+        user_id: String,
+        uses_allowed: Option<u32>,
+        expiry: Option<Duration>,
+        response_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+    },
+}
+
+// Implement Debug manually since oneshot::Sender doesn't implement Clone
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Command::SendDirectMessage { service_id, user_id, body } => f
+                .debug_struct("SendDirectMessage")
+                .field("service_id", service_id)
+                .field("user_id", user_id)
+                .field("body", body)
+                .finish(),
+            Command::SendRoomMessage { service_id, room_id, body } => f
+                .debug_struct("SendRoomMessage")
+                .field("service_id", service_id)
+                .field("room_id", room_id)
+                .field("body", body)
+                .finish(),
+            Command::GenerateInviteToken { service_id, user_id, uses_allowed, expiry, .. } => f
+                .debug_struct("GenerateInviteToken")
+                .field("service_id", service_id)
+                .field("user_id", user_id)
+                .field("uses_allowed", uses_allowed)
+                .field("expiry", expiry)
+                .field("response_tx", &"<oneshot::Sender>")
+                .finish(),
+        }
+    }
 }
 
 pub struct Bus {
@@ -100,6 +143,7 @@ impl Bus {
                     let service_id = match &cmd {
                         Command::SendDirectMessage { service_id, .. } => service_id.clone(),
                         Command::SendRoomMessage { service_id, .. } => service_id.clone(),
+                        Command::GenerateInviteToken { service_id, .. } => service_id.clone(),
                     };
 
                     // Dispatch command to appropriate service
