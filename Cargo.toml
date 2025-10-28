@@ -27,6 +27,8 @@ matrix-sdk = { version = "0.14", features = ["anyhow", "bundled-sqlite"] }
 reqwest = { version = "0.12", features = ["json"] }
 secrecy = { version = "0.10", features = ["serde"] }
 url = { version = "2.5", features = ["serde"] }
+humantime-serde = "1.1"
+chrono = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

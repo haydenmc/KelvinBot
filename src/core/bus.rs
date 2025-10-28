@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -22,6 +23,8 @@ pub enum Command {
     GenerateInviteToken {
         service_id: ServiceId,
         user_id: String,
+        uses_allowed: Option<u32>,
+        expiry: Option<Duration>,
         response_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
     },
 }
@@ -42,10 +45,12 @@ impl std::fmt::Debug for Command {
                 .field("room_id", room_id)
                 .field("body", body)
                 .finish(),
-            Command::GenerateInviteToken { service_id, user_id, .. } => f
+            Command::GenerateInviteToken { service_id, user_id, uses_allowed, expiry, .. } => f
                 .debug_struct("GenerateInviteToken")
                 .field("service_id", service_id)
                 .field("user_id", user_id)
+                .field("uses_allowed", uses_allowed)
+                .field("expiry", expiry)
                 .field("response_tx", &"<oneshot::Sender>")
                 .finish(),
         }

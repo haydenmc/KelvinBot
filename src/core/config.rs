@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -36,6 +36,9 @@ pub enum MiddlewareKind {
     },
     Invite {
         command_string: String,
+        uses_allowed: Option<u32>,
+        #[serde(default, with = "humantime_serde")]
+        expiry: Option<Duration>,
     },
     Logger {},
     #[serde(other)]

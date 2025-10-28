@@ -5,17 +5,25 @@ use crate::core::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 pub struct Invite {
     cmd_tx: Sender<Command>,
     command_string: String,
+    uses_allowed: Option<u32>,
+    expiry: Option<Duration>,
 }
 
 impl Invite {
-    pub fn new(cmd_tx: Sender<Command>, command_string: String) -> Self {
-        Self { cmd_tx, command_string }
+    pub fn new(
+        cmd_tx: Sender<Command>,
+        command_string: String,
+        uses_allowed: Option<u32>,
+        expiry: Option<Duration>,
+    ) -> Self {
+        Self { cmd_tx, command_string, uses_allowed, expiry }
     }
 }
 
@@ -65,6 +73,8 @@ impl Middleware for Invite {
                     let command = Command::GenerateInviteToken {
                         service_id: evt.service_id.clone(),
                         user_id: user_id.clone(),
+                        uses_allowed: self.uses_allowed,
+                        expiry: self.expiry,
                         response_tx,
                     };
 
@@ -72,6 +82,9 @@ impl Middleware for Invite {
                     let cmd_tx = self.cmd_tx.clone();
                     let service_id = evt.service_id.clone();
                     let user_id_clone = user_id.clone();
+                    let uses_allowed = self.uses_allowed.unwrap_or(1);
+                    let expiry_duration =
+                        self.expiry.unwrap_or(Duration::from_secs(7 * 24 * 60 * 60));
 
                     tokio::spawn(async move {
                         // Send the command
@@ -93,10 +106,25 @@ impl Middleware for Invite {
                         let message = match result {
                             Ok(token) => {
                                 tracing::info!(user_id=%user_id_clone, "token generated successfully");
+
+                                // Calculate expiration time
+                                let expiry_time = std::time::SystemTime::now() + expiry_duration;
+                                let expiry_datetime = expiry_time
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| {
+                                        let secs = d.as_secs();
+                                        let dt = chrono::DateTime::from_timestamp(secs as i64, 0)
+                                            .unwrap_or_default();
+                                        dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                    })
+                                    .unwrap_or_else(|_| "unknown".to_string());
+
                                 format!(
                                     "Registration token generated: {}\n\n\
+                                     Uses allowed: {}\n\
+                                     Expires: {}\n\n\
                                      Use this token when registering a new account on this server.",
-                                    token
+                                    token, uses_allowed, expiry_datetime
                                 )
                             }
                             Err(e) => {

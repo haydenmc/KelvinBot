@@ -288,7 +288,11 @@ impl MatrixService {
         }
     }
 
-    async fn generate_registration_token(&self) -> Result<String> {
+    async fn generate_registration_token(
+        &self,
+        uses_allowed: Option<u32>,
+        expiry: Option<std::time::Duration>,
+    ) -> Result<String> {
         // Call Synapse admin API to create a registration token
         let homeserver = self.client.homeserver();
         let url = format!("{}/_synapse/admin/v1/registration_tokens/new", homeserver);
@@ -301,16 +305,25 @@ impl MatrixService {
             .access_token()
             .to_owned();
 
+        // Build request body with optional parameters
+        let mut body = serde_json::Map::new();
+
+        // Set uses_allowed (defaults to 1 if not provided)
+        let uses_allowed = uses_allowed.unwrap_or(1);
+        body.insert("uses_allowed".to_string(), serde_json::json!(uses_allowed));
+
+        // Set expiry_time (defaults to 7 days if not provided)
+        let expiry_duration = expiry.unwrap_or(std::time::Duration::from_secs(7 * 24 * 60 * 60));
+        let expiry_ms =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64
+                + expiry_duration.as_millis() as u64;
+        body.insert("expiry_time".to_string(), serde_json::json!(expiry_ms));
+
         // Create HTTP client
         let http_client = reqwest::Client::new();
 
         // Call the admin API
-        let response = http_client
-            .post(&url)
-            .bearer_auth(access_token)
-            .json(&serde_json::json!({})) // Empty body to use defaults
-            .send()
-            .await?;
+        let response = http_client.post(&url).bearer_auth(access_token).json(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -563,11 +576,11 @@ impl Service for MatrixService {
                     warn!(room_id=%room_id, "room not found or not joined");
                 }
             }
-            Command::GenerateInviteToken { user_id, response_tx, .. } => {
-                info!(service=%self.id, user_id=%user_id, "generating invite token");
+            Command::GenerateInviteToken { user_id, uses_allowed, expiry, response_tx, .. } => {
+                info!(service=%self.id, user_id=%user_id, uses_allowed=?uses_allowed, expiry=?expiry, "generating invite token");
 
                 // Generate the registration token
-                let result = self.generate_registration_token().await;
+                let result = self.generate_registration_token(uses_allowed, expiry).await;
 
                 // Log the result
                 match &result {

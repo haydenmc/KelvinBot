@@ -53,8 +53,8 @@ impl Service for DummyService {
             Command::SendRoomMessage { room_id, body, .. } => {
                 info!(service=%self.id, room_id=%room_id, body=%body, "dummy service: would send room message");
             }
-            Command::GenerateInviteToken { user_id, response_tx, .. } => {
-                info!(service=%self.id, user_id=%user_id, "dummy service: generating fake invite token");
+            Command::GenerateInviteToken { user_id, uses_allowed, expiry, response_tx, .. } => {
+                info!(service=%self.id, user_id=%user_id, uses_allowed=?uses_allowed, expiry=?expiry, "dummy service: generating fake invite token");
                 // Send a fake token response
                 let _ = response_tx.send(Ok("DUMMY_TOKEN_12345".to_string()));
             }
