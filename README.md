@@ -189,6 +189,50 @@ Use this token when registering a new account on this server.
 - Only local users (same homeserver on Matrix) can request tokens
 - Tokens are single-use by default for security
 
+#### Regal Showtimes Middleware
+Posts movie showtimes from Regal theaters to a specified room on a recurring schedule.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=regal_showtimes
+KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
+KELVIN__MIDDLEWARES__<name>__ROOM_ID=<room_id>
+KELVIN__MIDDLEWARES__<name>__DAY_OF_WEEK=<day>
+KELVIN__MIDDLEWARES__<name>__TIME=<HH:MM>
+KELVIN__MIDDLEWARES__<name>__THEATER_ID=<theater_id>
+```
+
+**Parameters:**
+- `SERVICE_ID`: Name of the service to use for posting (e.g., `matrix_main`)
+- `ROOM_ID`: Target room/channel ID where showtimes will be posted
+- `DAY_OF_WEEK`: Day to post showtimes - one of: `Mon`, `Tue`, `Wed`, `Thu`, `Fri`, `Sat`, `Sun`
+- `TIME`: Time to post in 24-hour format (e.g., `10:00`, `14:30`)
+- `THEATER_ID`: Regal theater identifier (specific to the API implementation)
+
+**Example:**
+```bash
+# Define a Regal showtimes middleware that posts every Friday at 10:00 AM
+KELVIN__MIDDLEWARES__regal__KIND=regal_showtimes
+KELVIN__MIDDLEWARES__regal__SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__regal__ROOM_ID=!abcdef123456:matrix.org
+KELVIN__MIDDLEWARES__regal__DAY_OF_WEEK=Fri
+KELVIN__MIDDLEWARES__regal__TIME=10:00
+KELVIN__MIDDLEWARES__regal__THEATER_ID=1234
+
+# Note: This middleware runs independently and doesn't need to be assigned
+# to a service's MIDDLEWARE list - it posts on its own schedule
+```
+
+**Behavior:**
+- Runs as a background task, independent of event flow
+- Calculates next scheduled time based on `DAY_OF_WEEK` and `TIME`
+- Fetches showtimes from Regal API at scheduled time
+- Posts formatted showtimes message to specified room via specified service
+- If fetch fails, posts error message to the room
+- Automatically schedules next posting for the following week
+
+**Note:** The API fetching and parsing logic is a placeholder. Customize `fetch_showtimes()` and `format_showtimes()` methods in `src/middlewares/regal_showtimes.rs` based on the actual Regal API structure.
+
 ### Middleware Pipelines
 
 Services can have multiple middlewares that process events sequentially:
@@ -224,6 +268,8 @@ Potential middlewares for future development:
 - Sentiment analysis
 - Cross-platform message bridging
 - Rate limiting and spam prevention
+- Scheduled announcements and reminders
+- RSS feed monitoring and posting
 
 ## Configuration
 
@@ -476,7 +522,9 @@ src/
 │   └── matrix.rs         # Matrix homeserver integration
 └── middlewares/          # Event processors
     ├── echo.rs          # Command echo middleware
-    └── logger.rs        # Event logging middleware
+    ├── invite.rs        # Registration token generation
+    ├── logger.rs        # Event logging middleware
+    └── regal_showtimes.rs  # Scheduled movie showtimes posting
 
 tests/                    # Comprehensive test suite
 ├── unit/                # Component unit tests

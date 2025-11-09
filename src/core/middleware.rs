@@ -3,7 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use crate::core::bus::Command;
 use crate::core::config::{Config, MiddlewareKind};
 use crate::core::event::Event;
-use crate::middlewares::{echo::Echo, invite::Invite, logger::Logger, regal_showtimes::RegalShowtimes};
+use crate::middlewares::{
+    echo::Echo, invite::Invite, logger::Logger, regal_showtimes::RegalShowtimes,
+};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;

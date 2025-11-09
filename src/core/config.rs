@@ -45,7 +45,7 @@ pub enum MiddlewareKind {
         service_id: String,
         room_id: String,
         day_of_week: String, // e.g., "Monday", "Tuesday", etc.
-        time: String,         // e.g., "18:00", "09:30"
+        time: String,        // e.g., "18:00", "09:30"
         theater_id: String,
     },
     #[serde(other)]
