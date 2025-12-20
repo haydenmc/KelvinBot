@@ -189,49 +189,52 @@ Use this token when registering a new account on this server.
 - Only local users (same homeserver on Matrix) can request tokens
 - Tokens are single-use by default for security
 
-#### Regal Showtimes Middleware
-Posts movie showtimes from Regal theaters to a specified room on a recurring schedule.
+#### Movie Showtimes Middleware
+Posts weekly movie showtimes to a specified room on a recurring schedule using the Gracenote TMS API.
 
 **Configuration:**
 ```bash
-KELVIN__MIDDLEWARES__<name>__KIND=regal_showtimes
+KELVIN__MIDDLEWARES__<name>__KIND=movieshowtimes
 KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
 KELVIN__MIDDLEWARES__<name>__ROOM_ID=<room_id>
-KELVIN__MIDDLEWARES__<name>__DAY_OF_WEEK=<day>
-KELVIN__MIDDLEWARES__<name>__TIME=<HH:MM>
-KELVIN__MIDDLEWARES__<name>__THEATER_ID=<theater_id>
+KELVIN__MIDDLEWARES__<name>__POST_ON_DAY_OF_WEEK=<day>
+KELVIN__MIDDLEWARES__<name>__POST_AT_TIME=<HH:MM>
+KELVIN__MIDDLEWARES__<name>__SEARCH_LOCATION__LAT=<latitude>
+KELVIN__MIDDLEWARES__<name>__SEARCH_LOCATION__LNG=<longitude>
+KELVIN__MIDDLEWARES__<name>__SEARCH_RADIUS_MI=<miles>
+KELVIN__MIDDLEWARES__<name>__GRACENOTE_API_KEY=<api_key>
+KELVIN__MIDDLEWARES__<name>__THEATER_ID_FILTER=<id1>,<id2>,<id3>  # Optional
 ```
 
 **Parameters:**
-- `SERVICE_ID`: Name of the service to use for posting (e.g., `matrix_main`)
-- `ROOM_ID`: Target room/channel ID where showtimes will be posted
-- `DAY_OF_WEEK`: Day to post showtimes - one of: `Mon`, `Tue`, `Wed`, `Thu`, `Fri`, `Sat`, `Sun`
-- `TIME`: Time to post in 24-hour format (e.g., `10:00`, `14:30`)
-- `THEATER_ID`: Regal theater identifier (specific to the API implementation)
+- `POST_ON_DAY_OF_WEEK`: Day to post - one of: `Monday`, `Tuesday`, `Wednesday`, `Thursday`, `Friday`, `Saturday`, `Sunday`
+- `POST_AT_TIME`: Time to post in 24-hour format (e.g., `09:00`, `18:30`)
+- `SEARCH_LOCATION`: Latitude/longitude coordinates for theater search
+- `SEARCH_RADIUS_MI`: Search radius in miles from location
+- `GRACENOTE_API_KEY`: API key from [Gracenote Developer](https://developer.tmsapi.com/)
+- `THEATER_ID_FILTER`: Optional comma-separated priority list of theater IDs
 
 **Example:**
 ```bash
-# Define a Regal showtimes middleware that posts every Friday at 10:00 AM
-KELVIN__MIDDLEWARES__regal__KIND=regal_showtimes
-KELVIN__MIDDLEWARES__regal__SERVICE_ID=matrix_main
-KELVIN__MIDDLEWARES__regal__ROOM_ID=!abcdef123456:matrix.org
-KELVIN__MIDDLEWARES__regal__DAY_OF_WEEK=Fri
-KELVIN__MIDDLEWARES__regal__TIME=10:00
-KELVIN__MIDDLEWARES__regal__THEATER_ID=1234
-
-# Note: This middleware runs independently and doesn't need to be assigned
-# to a service's MIDDLEWARE list - it posts on its own schedule
+KELVIN__MIDDLEWARES__movies__KIND=movieshowtimes
+KELVIN__MIDDLEWARES__movies__SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__movies__ROOM_ID=!abcdef123456:matrix.org
+KELVIN__MIDDLEWARES__movies__POST_ON_DAY_OF_WEEK=Friday
+KELVIN__MIDDLEWARES__movies__POST_AT_TIME=09:00
+KELVIN__MIDDLEWARES__movies__SEARCH_LOCATION__LAT=47.6062
+KELVIN__MIDDLEWARES__movies__SEARCH_LOCATION__LNG=-122.3321
+KELVIN__MIDDLEWARES__movies__SEARCH_RADIUS_MI=10
+KELVIN__MIDDLEWARES__movies__GRACENOTE_API_KEY=your_api_key_here
+KELVIN__MIDDLEWARES__movies__THEATER_ID_FILTER=1234,5678,9012
 ```
 
 **Behavior:**
-- Runs as a background task, independent of event flow
-- Calculates next scheduled time based on `DAY_OF_WEEK` and `TIME`
-- Fetches showtimes from Regal API at scheduled time
-- Posts formatted showtimes message to specified room via specified service
-- If fetch fails, posts error message to the room
-- Automatically schedules next posting for the following week
-
-**Note:** The API fetching and parsing logic is a placeholder. Customize `fetch_showtimes()` and `format_showtimes()` methods in `src/middlewares/regal_showtimes.rs` based on the actual Regal API structure.
+- Fetches 7 days of showtimes from TMS API at scheduled time
+- Groups showtimes by day for each movie
+- If `THEATER_ID_FILTER` is set: shows detailed times for first matching theater, lists others as "also showing at"
+- Without filter: shows all theaters within radius
+- Posts markdown-formatted message with movie metadata (title, year, rating, runtime)
+- Runs independently as background task
 
 ### Middleware Pipelines
 
@@ -524,7 +527,7 @@ src/
     ├── echo.rs          # Command echo middleware
     ├── invite.rs        # Registration token generation
     ├── logger.rs        # Event logging middleware
-    └── regal_showtimes.rs  # Scheduled movie showtimes posting
+    └── movie_showtimes.rs  # Scheduled movie showtimes posting
 
 tests/                    # Comprehensive test suite
 ├── unit/                # Component unit tests
