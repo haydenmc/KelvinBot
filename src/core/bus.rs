@@ -19,6 +19,7 @@ pub enum Command {
         service_id: ServiceId,
         room_id: String,
         body: String,
+        markdown_body: Option<String>,
     },
     GenerateInviteToken {
         service_id: ServiceId,
@@ -39,11 +40,12 @@ impl std::fmt::Debug for Command {
                 .field("user_id", user_id)
                 .field("body", body)
                 .finish(),
-            Command::SendRoomMessage { service_id, room_id, body } => f
+            Command::SendRoomMessage { service_id, room_id, body, markdown_body } => f
                 .debug_struct("SendRoomMessage")
                 .field("service_id", service_id)
                 .field("room_id", room_id)
                 .field("body", body)
+                .field("markdown_body", markdown_body)
                 .finish(),
             Command::GenerateInviteToken { service_id, user_id, uses_allowed, expiry, .. } => f
                 .debug_struct("GenerateInviteToken")

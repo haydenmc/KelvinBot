@@ -9,7 +9,10 @@ use matrix_sdk::{
         RoomId, UserId,
         events::room::{
             member::{MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent},
-            message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+            message::{
+                MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+                TextMessageEventContent,
+            },
         },
     },
 };
@@ -552,7 +555,7 @@ impl Service for MatrixService {
                     }
                 }
             }
-            Command::SendRoomMessage { room_id, body, .. } => {
+            Command::SendRoomMessage { room_id, body, markdown_body, .. } => {
                 info!(service=%self.id, room_id=%room_id, body=%body, "sending room message");
 
                 // Parse the room ID
@@ -566,7 +569,14 @@ impl Service for MatrixService {
 
                 // Get the room and send message
                 if let Some(room) = self.client.get_room(&room_id) {
-                    let content = RoomMessageEventContent::text_plain(&body);
+                    let content = if let Some(markdown) = markdown_body {
+                        RoomMessageEventContent::new(MessageType::Text(
+                            TextMessageEventContent::markdown(markdown),
+                        ))
+                    } else {
+                        RoomMessageEventContent::text_plain(&body)
+                    };
+
                     if let Err(e) = room.send(content).await {
                         error!(error=%e, "failed to send room message");
                     } else {

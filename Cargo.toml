@@ -23,7 +23,7 @@ serde_json = "1.0"
 serde_with = "3"
 toml = "0.9"
 async-trait = "0.1"
-matrix-sdk = { version = "0.14", features = ["anyhow", "bundled-sqlite"] }
+matrix-sdk = { version = "0.14", features = ["anyhow", "bundled-sqlite", "markdown"] }
 reqwest = { version = "0.12", features = ["json"] }
 secrecy = { version = "0.10", features = ["serde"] }
 url = { version = "2.5", features = ["serde"] }

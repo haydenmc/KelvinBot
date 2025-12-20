@@ -189,6 +189,53 @@ Use this token when registering a new account on this server.
 - Only local users (same homeserver on Matrix) can request tokens
 - Tokens are single-use by default for security
 
+#### Movie Showtimes Middleware
+Posts weekly movie showtimes to a specified room on a recurring schedule using the Gracenote TMS API.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=movieshowtimes
+KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
+KELVIN__MIDDLEWARES__<name>__ROOM_ID=<room_id>
+KELVIN__MIDDLEWARES__<name>__POST_ON_DAY_OF_WEEK=<day>
+KELVIN__MIDDLEWARES__<name>__POST_AT_TIME=<HH:MM>
+KELVIN__MIDDLEWARES__<name>__SEARCH_LOCATION__LAT=<latitude>
+KELVIN__MIDDLEWARES__<name>__SEARCH_LOCATION__LNG=<longitude>
+KELVIN__MIDDLEWARES__<name>__SEARCH_RADIUS_MI=<miles>
+KELVIN__MIDDLEWARES__<name>__GRACENOTE_API_KEY=<api_key>
+KELVIN__MIDDLEWARES__<name>__THEATER_ID_FILTER=<id1>,<id2>,<id3>  # Optional
+```
+
+**Parameters:**
+- `POST_ON_DAY_OF_WEEK`: Day to post - one of: `Monday`, `Tuesday`, `Wednesday`, `Thursday`, `Friday`, `Saturday`, `Sunday`
+- `POST_AT_TIME`: Time to post in 24-hour format (e.g., `09:00`, `18:30`)
+- `SEARCH_LOCATION`: Latitude/longitude coordinates for theater search
+- `SEARCH_RADIUS_MI`: Search radius in miles from location
+- `GRACENOTE_API_KEY`: API key from [Gracenote Developer](https://developer.tmsapi.com/)
+- `THEATER_ID_FILTER`: Optional comma-separated priority list of theater IDs
+
+**Example:**
+```bash
+KELVIN__MIDDLEWARES__movies__KIND=movieshowtimes
+KELVIN__MIDDLEWARES__movies__SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__movies__ROOM_ID=!abcdef123456:matrix.org
+KELVIN__MIDDLEWARES__movies__POST_ON_DAY_OF_WEEK=Friday
+KELVIN__MIDDLEWARES__movies__POST_AT_TIME=09:00
+KELVIN__MIDDLEWARES__movies__SEARCH_LOCATION__LAT=47.6062
+KELVIN__MIDDLEWARES__movies__SEARCH_LOCATION__LNG=-122.3321
+KELVIN__MIDDLEWARES__movies__SEARCH_RADIUS_MI=10
+KELVIN__MIDDLEWARES__movies__GRACENOTE_API_KEY=your_api_key_here
+KELVIN__MIDDLEWARES__movies__THEATER_ID_FILTER=1234,5678,9012
+```
+
+**Behavior:**
+- Fetches 7 days of showtimes from TMS API at scheduled time
+- Groups showtimes by day for each movie
+- If `THEATER_ID_FILTER` is set: shows detailed times for first matching theater, lists others as "also showing at"
+- Without filter: shows all theaters within radius
+- Posts markdown-formatted message with movie metadata (title, year, rating, runtime)
+- Runs independently as background task
+
 ### Middleware Pipelines
 
 Services can have multiple middlewares that process events sequentially:
@@ -224,6 +271,8 @@ Potential middlewares for future development:
 - Sentiment analysis
 - Cross-platform message bridging
 - Rate limiting and spam prevention
+- Scheduled announcements and reminders
+- RSS feed monitoring and posting
 
 ## Configuration
 
@@ -476,7 +525,9 @@ src/
 │   └── matrix.rs         # Matrix homeserver integration
 └── middlewares/          # Event processors
     ├── echo.rs          # Command echo middleware
-    └── logger.rs        # Event logging middleware
+    ├── invite.rs        # Registration token generation
+    ├── logger.rs        # Event logging middleware
+    └── movie_showtimes.rs  # Scheduled movie showtimes posting
 
 tests/                    # Comprehensive test suite
 ├── unit/                # Component unit tests
