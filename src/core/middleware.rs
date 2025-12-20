@@ -48,6 +48,7 @@ pub fn instantiate_middleware_from_config(
                 post_at_time,
                 search_location,
                 search_radius_mi,
+                gracenote_api_key,
                 theater_id_filter,
             } => {
                 // Parse day_of_week string to Weekday
@@ -72,6 +73,7 @@ pub fn instantiate_middleware_from_config(
                     naive_time,
                     search_location.clone(),
                     *search_radius_mi,
+                    gracenote_api_key.clone(),
                     theater_id_filter.clone(),
                 ))
             }

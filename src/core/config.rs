@@ -52,6 +52,8 @@ pub enum MiddlewareKind {
         search_location: LatLng,
         #[serde_as(as = "DisplayFromStr")]
         search_radius_mi: u16,
+        gracenote_api_key: String,
+        #[serde(default, deserialize_with = "deserialize_string_list")]
         theater_id_filter: Option<Vec<String>>,
     },
     #[serde(other)]
@@ -80,6 +82,13 @@ pub struct ServiceCfg {
 }
 
 fn deserialize_middleware_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_string_list(deserializer)
+}
+
+fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

@@ -49,6 +49,7 @@ impl Middleware for Echo {
                     service_id: evt.service_id.clone(),
                     room_id: room_id.clone(),
                     body: echo_content.to_string(),
+                    markdown_body: None,
                 },
             };
 
