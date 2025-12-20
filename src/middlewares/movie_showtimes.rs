@@ -46,8 +46,8 @@ struct TmsRating {
 struct TmsShowtime {
     theatre: TmsTheatre,
     date_time: String, // ISO 8601 datetime
-    // barg: Option<bool>, // Unused
-    // ticket_uri: Option<String>, // Unused
+                       // barg: Option<bool>, // Unused
+                       // ticket_uri: Option<String>, // Unused
 }
 
 #[derive(Debug, Deserialize)]
