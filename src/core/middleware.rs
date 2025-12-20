@@ -71,7 +71,7 @@ pub fn instantiate_middleware_from_config(
                     room_id.clone(),
                     weekday,
                     naive_time,
-                    search_location.clone(),
+                    *search_location,
                     *search_radius_mi,
                     gracenote_api_key.clone(),
                     theater_id_filter.clone(),

@@ -26,10 +26,10 @@ pub struct LatLng {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TmsMovie {
-    tms_id: String,
+    // tms_id: String, // Unused
     title: String,
     release_year: Option<u16>,
-    genres: Option<Vec<String>>,
+    // genres: Option<Vec<String>>, // Unused
     ratings: Option<Vec<TmsRating>>,
     run_time: Option<String>, // ISO 8601 duration like "PT02H00M"
     showtimes: Vec<TmsShowtime>,
@@ -46,8 +46,8 @@ struct TmsRating {
 struct TmsShowtime {
     theatre: TmsTheatre,
     date_time: String, // ISO 8601 datetime
-    barg: Option<bool>,
-    ticket_uri: Option<String>,
+    // barg: Option<bool>, // Unused
+    // ticket_uri: Option<String>, // Unused
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +86,7 @@ pub struct MovieShowtimes {
 }
 
 impl MovieShowtimes {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_tx: Sender<Command>,
         service_id: String,
@@ -204,11 +205,7 @@ impl MovieShowtimes {
                             TheaterShowtimes { name: theater_name, times_by_day: HashMap::new() }
                         });
 
-                        theater_entry
-                            .times_by_day
-                            .entry(date)
-                            .or_insert_with(Vec::new)
-                            .push(time_str);
+                        theater_entry.times_by_day.entry(date).or_default().push(time_str);
                     }
                 }
 
