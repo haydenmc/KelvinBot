@@ -9,7 +9,10 @@ use matrix_sdk::{
         RoomId, UserId,
         events::room::{
             member::{MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent},
-            message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent, TextMessageEventContent},
+            message::{
+                MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+                TextMessageEventContent,
+            },
         },
     },
 };
@@ -567,7 +570,9 @@ impl Service for MatrixService {
                 // Get the room and send message
                 if let Some(room) = self.client.get_room(&room_id) {
                     let content = if let Some(markdown) = markdown_body {
-                        RoomMessageEventContent::new(MessageType::Text(TextMessageEventContent::markdown(markdown)))
+                        RoomMessageEventContent::new(MessageType::Text(
+                            TextMessageEventContent::markdown(markdown),
+                        ))
                     } else {
                         RoomMessageEventContent::text_plain(&body)
                     };

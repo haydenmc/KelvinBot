@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -163,20 +163,15 @@ impl MovieShowtimes {
 
         // Fetch data from API
         let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .context("failed to send request to TMS API")?;
+        let response =
+            client.get(&url).send().await.context("failed to send request to TMS API")?;
 
         if !response.status().is_success() {
             anyhow::bail!("TMS API returned error: {}", response.status());
         }
 
-        let movies: Vec<TmsMovie> = response
-            .json()
-            .await
-            .context("failed to parse TMS API response")?;
+        let movies: Vec<TmsMovie> =
+            response.json().await.context("failed to parse TMS API response")?;
 
         tracing::info!(movie_count = movies.len(), "received movies from API");
 
@@ -199,16 +194,15 @@ impl MovieShowtimes {
                     let theater_name = showtime.theatre.name.clone();
 
                     // Parse datetime
-                    if let Ok(dt) = NaiveDateTime::parse_from_str(&showtime.date_time, "%Y-%m-%dT%H:%M") {
+                    if let Ok(dt) =
+                        NaiveDateTime::parse_from_str(&showtime.date_time, "%Y-%m-%dT%H:%M")
+                    {
                         let date = dt.date();
                         let time_str = dt.format("%l:%M %p").to_string().trim().to_string();
 
-                        let theater_entry = theaters_map
-                            .entry(theater_id)
-                            .or_insert_with(|| TheaterShowtimes {
-                                name: theater_name,
-                                times_by_day: HashMap::new(),
-                            });
+                        let theater_entry = theaters_map.entry(theater_id).or_insert_with(|| {
+                            TheaterShowtimes { name: theater_name, times_by_day: HashMap::new() }
+                        });
 
                         theater_entry
                             .times_by_day
@@ -219,11 +213,12 @@ impl MovieShowtimes {
                 }
 
                 // If theater priority filter is set, find first priority theater with showtimes
-                let (primary_theater, other_theaters) = if let Some(ref priority_list) = self.theater_id_filter {
+                let (primary_theater, other_theaters) = if let Some(ref priority_list) =
+                    self.theater_id_filter
+                {
                     // Find first priority theater that has this movie
-                    let primary = priority_list
-                        .iter()
-                        .find_map(|theater_id| theaters_map.remove(theater_id));
+                    let primary =
+                        priority_list.iter().find_map(|theater_id| theaters_map.remove(theater_id));
 
                     // If no priority theater has it, skip this movie
                     let primary = primary?;
@@ -231,7 +226,9 @@ impl MovieShowtimes {
                     // Collect remaining priority theaters only (in priority order)
                     let others: Vec<String> = priority_list
                         .iter()
-                        .filter_map(|theater_id| theaters_map.get(theater_id).map(|t| t.name.clone()))
+                        .filter_map(|theater_id| {
+                            theaters_map.get(theater_id).map(|t| t.name.clone())
+                        })
                         .collect();
 
                     (primary, others)
@@ -245,7 +242,8 @@ impl MovieShowtimes {
                     }
 
                     let primary = theater_entries.remove(0).1;
-                    let others: Vec<String> = theater_entries.into_iter().map(|(_, t)| t.name).collect();
+                    let others: Vec<String> =
+                        theater_entries.into_iter().map(|(_, t)| t.name).collect();
 
                     (primary, others)
                 };
@@ -253,7 +251,9 @@ impl MovieShowtimes {
                 // Extract rating
                 let rating = movie
                     .ratings
-                    .and_then(|r| r.into_iter().find(|rating| rating.body.contains("Motion Picture")))
+                    .and_then(|r| {
+                        r.into_iter().find(|rating| rating.body.contains("Motion Picture"))
+                    })
                     .map(|r| r.code);
 
                 // Parse runtime
@@ -316,7 +316,10 @@ impl MovieShowtimes {
 
             // Show other theaters if any
             if !listing.other_theaters.is_empty() {
-                message.push_str(&format!("\n*Also showing at: {}*\n", listing.other_theaters.join(", ")));
+                message.push_str(&format!(
+                    "\n*Also showing at: {}*\n",
+                    listing.other_theaters.join(", ")
+                ));
             }
 
             message.push_str("\n---\n\n");
@@ -386,7 +389,7 @@ impl Middleware for MovieShowtimes {
             let now = Local::now();
             let duration_until =
                 (next_time - now).to_std().unwrap_or(std::time::Duration::from_secs(0));
-                
+
             tracing::info!(
                 next_scheduled=%next_time.format("%Y-%m-%d %H:%M:%S %Z"),
                 seconds_until=%duration_until.as_secs(),
