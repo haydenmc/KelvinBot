@@ -5,6 +5,8 @@ use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use url::Url;
 
+use crate::middlewares::movie_showtimes::LatLng;
+
 pub const ENV_PREFIX: &str = "KELVIN";
 pub const ENV_SEPARATOR: &str = "__";
 
@@ -28,6 +30,7 @@ pub enum ServiceKind {
     Unknown,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MiddlewareKind {
@@ -41,12 +44,15 @@ pub enum MiddlewareKind {
         expiry: Option<Duration>,
     },
     Logger {},
-    RegalShowtimes {
+    MovieShowtimes {
         service_id: String,
         room_id: String,
-        day_of_week: String, // e.g., "Monday", "Tuesday", etc.
-        time: String,        // e.g., "18:00", "09:30"
-        theater_id: String,
+        post_on_day_of_week: String, // e.g., "Monday", "Tuesday", etc.
+        post_at_time: String,        // e.g., "18:00", "09:30"
+        search_location: LatLng,
+        #[serde_as(as = "DisplayFromStr")]
+        search_radius_mi: u16,
+        theater_id_filter: Option<Vec<String>>,
     },
     #[serde(other)]
     Unknown,

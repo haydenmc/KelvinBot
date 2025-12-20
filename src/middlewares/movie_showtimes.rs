@@ -7,38 +7,61 @@ use crate::core::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Datelike, Duration, Local, NaiveTime, TimeZone, Weekday};
+use serde_with::{serde_as, DisplayFromStr};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
-pub struct RegalShowtimes {
+#[serde_as]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct LatLng {
+    #[serde_as(as = "DisplayFromStr")]
+    pub lat: f64,
+    #[serde_as(as = "DisplayFromStr")]
+    pub lng: f64,
+}
+
+pub struct MovieShowtimes {
     cmd_tx: Sender<Command>,
     service_id: String,
     room_id: String,
-    day_of_week: Weekday,
-    time: NaiveTime,
-    theater_id: String,
+    post_on_day_of_week: Weekday,
+    post_at_time: NaiveTime,
+    search_location: LatLng,
+    search_radius_mi: u16,
+    theater_id_filter: Option<Vec<String>>,
 }
 
-impl RegalShowtimes {
+impl MovieShowtimes {
     pub fn new(
         cmd_tx: Sender<Command>,
         service_id: String,
         room_id: String,
-        day_of_week: Weekday,
-        time: NaiveTime,
-        theater_id: String,
+        post_on_day_of_week: Weekday,
+        post_at_time: NaiveTime,
+        search_location: LatLng,
+        search_radius_mi: u16,
+        theater_id_filter: Option<Vec<String>>,
     ) -> Self {
-        Self { cmd_tx, service_id, room_id, day_of_week, time, theater_id }
+        Self {
+            cmd_tx,
+            service_id,
+            room_id,
+            post_on_day_of_week,
+            post_at_time,
+            search_location,
+            search_radius_mi,
+            theater_id_filter,
+        }
     }
 
-    /// Calculate the next scheduled time based on day_of_week and time
+    /// Calculate the next scheduled time based on post_on_day_of_week and post_at_time
     fn next_scheduled_time(&self) -> chrono::DateTime<Local> {
         let now = Local::now();
-        let target_time = self.time;
+        let target_time = self.post_at_time;
 
         // Calculate days until next occurrence
         let current_weekday = now.weekday();
-        let target_weekday = self.day_of_week;
+        let target_weekday = self.post_on_day_of_week;
 
         let days_until_target = if current_weekday == target_weekday {
             // Same day - check if time has passed
@@ -69,11 +92,11 @@ impl RegalShowtimes {
 
     /// Generate test showtimes message
     async fn fetch_showtimes(&self) -> Result<String> {
-        tracing::info!(theater_id=%self.theater_id, "generating test showtimes message");
+        tracing::info!("generating test showtimes message");
 
         let message = format!(
-            "🎬 Regal Showtimes Test 🎬\n\nThis is a test message for theater ID: {}\n\nScheduled for: {} at {}",
-            self.theater_id, self.day_of_week, self.time
+            "🎬 Movie Showtimes Test 🎬\n\nThis is a test message.\n\nScheduled for: {} at {}",
+            self.post_on_day_of_week, self.post_at_time
         );
 
         Ok(message)
@@ -125,13 +148,12 @@ impl RegalShowtimes {
 }
 
 #[async_trait]
-impl Middleware for RegalShowtimes {
+impl Middleware for MovieShowtimes {
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         tracing::info!(
-            day_of_week=?self.day_of_week,
-            time=%self.time,
-            theater_id=%self.theater_id,
-            "regal_showtimes middleware running..."
+            post_on_day_of_week=?self.post_on_day_of_week,
+            time=%self.post_at_time,
+            "movie_showtimes middleware running..."
         );
 
         loop {
@@ -139,15 +161,16 @@ impl Middleware for RegalShowtimes {
             let now = Local::now();
             let duration_until =
                 (next_time - now).to_std().unwrap_or(std::time::Duration::from_secs(0));
-
+                
             tracing::info!(
                 next_scheduled=%next_time.format("%Y-%m-%d %H:%M:%S %Z"),
+                seconds_until=%duration_until.as_secs(),
                 "waiting for next scheduled post"
             );
 
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    tracing::info!("regal_showtimes middleware shutting down...");
+                    tracing::info!("movie_showtimes middleware shutting down...");
                     break;
                 }
                 _ = tokio::time::sleep(duration_until) => {

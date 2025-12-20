@@ -15,5 +15,5 @@ pub mod middlewares {
     pub mod echo;
     pub mod invite;
     pub mod logger;
-    pub mod regal_showtimes;
+    pub mod movie_showtimes;
 }
