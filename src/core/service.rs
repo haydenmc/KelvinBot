@@ -81,13 +81,7 @@ pub async fn instantiate_services_from_config(
                     }
                 }
             }
-            ServiceKind::Mumble {
-                hostname,
-                port,
-                username,
-                password,
-                accept_invalid_certs,
-            } => {
+            ServiceKind::Mumble { hostname, port, username, password, accept_invalid_certs } => {
                 match MumbleService::create(
                     service_id.clone(),
                     hostname.clone(),

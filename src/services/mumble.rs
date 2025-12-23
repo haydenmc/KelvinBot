@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
-use mumble_protocol_2x::control::msgs::{Authenticate, ChannelState, Ping, ServerSync, TextMessage, UserRemove, UserState, Version};
+use mumble_protocol_2x::control::msgs::{
+    Authenticate, ChannelState, Ping, ServerSync, TextMessage, UserRemove, UserState, Version,
+};
 use mumble_protocol_2x::control::{ClientControlCodec, ControlPacket};
 use mumble_protocol_2x::{Clientbound, Serverbound};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::sync::mpsc::{self, Sender};
+use tokio::time::{Duration, interval};
 use tokio_native_tls::TlsStream;
 use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
@@ -104,16 +106,16 @@ impl MumbleService {
 
         let tls_stream = tls_connector.connect(&self.hostname, tcp_stream).await?;
 
-        let framed = Framed::new(
-            tls_stream,
-            ClientControlCodec::new(),
-        );
+        let framed = Framed::new(tls_stream, ClientControlCodec::new());
 
         info!("TLS connection established");
         Ok(framed)
     }
 
-    async fn authenticate(&self, stream: &mut Framed<TlsStream<TcpStream>, ClientControlCodec>) -> Result<()> {
+    async fn authenticate(
+        &self,
+        stream: &mut Framed<TlsStream<TcpStream>, ClientControlCodec>,
+    ) -> Result<()> {
         info!(username=%self.username, "authenticating");
 
         let mut version = Version::default();
@@ -206,10 +208,8 @@ impl MumbleService {
             })
             .collect();
 
-        let event = Event {
-            service_id: self.id.clone(),
-            kind: EventKind::UserListUpdate { users },
-        };
+        let event =
+            Event { service_id: self.id.clone(), kind: EventKind::UserListUpdate { users } };
 
         self.evt_tx.send(event).await?;
         Ok(())
@@ -260,7 +260,11 @@ impl MumbleService {
         Ok(())
     }
 
-    async fn handle_control_packet(&self, packet: ControlPacket<Clientbound>, state: &mut MumbleState) -> Result<Option<ControlPacket<Serverbound>>> {
+    async fn handle_control_packet(
+        &self,
+        packet: ControlPacket<Clientbound>,
+        state: &mut MumbleState,
+    ) -> Result<Option<ControlPacket<Serverbound>>> {
         match &packet {
             ControlPacket::Ping(_) => {
                 debug!("received ping packet");
