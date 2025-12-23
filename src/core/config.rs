@@ -26,6 +26,16 @@ pub enum ServiceKind {
         db_passphrase: SecretString,
         verification_device_id: Option<String>,
     },
+    Mumble {
+        hostname: String,
+        #[serde_as(as = "DisplayFromStr")]
+        port: u16,
+        username: String,
+        password: SecretString,
+        #[serde(default)]
+        #[serde_as(as = "Option<DisplayFromStr>")]
+        accept_invalid_certs: Option<bool>,
+    },
     #[serde(other)]
     Unknown,
 }

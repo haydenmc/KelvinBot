@@ -15,6 +15,7 @@ use crate::{
     services::{
         dummy::DummyService,
         matrix::{MatrixService, MatrixUserId},
+        mumble::MumbleService,
     },
 };
 
@@ -77,6 +78,32 @@ pub async fn instantiate_services_from_config(
                     }
                     Err(e) => {
                         error!(id=%id, error=%e, "could not instantiate matrix service");
+                    }
+                }
+            }
+            ServiceKind::Mumble {
+                hostname,
+                port,
+                username,
+                password,
+                accept_invalid_certs,
+            } => {
+                match MumbleService::create(
+                    service_id.clone(),
+                    hostname.clone(),
+                    *port,
+                    username.clone(),
+                    password.clone(),
+                    accept_invalid_certs.unwrap_or(false),
+                    evt_tx.clone(),
+                )
+                .await
+                {
+                    Ok(svc) => {
+                        services.insert(service_id, Arc::new(svc));
+                    }
+                    Err(e) => {
+                        error!(id=%id, error=%e, "could not instantiate mumble service");
                     }
                 }
             }
