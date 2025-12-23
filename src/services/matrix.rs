@@ -528,7 +528,7 @@ impl Service for MatrixService {
 
     async fn handle_command(&self, command: Command) -> Result<()> {
         match command {
-            Command::SendDirectMessage { user_id, body, .. } => {
+            Command::SendDirectMessage { user_id, body, response_tx, .. } => {
                 info!(service=%self.id, user_id=%user_id, body=%body, "sending DM");
 
                 // Parse the user ID
@@ -536,26 +536,39 @@ impl Service for MatrixService {
                     Ok(uid) => uid,
                     Err(e) => {
                         error!(user_id=%user_id, error=%e, "invalid user ID");
+                        if let Some(tx) = response_tx {
+                            let _ = tx.send(Err(anyhow::anyhow!("invalid user ID: {}", e)));
+                        }
                         return Ok(());
                     }
                 };
 
                 // Find existing or create new DM room
-                match self.find_or_create_dm(&user_id).await {
+                let result = match self.find_or_create_dm(&user_id).await {
                     Ok(room) => {
                         let content = RoomMessageEventContent::text_plain(&body);
-                        if let Err(e) = room.send(content).await {
-                            error!(error=%e, "failed to send DM");
-                        } else {
-                            debug!("DM sent successfully");
+                        match room.send(content).await {
+                            Ok(response) => {
+                                debug!("DM sent successfully");
+                                Ok(response.event_id.to_string())
+                            }
+                            Err(e) => {
+                                error!(error=%e, "failed to send DM");
+                                Err(anyhow::anyhow!("failed to send DM: {}", e))
+                            }
                         }
                     }
                     Err(e) => {
                         error!(error=%e, user_id=%user_id, "failed to find/create DM room");
+                        Err(anyhow::anyhow!("failed to find/create DM room: {}", e))
                     }
+                };
+
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(result);
                 }
             }
-            Command::SendRoomMessage { room_id, body, markdown_body, .. } => {
+            Command::SendRoomMessage { room_id, body, markdown_body, response_tx, .. } => {
                 info!(service=%self.id, room_id=%room_id, body=%body, "sending room message");
 
                 // Parse the room ID
@@ -563,12 +576,15 @@ impl Service for MatrixService {
                     Ok(rid) => rid,
                     Err(e) => {
                         error!(room_id=%room_id, error=%e, "invalid room ID");
+                        if let Some(tx) = response_tx {
+                            let _ = tx.send(Err(anyhow::anyhow!("invalid room ID: {}", e)));
+                        }
                         return Ok(());
                     }
                 };
 
                 // Get the room and send message
-                if let Some(room) = self.client.get_room(&room_id) {
+                let result = if let Some(room) = self.client.get_room(&room_id) {
                     let content = if let Some(markdown) = markdown_body {
                         RoomMessageEventContent::new(MessageType::Text(
                             TextMessageEventContent::markdown(markdown),
@@ -577,13 +593,80 @@ impl Service for MatrixService {
                         RoomMessageEventContent::text_plain(&body)
                     };
 
-                    if let Err(e) = room.send(content).await {
-                        error!(error=%e, "failed to send room message");
-                    } else {
-                        debug!("room message sent successfully");
+                    match room.send(content).await {
+                        Ok(response) => {
+                            debug!("room message sent successfully");
+                            Ok(response.event_id.to_string())
+                        }
+                        Err(e) => {
+                            error!(error=%e, "failed to send room message");
+                            Err(anyhow::anyhow!("failed to send room message: {}", e))
+                        }
                     }
                 } else {
                     warn!(room_id=%room_id, "room not found or not joined");
+                    Err(anyhow::anyhow!("room not found or not joined"))
+                };
+
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(result);
+                }
+            }
+            Command::EditMessage { message_id, new_body, new_markdown_body, .. } => {
+                info!(service=%self.id, message_id=%message_id, "editing message");
+
+                // Parse the event ID
+                use matrix_sdk::ruma::EventId;
+                let event_id = match EventId::parse(&message_id) {
+                    Ok(eid) => eid,
+                    Err(e) => {
+                        error!(message_id=%message_id, error=%e, "invalid event ID");
+                        return Ok(());
+                    }
+                };
+
+                // Find the room containing this event
+                // We need to search through all joined rooms to find which one contains this event
+                let rooms = self.client.rooms();
+                let mut found_room = None;
+                for room in rooms {
+                    if room.state() == RoomState::Joined {
+                        // Try to get the event from this room
+                        if room.event(&event_id, None).await.is_ok() {
+                            found_room = Some(room);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(room) = found_room {
+                    // Create the new message content
+                    let new_content = if let Some(markdown) = new_markdown_body {
+                        RoomMessageEventContent::new(MessageType::Text(
+                            TextMessageEventContent::markdown(markdown)
+                        ))
+                    } else {
+                        RoomMessageEventContent::text_plain(&new_body)
+                    };
+
+                    // Create edit event using the edit helper
+                    use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
+                    let edit_event = AnyMessageLikeEventContent::RoomMessage(
+                        new_content.make_replacement(
+                            matrix_sdk::ruma::events::room::message::ReplacementMetadata::new(
+                                event_id.to_owned(),
+                                None
+                            )
+                        )
+                    );
+
+                    if let Err(e) = room.send(edit_event).await {
+                        error!(error=%e, "failed to edit message");
+                    } else {
+                        debug!("message edited successfully");
+                    }
+                } else {
+                    warn!(message_id=%message_id, "could not find room containing message");
                 }
             }
             Command::GenerateInviteToken { user_id, uses_allowed, expiry, response_tx, .. } => {

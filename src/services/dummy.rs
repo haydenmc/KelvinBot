@@ -47,11 +47,20 @@ impl Service for DummyService {
 
     async fn handle_command(&self, command: Command) -> Result<()> {
         match command {
-            Command::SendDirectMessage { user_id, body, .. } => {
+            Command::SendDirectMessage { user_id, body, response_tx, .. } => {
                 info!(service=%self.id, user_id=%user_id, body=%body, "dummy service: would send DM");
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(Ok("dummy_message_id_dm".to_string()));
+                }
             }
-            Command::SendRoomMessage { room_id, body, .. } => {
+            Command::SendRoomMessage { room_id, body, response_tx, .. } => {
                 info!(service=%self.id, room_id=%room_id, body=%body, "dummy service: would send room message");
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(Ok("dummy_message_id_room".to_string()));
+                }
+            }
+            Command::EditMessage { message_id, new_body, .. } => {
+                info!(service=%self.id, message_id=%message_id, new_body=%new_body, "dummy service: would edit message");
             }
             Command::GenerateInviteToken { user_id, uses_allowed, expiry, response_tx, .. } => {
                 info!(service=%self.id, user_id=%user_id, uses_allowed=?uses_allowed, expiry=?expiry, "dummy service: generating fake invite token");
