@@ -14,12 +14,20 @@ pub enum Command {
         service_id: ServiceId,
         user_id: String,
         body: String,
+        response_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<String>>>,
     },
     SendRoomMessage {
         service_id: ServiceId,
         room_id: String,
         body: String,
         markdown_body: Option<String>,
+        response_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<String>>>,
+    },
+    EditMessage {
+        service_id: ServiceId,
+        message_id: String,
+        new_body: String,
+        new_markdown_body: Option<String>,
     },
     GenerateInviteToken {
         service_id: ServiceId,
@@ -34,18 +42,27 @@ pub enum Command {
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Command::SendDirectMessage { service_id, user_id, body } => f
+            Command::SendDirectMessage { service_id, user_id, body, .. } => f
                 .debug_struct("SendDirectMessage")
                 .field("service_id", service_id)
                 .field("user_id", user_id)
                 .field("body", body)
+                .field("response_tx", &"<Option<oneshot::Sender>>")
                 .finish(),
-            Command::SendRoomMessage { service_id, room_id, body, markdown_body } => f
+            Command::SendRoomMessage { service_id, room_id, body, markdown_body, .. } => f
                 .debug_struct("SendRoomMessage")
                 .field("service_id", service_id)
                 .field("room_id", room_id)
                 .field("body", body)
                 .field("markdown_body", markdown_body)
+                .field("response_tx", &"<Option<oneshot::Sender>>")
+                .finish(),
+            Command::EditMessage { service_id, message_id, new_body, new_markdown_body } => f
+                .debug_struct("EditMessage")
+                .field("service_id", service_id)
+                .field("message_id", message_id)
+                .field("new_body", new_body)
+                .field("new_markdown_body", new_markdown_body)
                 .finish(),
             Command::GenerateInviteToken { service_id, user_id, uses_allowed, expiry, .. } => f
                 .debug_struct("GenerateInviteToken")
@@ -145,6 +162,7 @@ impl Bus {
                     let service_id = match &cmd {
                         Command::SendDirectMessage { service_id, .. } => service_id.clone(),
                         Command::SendRoomMessage { service_id, .. } => service_id.clone(),
+                        Command::EditMessage { service_id, .. } => service_id.clone(),
                         Command::GenerateInviteToken { service_id, .. } => service_id.clone(),
                     };
 

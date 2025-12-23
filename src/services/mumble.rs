@@ -432,35 +432,62 @@ impl Service for MumbleService {
         };
 
         match command {
-            Command::SendDirectMessage { user_id, body, .. } => {
+            Command::SendDirectMessage { user_id, body, response_tx, .. } => {
                 debug!(user_id=%user_id, "sending direct message");
 
                 let state = self.state.lock().await;
-                let session_id = state
-                    .user_sessions
-                    .get(&user_id)
-                    .ok_or_else(|| anyhow!("unknown user: {}", user_id))?;
+                let result = match state.user_sessions.get(&user_id) {
+                    Some(session_id) => {
+                        let mut msg = TextMessage::new();
+                        msg.set_message(body);
+                        msg.session = vec![*session_id];
 
-                let mut msg = TextMessage::new();
-                msg.set_message(body);
-                msg.session = vec![*session_id];
+                        match tx.send(ControlPacket::TextMessage(Box::new(msg))).await {
+                            Ok(_) => {
+                                // Mumble doesn't provide message IDs, so we return an empty string
+                                Ok(String::new())
+                            }
+                            Err(e) => Err(anyhow!("failed to send message: {}", e)),
+                        }
+                    }
+                    None => Err(anyhow!("unknown user: {}", user_id)),
+                };
 
-                tx.send(ControlPacket::TextMessage(Box::new(msg))).await?;
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(result);
+                } else if let Err(e) = result {
+                    return Err(e);
+                }
             }
-            Command::SendRoomMessage { room_id, body, .. } => {
+            Command::SendRoomMessage { room_id, body, response_tx, .. } => {
                 debug!(room_id=%room_id, "sending room message");
 
                 let state = self.state.lock().await;
-                let channel_id = state
-                    .channel_ids
-                    .get(&room_id)
-                    .ok_or_else(|| anyhow!("unknown channel: {}", room_id))?;
+                let result = match state.channel_ids.get(&room_id) {
+                    Some(channel_id) => {
+                        let mut msg = TextMessage::new();
+                        msg.set_message(body);
+                        msg.channel_id = vec![*channel_id];
 
-                let mut msg = TextMessage::new();
-                msg.set_message(body);
-                msg.channel_id = vec![*channel_id];
+                        match tx.send(ControlPacket::TextMessage(Box::new(msg))).await {
+                            Ok(_) => {
+                                // Mumble doesn't provide message IDs, so we return an empty string
+                                Ok(String::new())
+                            }
+                            Err(e) => Err(anyhow!("failed to send message: {}", e)),
+                        }
+                    }
+                    None => Err(anyhow!("unknown channel: {}", room_id)),
+                };
 
-                tx.send(ControlPacket::TextMessage(Box::new(msg))).await?;
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(result);
+                } else if let Err(e) = result {
+                    return Err(e);
+                }
+            }
+            Command::EditMessage { .. } => {
+                warn!("mumble does not support editing messages");
             }
             Command::GenerateInviteToken { response_tx, .. } => {
                 warn!("mumble does not support invite token generation");

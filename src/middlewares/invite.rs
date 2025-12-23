@@ -58,6 +58,7 @@ impl Middleware for Invite {
                             user_id: user_id.clone(),
                             body: "Invite tokens can only be generated for users from this server."
                                 .to_string(),
+                            response_tx: None,
                         };
 
                         let cmd_tx = self.cmd_tx.clone();
@@ -146,6 +147,7 @@ impl Middleware for Invite {
                             service_id,
                             user_id: user_id_clone,
                             body: message,
+                            response_tx: None,
                         };
 
                         if let Err(e) = cmd_tx.send(reply_command).await {

@@ -340,6 +340,7 @@ impl MovieShowtimes {
                     room_id: self.room_id.clone(),
                     body: message.clone(),
                     markdown_body: Some(message),
+                    response_tx: None,
                 };
 
                 let cmd_tx = self.cmd_tx.clone();
@@ -359,6 +360,7 @@ impl MovieShowtimes {
                     room_id: self.room_id.clone(),
                     body: error_msg,
                     markdown_body: None,
+                    response_tx: None,
                 };
 
                 let cmd_tx = self.cmd_tx.clone();
