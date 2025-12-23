@@ -208,7 +208,7 @@ impl MumbleService {
     fn handle_control_packet(&self, packet: ControlPacket<Clientbound>, state: &mut MumbleState) -> Result<Option<ControlPacket<Serverbound>>> {
         match &packet {
             ControlPacket::Ping(_) => {
-                info!("received ping packet");
+                debug!("received ping packet");
             }
             ControlPacket::ServerSync(_) => {
                 debug!("received server sync");
@@ -223,7 +223,7 @@ impl MumbleService {
                 debug!("received text message");
             }
             _ => {
-                info!("received other packet: {:?}", packet);
+                debug!("received other packet: {:?}", packet);
             }
         }
 
