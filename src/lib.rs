@@ -9,6 +9,7 @@ pub mod core {
 pub mod services {
     pub mod dummy;
     pub mod matrix;
+    pub mod mumble;
 }
 
 pub mod middlewares {
