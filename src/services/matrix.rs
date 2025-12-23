@@ -643,7 +643,7 @@ impl Service for MatrixService {
                     // Create the new message content
                     let new_content = if let Some(markdown) = new_markdown_body {
                         RoomMessageEventContent::new(MessageType::Text(
-                            TextMessageEventContent::markdown(markdown)
+                            TextMessageEventContent::markdown(markdown),
                         ))
                     } else {
                         RoomMessageEventContent::text_plain(&new_body)
@@ -651,14 +651,13 @@ impl Service for MatrixService {
 
                     // Create edit event using the edit helper
                     use matrix_sdk::ruma::events::AnyMessageLikeEventContent;
-                    let edit_event = AnyMessageLikeEventContent::RoomMessage(
-                        new_content.make_replacement(
+                    let edit_event =
+                        AnyMessageLikeEventContent::RoomMessage(new_content.make_replacement(
                             matrix_sdk::ruma::events::room::message::ReplacementMetadata::new(
                                 event_id.to_owned(),
-                                None
-                            )
-                        )
-                    );
+                                None,
+                            ),
+                        ));
 
                     if let Err(e) = room.send(edit_event).await {
                         error!(error=%e, "failed to edit message");
