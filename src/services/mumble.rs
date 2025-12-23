@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
-use mumble_protocol_2x::control::msgs::{Authenticate, ChannelState, Ping, ServerSync, TextMessage, UserState, Version};
+use mumble_protocol_2x::control::msgs::{Authenticate, ChannelState, Ping, ServerSync, TextMessage, UserRemove, UserState, Version};
 use mumble_protocol_2x::control::{ClientControlCodec, ControlPacket};
 use mumble_protocol_2x::{Clientbound, Serverbound};
 use secrecy::{ExposeSecret, SecretString};
@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::core::bus::Command;
-use crate::core::event::{Event, EventKind};
+use crate::core::event::{Event, EventKind, User};
 use crate::core::service::{Service, ServiceId};
 
 const VERSION_MAJOR: u16 = 1;
@@ -30,6 +30,7 @@ struct MumbleState {
     channel_ids: HashMap<String, u32>,
     id_channels: HashMap<u32, String>,
     own_session_id: Option<u32>,
+    initial_sync_complete: bool,
 }
 
 impl MumbleState {
@@ -40,6 +41,7 @@ impl MumbleState {
             channel_ids: HashMap::new(),
             id_channels: HashMap::new(),
             own_session_id: None,
+            initial_sync_complete: false,
         }
     }
 }
@@ -135,19 +137,32 @@ impl MumbleService {
         Ok(())
     }
 
-    fn handle_server_sync(&self, msg: ServerSync, state: &mut MumbleState) {
+    async fn handle_server_sync(&self, msg: ServerSync, state: &mut MumbleState) -> Result<()> {
         info!(session=%msg.session(), "server sync received");
         state.own_session_id = Some(msg.session());
+        state.initial_sync_complete = true;
+
+        // Emit initial user list
+        self.emit_user_list_update(state).await?;
+        Ok(())
     }
 
-    fn handle_user_state(&self, msg: UserState, state: &mut MumbleState) {
+    async fn handle_user_state(&self, msg: UserState, state: &mut MumbleState) -> Result<()> {
         let session = msg.session();
+        let was_new_user = !state.session_users.contains_key(&session);
 
         if let Some(name) = msg.name.as_ref() {
             debug!(session=%session, username=%name, "user state update");
             state.user_sessions.insert(name.clone(), session);
             state.session_users.insert(session, name.clone());
+
+            // Emit user list update if initial sync is complete and this is a new user
+            if state.initial_sync_complete && was_new_user {
+                self.emit_user_list_update(state).await?;
+            }
         }
+
+        Ok(())
     }
 
     fn handle_channel_state(&self, msg: ChannelState, state: &mut MumbleState) {
@@ -158,6 +173,46 @@ impl MumbleService {
             state.channel_ids.insert(name.clone(), channel_id);
             state.id_channels.insert(channel_id, name.clone());
         }
+    }
+
+    async fn handle_user_remove(&self, msg: UserRemove, state: &mut MumbleState) -> Result<()> {
+        let session = msg.session();
+        debug!(session=%session, "user removed");
+
+        // Remove user from tracking
+        if let Some(username) = state.session_users.remove(&session) {
+            state.user_sessions.remove(&username);
+
+            // Emit user list update if initial sync is complete
+            if state.initial_sync_complete {
+                self.emit_user_list_update(state).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn emit_user_list_update(&self, state: &MumbleState) -> Result<()> {
+        let own_session = state.own_session_id;
+        let users: Vec<User> = state
+            .session_users
+            .iter()
+            .map(|(session_id, username)| User {
+                id: session_id.to_string(),
+                username: username.clone(),
+                display_name: username.clone(),
+                is_active: true,
+                is_self: own_session == Some(*session_id),
+            })
+            .collect();
+
+        let event = Event {
+            service_id: self.id.clone(),
+            kind: EventKind::UserListUpdate { users },
+        };
+
+        self.evt_tx.send(event).await?;
+        Ok(())
     }
 
     async fn emit_text_message_event(
@@ -205,7 +260,7 @@ impl MumbleService {
         Ok(())
     }
 
-    fn handle_control_packet(&self, packet: ControlPacket<Clientbound>, state: &mut MumbleState) -> Result<Option<ControlPacket<Serverbound>>> {
+    async fn handle_control_packet(&self, packet: ControlPacket<Clientbound>, state: &mut MumbleState) -> Result<Option<ControlPacket<Serverbound>>> {
         match &packet {
             ControlPacket::Ping(_) => {
                 debug!("received ping packet");
@@ -215,6 +270,9 @@ impl MumbleService {
             }
             ControlPacket::UserState(_) => {
                 debug!("received user state");
+            }
+            ControlPacket::UserRemove(_) => {
+                debug!("received user remove");
             }
             ControlPacket::ChannelState(_) => {
                 debug!("received channel state");
@@ -229,11 +287,15 @@ impl MumbleService {
 
         match packet {
             ControlPacket::ServerSync(msg) => {
-                self.handle_server_sync(*msg, state);
+                self.handle_server_sync(*msg, state).await?;
                 Ok(None)
             }
             ControlPacket::UserState(msg) => {
-                self.handle_user_state(*msg, state);
+                self.handle_user_state(*msg, state).await?;
+                Ok(None)
+            }
+            ControlPacket::UserRemove(msg) => {
+                self.handle_user_remove(*msg, state).await?;
                 Ok(None)
             }
             ControlPacket::ChannelState(msg) => {
@@ -321,7 +383,7 @@ impl Service for MumbleService {
                     match msg {
                         Some(Ok(packet)) => {
                             let mut state = self.state.lock().await;
-                            match self.handle_control_packet(packet, &mut state) {
+                            match self.handle_control_packet(packet, &mut state).await {
                                 Ok(Some(response)) => {
                                     // Send response immediately (e.g., ping response)
                                     if let Err(e) = stream.send(response).await {

@@ -33,6 +33,7 @@ impl Middleware for Echo {
         let body = match &evt.kind {
             EventKind::DirectMessage { body, .. } => body,
             EventKind::RoomMessage { body, .. } => body,
+            EventKind::UserListUpdate { .. } => return Ok(Verdict::Continue),
         };
 
         // Build the prefix with a trailing space
@@ -51,6 +52,7 @@ impl Middleware for Echo {
                     body: echo_content.to_string(),
                     markdown_body: None,
                 },
+                EventKind::UserListUpdate { .. } => unreachable!(),
             };
 
             // Send the command asynchronously

@@ -38,6 +38,10 @@ impl Middleware for Invite {
 
     fn on_event(&self, evt: &Event) -> Result<Verdict> {
         match &evt.kind {
+            EventKind::UserListUpdate { .. } | EventKind::RoomMessage { .. } => {
+                // Ignore non-DM events
+                return Ok(Verdict::Continue);
+            }
             EventKind::DirectMessage { body, user_id, is_local_user } => {
                 // Check if the message is the invite command
                 if body.trim() == self.command_string {
@@ -151,10 +155,6 @@ impl Middleware for Invite {
 
                     tracing::info!(user_id=%user_id, "processing invite command");
                 }
-            }
-            EventKind::RoomMessage { .. } => {
-                // Ignore room messages for invite commands
-                tracing::debug!("invite command only supported in direct messages");
             }
         }
 
