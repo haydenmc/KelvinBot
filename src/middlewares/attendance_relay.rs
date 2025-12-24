@@ -20,6 +20,7 @@ pub struct AttendanceRelay {
     dest_room_id: String,
     session_start_message: String,
     session_end_message: String,
+    session_ended_edit_message: String,
     state: Arc<Mutex<SessionState>>,
 }
 
@@ -52,6 +53,7 @@ impl AttendanceRelay {
         dest_room_id: String,
         session_start_message: String,
         session_end_message: String,
+        session_ended_edit_message: String,
     ) -> Self {
         Self {
             cmd_tx,
@@ -61,6 +63,7 @@ impl AttendanceRelay {
             dest_room_id,
             session_start_message,
             session_end_message,
+            session_ended_edit_message,
             state: Arc::new(Mutex::new(SessionState::new())),
         }
     }
@@ -117,6 +120,7 @@ impl Middleware for AttendanceRelay {
         let dest_room_id = self.dest_room_id.clone();
         let session_start_message = self.session_start_message.clone();
         let session_end_message = self.session_end_message.clone();
+        let session_ended_edit_message = self.session_ended_edit_message.clone();
 
         // Spawn async task to handle state changes
         tokio::spawn(async move {
@@ -130,6 +134,7 @@ impl Middleware for AttendanceRelay {
                 dest_room_id,
                 session_start_message,
                 session_end_message,
+                session_ended_edit_message,
             )
             .await
             {
@@ -149,6 +154,7 @@ async fn handle_user_list_change(
     dest_room_id: String,
     session_start_message: String,
     session_end_message: String,
+    session_ended_edit_message: String,
 ) -> Result<()> {
     let was_active = state.is_session_active;
     let now_active = !current_active.is_empty();
@@ -168,12 +174,27 @@ async fn handle_user_list_change(
         }
         (true, true) => {
             // SESSION ONGOING: Update participant list
-            handle_session_update(state, current_active, cmd_tx, dest_service_id).await?;
+            handle_session_update(
+                state,
+                current_active,
+                cmd_tx,
+                dest_service_id,
+                dest_room_id,
+                session_start_message,
+            )
+            .await?;
         }
         (true, false) => {
             // SESSION END: Last user left
-            handle_session_end(state, cmd_tx, dest_service_id, dest_room_id, session_end_message)
-                .await?;
+            handle_session_end(
+                state,
+                cmd_tx,
+                dest_service_id,
+                dest_room_id,
+                session_end_message,
+                session_ended_edit_message,
+            )
+            .await?;
         }
         (false, false) => {
             // No change - no active users
@@ -236,6 +257,8 @@ async fn handle_session_update(
     current_active: HashSet<String>,
     cmd_tx: Sender<Command>,
     dest_service_id: ServiceId,
+    dest_room_id: String,
+    session_start_message: String,
 ) -> Result<()> {
     // Update tracking
     for user in &current_active {
@@ -245,7 +268,7 @@ async fn handle_session_update(
 
     // Edit the live message if we have a message ID
     if let Some(message_id) = &state.live_message_id {
-        let body = format_live_message("Active participants:", &state.active_participants);
+        let body = format_live_message(&session_start_message, &state.active_participants);
 
         let command = Command::EditMessage {
             service_id: dest_service_id,
@@ -259,6 +282,40 @@ async fn handle_session_update(
             "updated live message with {} participants",
             state.active_participants.len()
         );
+    } else {
+        // No message ID yet - this can happen if the initial message send failed
+        // (e.g., due to service not being ready at startup). Try to send a new message.
+        tracing::info!(
+            "no live message ID found, attempting to send new session start message"
+        );
+
+        let body = format_live_message(&session_start_message, &state.active_participants);
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        let command = Command::SendRoomMessage {
+            service_id: dest_service_id,
+            room_id: dest_room_id,
+            body: body.clone(),
+            markdown_body: Some(body),
+            response_tx: Some(response_tx),
+        };
+
+        cmd_tx.send(command).await?;
+
+        // Wait for message ID
+        match response_rx.await {
+            Ok(Ok(message_id)) => {
+                state.live_message_id = Some(message_id);
+                tracing::info!("session start message sent (retry after initial failure)");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error=%e, "failed to send session start message (will retry on next update)");
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "failed to receive message ID (will retry on next update)");
+            }
+        }
     }
 
     Ok(())
@@ -270,6 +327,7 @@ async fn handle_session_end(
     dest_service_id: ServiceId,
     dest_room_id: String,
     session_end_message: String,
+    session_ended_edit_message: String,
 ) -> Result<()> {
     let duration = state
         .session_start_time
@@ -284,14 +342,9 @@ async fn handle_session_end(
         all_participants.len()
     );
 
-    // Edit the original message to show when it started
+    // Edit the original message with the configured ended message
     if let Some(message_id) = &state.live_message_id {
-        let start_time = state
-            .session_start_time
-            .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let edit_body = format!("Session started at {} (ended)", start_time);
+        let edit_body = session_ended_edit_message;
 
         let command = Command::EditMessage {
             service_id: dest_service_id.clone(),

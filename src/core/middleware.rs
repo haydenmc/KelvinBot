@@ -85,6 +85,7 @@ pub fn instantiate_middleware_from_config(
                 dest_room_id,
                 session_start_message,
                 session_end_message,
+                session_ended_edit_message,
             } => Arc::new(AttendanceRelay::new(
                 cmd_tx.clone(),
                 source_service_id.clone(),
@@ -93,6 +94,7 @@ pub fn instantiate_middleware_from_config(
                 dest_room_id.clone(),
                 session_start_message.clone(),
                 session_end_message.clone(),
+                session_ended_edit_message.clone(),
             )),
             MiddlewareKind::Unknown => {
                 warn!(middleware_name=%name, "unknown middleware kind, skipping");

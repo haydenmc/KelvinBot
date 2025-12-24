@@ -73,6 +73,7 @@ pub enum MiddlewareKind {
         dest_room_id: String,
         session_start_message: String,
         session_end_message: String,
+        session_ended_edit_message: String,
     },
     #[serde(other)]
     Unknown,
