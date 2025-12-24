@@ -66,6 +66,14 @@ pub enum MiddlewareKind {
         #[serde(default, deserialize_with = "deserialize_string_list")]
         theater_id_filter: Option<Vec<String>>,
     },
+    AttendanceRelay {
+        source_service_id: String,
+        source_room_id: Option<String>,
+        dest_service_id: String,
+        dest_room_id: String,
+        session_start_message: String,
+        session_end_message: String,
+    },
     #[serde(other)]
     Unknown,
 }
