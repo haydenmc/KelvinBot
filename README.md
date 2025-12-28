@@ -13,8 +13,9 @@ KelvinBot uses an event-driven architecture with three main components:
 ```
 Services → Event Bus → Middlewares
     ↑          ↓          ↓
-  Matrix    Routing   Logging
-  Dummy      Core    [Future: AI, Commands, etc.]
+  Matrix    Routing   Logging, Echo, Invite
+  Mumble     Core     Chat Relay, etc.
+  Dummy
 ```
 
 ## Services
@@ -236,6 +237,72 @@ KELVIN__MIDDLEWARES__movies__THEATER_ID_FILTER=1234,5678,9012
 - Posts markdown-formatted message with movie metadata (title, year, rating, runtime)
 - Runs independently as background task
 
+#### Chat Relay Middleware
+Relays messages from one service/room to another service/room with a prefix tag indicating the source and sender.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=chatrelay
+KELVIN__MIDDLEWARES__<name>__SOURCE_SERVICE_ID=<source_service>
+KELVIN__MIDDLEWARES__<name>__SOURCE_ROOM_ID=<room_id>        # Optional
+KELVIN__MIDDLEWARES__<name>__DEST_SERVICE_ID=<dest_service>
+KELVIN__MIDDLEWARES__<name>__DEST_ROOM_ID=<dest_room_id>
+KELVIN__MIDDLEWARES__<name>__PREFIX_TAG=<tag>
+```
+
+**Parameters:**
+- `SOURCE_SERVICE_ID`: Service to relay messages from (e.g., `mumble_main`, `matrix_main`)
+- `SOURCE_ROOM_ID`: Optional - specific room/channel to relay from. If omitted, relays from all rooms
+- `DEST_SERVICE_ID`: Service to send relayed messages to
+- `DEST_ROOM_ID`: Room/channel ID to send relayed messages to
+- `PREFIX_TAG`: Tag to prefix relayed messages with
+
+**Example 1: Relay Mumble to Matrix**
+```bash
+KELVIN__MIDDLEWARES__mumble_relay__KIND=chatrelay
+KELVIN__MIDDLEWARES__mumble_relay__SOURCE_SERVICE_ID=mumble_main
+KELVIN__MIDDLEWARES__mumble_relay__DEST_SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__mumble_relay__DEST_ROOM_ID=!voice:matrix.org
+KELVIN__MIDDLEWARES__mumble_relay__PREFIX_TAG=Mumble
+```
+
+**Example 2: Relay specific Matrix room to another**
+```bash
+KELVIN__MIDDLEWARES__general_relay__KIND=chatrelay
+KELVIN__MIDDLEWARES__general_relay__SOURCE_SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__general_relay__SOURCE_ROOM_ID=!general:matrix.org
+KELVIN__MIDDLEWARES__general_relay__DEST_SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__general_relay__DEST_ROOM_ID=!announcements:matrix.org
+KELVIN__MIDDLEWARES__general_relay__PREFIX_TAG=General
+```
+
+**Message Format:**
+Relayed messages appear as:
+```
+[PREFIX_TAG] sender_display_name: message body
+```
+
+For example:
+```
+[Mumble] Alice: Hello everyone!
+[General] Bob: Can someone help me?
+```
+
+If a user doesn't have a display name, their user ID is used as fallback.
+
+**Behavior:**
+- Only relays room/channel messages (not direct messages)
+- Automatically filters out the bot's own messages to prevent loops
+- Preserves original message content
+- Uses sender's display name when available, falls back to user ID
+- Operates in real-time as messages arrive
+- Can relay between different services (cross-platform) or same service (room-to-room)
+
+**Important:**
+- Be careful with bidirectional relays (A→B and B→A) as they may create message loops
+- The middleware does not prevent relay loops - configure carefully
+- Messages are relayed as plain text; formatting may not be preserved across different platforms
+
 ### Middleware Pipelines
 
 Services can have multiple middlewares that process events sequentially:
@@ -269,7 +336,6 @@ Potential middlewares for future development:
 - AI response generator using LLMs
 - Message filtering and moderation
 - Sentiment analysis
-- Cross-platform message bridging
 - Rate limiting and spam prevention
 - Scheduled announcements and reminders
 - RSS feed monitoring and posting
@@ -302,6 +368,11 @@ KELVIN__MIDDLEWARES__myinvite__KIND=invite
 KELVIN__MIDDLEWARES__myinvite__COMMAND_STRING=!invite
 KELVIN__MIDDLEWARES__myinvite__USES_ALLOWED=1
 KELVIN__MIDDLEWARES__myinvite__EXPIRY=7d
+KELVIN__MIDDLEWARES__chat_relay__KIND=chatrelay
+KELVIN__MIDDLEWARES__chat_relay__SOURCE_SERVICE_ID=mumble_main
+KELVIN__MIDDLEWARES__chat_relay__DEST_SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__chat_relay__DEST_ROOM_ID=!voice:matrix.org
+KELVIN__MIDDLEWARES__chat_relay__PREFIX_TAG=Mumble
 
 # Dummy service for testing
 KELVIN__SERVICES__test_dummy__KIND=dummy
@@ -522,12 +593,15 @@ src/
 │   └── service.rs         # Service trait and management
 ├── services/              # Platform integrations
 │   ├── dummy.rs          # Test service for development
-│   └── matrix.rs         # Matrix homeserver integration
+│   ├── matrix.rs         # Matrix homeserver integration
+│   └── mumble.rs         # Mumble voice chat integration
 └── middlewares/          # Event processors
-    ├── echo.rs          # Command echo middleware
-    ├── invite.rs        # Registration token generation
-    ├── logger.rs        # Event logging middleware
-    └── movie_showtimes.rs  # Scheduled movie showtimes posting
+    ├── attendance_relay.rs  # User presence tracking and announcements
+    ├── chat_relay.rs        # Cross-platform message relaying
+    ├── echo.rs              # Command echo middleware
+    ├── invite.rs            # Registration token generation
+    ├── logger.rs            # Event logging middleware
+    └── movie_showtimes.rs   # Scheduled movie showtimes posting
 
 tests/                    # Comprehensive test suite
 ├── unit/                # Component unit tests
