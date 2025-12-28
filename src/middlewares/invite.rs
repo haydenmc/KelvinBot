@@ -42,7 +42,7 @@ impl Middleware for Invite {
                 // Ignore non-DM events
                 return Ok(Verdict::Continue);
             }
-            EventKind::DirectMessage { body, user_id, is_local_user } => {
+            EventKind::DirectMessage { body, user_id, is_local_user, .. } => {
                 // Check if the message is the invite command
                 if body.trim() == self.command_string {
                     // Only process if user is from the same homeserver/instance

@@ -32,6 +32,9 @@ impl Service for DummyService {
                             room_id: "1".into(),
                             body: "hello from dummy".into(),
                             is_local_user: false,
+                            sender_id: "dummy_user".into(),
+                            sender_display_name: Some("Dummy User".into()),
+                            is_self: false,
                         }
                     };
                     if let Err(e) = self.evt_tx.send(msg).await {
