@@ -830,12 +830,259 @@ async fn test_attendance_relay_session_start() {
     }
 }
 
-// NOTE: Session update behavior is tested in test_attendance_relay_tracks_all_participants,
-// which covers multiple participant changes throughout a session. Testing the specific
-// update behavior separately is challenging in a unit test environment because:
-// 1. The middleware spawns async tasks that need a command handler to respond to oneshot channels
-// 2. Without a full integration test setup, the message_id won't be captured properly
-// 3. The timing of async task execution is non-deterministic without a real bus/runtime
+#[tokio::test]
+async fn test_attendance_relay_session_update_with_edit() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let attendance_relay = AttendanceRelay::new(
+        cmd_tx,
+        AttendanceRelayConfig {
+            source_service_id: "dummy".to_string(),
+            source_room_id: None,
+            dest_service_id: "matrix".to_string(),
+            dest_room_id: "!test:example.com".to_string(),
+            session_start_message: "Active participants:".to_string(),
+            session_end_message: "Session summary".to_string(),
+            session_ended_edit_message: "Session has ended".to_string(),
+        },
+    );
+
+    // First event: Start session with Alice
+    let event1 = Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: vec![User {
+                id: "user1".to_string(),
+                username: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                is_active: true,
+                is_self: false,
+            }],
+        },
+    };
+
+    attendance_relay.on_event(&event1).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Get the initial SendRoomMessage and respond to its oneshot with a message_id
+    let cmd = cmd_rx.recv().await.unwrap();
+    match cmd {
+        Command::SendRoomMessage { response_tx, .. } => {
+            if let Some(tx) = response_tx {
+                // Simulate command handler responding with a message_id
+                let _ = tx.send(Ok("msg_123".to_string()));
+            }
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+
+    // Give time for the async task to process the response and set live_message_id
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Second event: Bob joins (session update: 1 → 2 users)
+    let event2 = Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: vec![
+                User {
+                    id: "user1".to_string(),
+                    username: "alice".to_string(),
+                    display_name: "Alice".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+                User {
+                    id: "user2".to_string(),
+                    username: "bob".to_string(),
+                    display_name: "Bob".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+            ],
+        },
+    };
+
+    attendance_relay.on_event(&event2).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Now we should get an EditMessage command (not SendRoomMessage)
+    let cmd = cmd_rx.recv().await.unwrap();
+    match cmd {
+        Command::EditMessage { service_id, message_id, new_body, .. } => {
+            assert_eq!(service_id.0, "matrix");
+            assert_eq!(message_id, "msg_123");
+            assert!(new_body.contains("Active participants:"));
+            assert!(new_body.contains("- Alice"));
+            assert!(new_body.contains("- Bob"));
+        }
+        _ => panic!("Expected EditMessage command, got {:?}", cmd),
+    }
+}
+
+#[tokio::test]
+async fn test_attendance_relay_multiple_updates() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let attendance_relay = AttendanceRelay::new(
+        cmd_tx,
+        AttendanceRelayConfig {
+            source_service_id: "dummy".to_string(),
+            source_room_id: None,
+            dest_service_id: "matrix".to_string(),
+            dest_room_id: "!test:example.com".to_string(),
+            session_start_message: "Active participants:".to_string(),
+            session_end_message: "Session summary".to_string(),
+            session_ended_edit_message: "Session has ended".to_string(),
+        },
+    );
+
+    // Event 1: Alice joins (session start)
+    let event1 = Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: vec![User {
+                id: "user1".to_string(),
+                username: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                is_active: true,
+                is_self: false,
+            }],
+        },
+    };
+
+    attendance_relay.on_event(&event1).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Respond to initial SendRoomMessage with message_id
+    let cmd = cmd_rx.recv().await.unwrap();
+    match cmd {
+        Command::SendRoomMessage { response_tx, .. } => {
+            if let Some(tx) = response_tx {
+                let _ = tx.send(Ok("msg_123".to_string()));
+            }
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Event 2: Bob joins
+    let event2 = Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: vec![
+                User {
+                    id: "user1".to_string(),
+                    username: "alice".to_string(),
+                    display_name: "Alice".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+                User {
+                    id: "user2".to_string(),
+                    username: "bob".to_string(),
+                    display_name: "Bob".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+            ],
+        },
+    };
+
+    attendance_relay.on_event(&event2).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Should get EditMessage with Alice and Bob
+    let cmd = cmd_rx.recv().await.unwrap();
+    match cmd {
+        Command::EditMessage { message_id, new_body, .. } => {
+            assert_eq!(message_id, "msg_123");
+            assert!(new_body.contains("- Alice"));
+            assert!(new_body.contains("- Bob"));
+        }
+        _ => panic!("Expected EditMessage command"),
+    }
+
+    // Event 3: Charlie joins
+    let event3 = Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: vec![
+                User {
+                    id: "user1".to_string(),
+                    username: "alice".to_string(),
+                    display_name: "Alice".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+                User {
+                    id: "user2".to_string(),
+                    username: "bob".to_string(),
+                    display_name: "Bob".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+                User {
+                    id: "user3".to_string(),
+                    username: "charlie".to_string(),
+                    display_name: "Charlie".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+            ],
+        },
+    };
+
+    attendance_relay.on_event(&event3).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Should get EditMessage with Alice, Bob, and Charlie
+    let cmd = cmd_rx.recv().await.unwrap();
+    match cmd {
+        Command::EditMessage { message_id, new_body, .. } => {
+            assert_eq!(message_id, "msg_123");
+            assert!(new_body.contains("- Alice"));
+            assert!(new_body.contains("- Bob"));
+            assert!(new_body.contains("- Charlie"));
+        }
+        _ => panic!("Expected EditMessage command"),
+    }
+
+    // Event 4: Alice leaves, only Bob and Charlie remain
+    let event4 = Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: vec![
+                User {
+                    id: "user2".to_string(),
+                    username: "bob".to_string(),
+                    display_name: "Bob".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+                User {
+                    id: "user3".to_string(),
+                    username: "charlie".to_string(),
+                    display_name: "Charlie".to_string(),
+                    is_active: true,
+                    is_self: false,
+                },
+            ],
+        },
+    };
+
+    attendance_relay.on_event(&event4).unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // Should get EditMessage with only Bob and Charlie
+    let cmd = cmd_rx.recv().await.unwrap();
+    match cmd {
+        Command::EditMessage { message_id, new_body, .. } => {
+            assert_eq!(message_id, "msg_123");
+            assert!(!new_body.contains("- Alice"));
+            assert!(new_body.contains("- Bob"));
+            assert!(new_body.contains("- Charlie"));
+        }
+        _ => panic!("Expected EditMessage command"),
+    }
+}
 
 #[tokio::test]
 async fn test_attendance_relay_session_end() {
