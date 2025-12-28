@@ -4,7 +4,10 @@ use crate::core::bus::Command;
 use crate::core::config::{Config, MiddlewareKind};
 use crate::core::event::Event;
 use crate::middlewares::{
-    attendance_relay::AttendanceRelay, echo::Echo, invite::Invite, logger::Logger,
+    attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
+    echo::Echo,
+    invite::Invite,
+    logger::Logger,
     movie_showtimes::MovieShowtimes,
 };
 use anyhow::{Result, bail};
@@ -88,13 +91,15 @@ pub fn instantiate_middleware_from_config(
                 session_ended_edit_message,
             } => Arc::new(AttendanceRelay::new(
                 cmd_tx.clone(),
-                source_service_id.clone(),
-                source_room_id.clone(),
-                dest_service_id.clone(),
-                dest_room_id.clone(),
-                session_start_message.clone(),
-                session_end_message.clone(),
-                session_ended_edit_message.clone(),
+                AttendanceRelayConfig {
+                    source_service_id: source_service_id.clone(),
+                    source_room_id: source_room_id.clone(),
+                    dest_service_id: dest_service_id.clone(),
+                    dest_room_id: dest_room_id.clone(),
+                    session_start_message: session_start_message.clone(),
+                    session_end_message: session_end_message.clone(),
+                    session_ended_edit_message: session_ended_edit_message.clone(),
+                },
             )),
             MiddlewareKind::Unknown => {
                 warn!(middleware_name=%name, "unknown middleware kind, skipping");
