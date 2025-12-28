@@ -13,6 +13,7 @@ pub mod services {
 }
 
 pub mod middlewares {
+    pub mod attendance_relay;
     pub mod echo;
     pub mod invite;
     pub mod logger;
