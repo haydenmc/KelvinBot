@@ -12,6 +12,9 @@ fn test_event_display_direct_message() {
             user_id: "@user:example.com".to_string(),
             body: "Hello world".to_string(),
             is_local_user: true,
+            sender_id: "@user:example.com".to_string(),
+            sender_display_name: Some("User".to_string()),
+            is_self: false,
         },
     };
 
@@ -30,6 +33,9 @@ fn test_event_display_room_message() {
             room_id: "!room123:example.com".to_string(),
             body: "Test message".to_string(),
             is_local_user: false,
+            sender_id: "@user:example.com".to_string(),
+            sender_display_name: Some("User".to_string()),
+            is_self: false,
         },
     };
 
@@ -48,6 +54,9 @@ fn test_event_serialization() {
             room_id: "!room:example.com".to_string(),
             body: "Hello".to_string(),
             is_local_user: true,
+            sender_id: "@user:example.com".to_string(),
+            sender_display_name: Some("User".to_string()),
+            is_self: false,
         },
     };
 

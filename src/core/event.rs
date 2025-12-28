@@ -21,9 +21,25 @@ pub struct Event {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum EventKind {
-    DirectMessage { user_id: String, body: String, is_local_user: bool },
-    RoomMessage { room_id: String, body: String, is_local_user: bool },
-    UserListUpdate { users: Vec<User> },
+    DirectMessage {
+        user_id: String,
+        body: String,
+        is_local_user: bool,
+        sender_id: String,
+        sender_display_name: Option<String>,
+        is_self: bool,
+    },
+    RoomMessage {
+        room_id: String,
+        body: String,
+        is_local_user: bool,
+        sender_id: String,
+        sender_display_name: Option<String>,
+        is_self: bool,
+    },
+    UserListUpdate {
+        users: Vec<User>,
+    },
 }
 
 impl fmt::Display for Event {

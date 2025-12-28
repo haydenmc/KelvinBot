@@ -417,14 +417,28 @@ impl MatrixService {
                 let is_local_user =
                     event.sender.server_name() == bot_user_id_for_handler.server_name();
 
+                // Get sender display name
+                let sender_display_name = room
+                    .get_member(&event.sender)
+                    .await
+                    .ok()
+                    .and_then(|m| m)
+                    .and_then(|m| m.display_name().map(|s| s.to_string()));
+
+                let sender_id = event.sender.to_string();
+                let is_self = event.sender == bot_user_id_for_handler;
+
                 match is_direct {
                     true => {
                         let event = Event {
                             service_id,
                             kind: EventKind::DirectMessage {
-                                user_id: event.sender.to_string(),
+                                user_id: sender_id.clone(),
                                 body: text_content.body,
                                 is_local_user,
+                                sender_id,
+                                sender_display_name: sender_display_name.clone(),
+                                is_self,
                             },
                         };
 
@@ -437,6 +451,9 @@ impl MatrixService {
                                 room_id: room.room_id().to_string(),
                                 body: text_content.body,
                                 is_local_user,
+                                sender_id,
+                                sender_display_name,
+                                is_self,
                             },
                         };
 

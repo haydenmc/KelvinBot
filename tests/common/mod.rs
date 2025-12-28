@@ -91,6 +91,9 @@ impl Service for MockService {
                                 room_id: format!("room_{}", i),
                                 body: format!("test message {}", i),
                                 is_local_user: false,
+                                sender_id: "test_user".to_string(),
+                                sender_display_name: Some("Test User".to_string()),
+                                is_self: false,
                             },
                         };
 

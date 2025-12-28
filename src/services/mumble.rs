@@ -233,9 +233,12 @@ impl MumbleService {
             let event = Event {
                 service_id,
                 kind: EventKind::DirectMessage {
-                    user_id: sender_name,
+                    user_id: sender_name.clone(),
                     body: message_text.to_string(),
                     is_local_user,
+                    sender_id: sender_name.clone(),
+                    sender_display_name: Some(sender_name),
+                    is_self: is_local_user,
                 },
             };
             evt_tx.send(event).await?;
@@ -252,6 +255,9 @@ impl MumbleService {
                     room_id,
                     body: message_text.to_string(),
                     is_local_user,
+                    sender_id: sender_name.clone(),
+                    sender_display_name: Some(sender_name),
+                    is_self: is_local_user,
                 },
             };
             evt_tx.send(event).await?;

@@ -75,6 +75,13 @@ pub enum MiddlewareKind {
         session_end_message: String,
         session_ended_edit_message: String,
     },
+    ChatRelay {
+        source_service_id: String,
+        source_room_id: Option<String>,
+        dest_service_id: String,
+        dest_room_id: String,
+        prefix_tag: String,
+    },
     #[serde(other)]
     Unknown,
 }
