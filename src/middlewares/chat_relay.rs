@@ -42,10 +42,11 @@ impl ChatRelay {
 
     fn format_relayed_message(
         prefix_tag: &str,
+        sender_id: &str,
         sender_display_name: Option<&str>,
         body: &str,
     ) -> String {
-        let sender_display = sender_display_name.unwrap_or("Unknown");
+        let sender_display = sender_display_name.unwrap_or(sender_id);
         format!("[{}] {}: {}", prefix_tag, sender_display, body)
     }
 }
@@ -73,8 +74,9 @@ impl Middleware for ChatRelay {
         }
 
         // Filter: only handle RoomMessage events
-        let EventKind::RoomMessage { room_id, body, sender_display_name, is_self, .. } =
-            &event.kind
+        let EventKind::RoomMessage {
+            room_id, body, sender_id, sender_display_name, is_self, ..
+        } = &event.kind
         else {
             return Ok(Verdict::Continue);
         };
@@ -93,8 +95,12 @@ impl Middleware for ChatRelay {
         }
 
         // Format and relay the message
-        let formatted_body =
-            Self::format_relayed_message(&self.prefix_tag, sender_display_name.as_deref(), body);
+        let formatted_body = Self::format_relayed_message(
+            &self.prefix_tag,
+            sender_id,
+            sender_display_name.as_deref(),
+            body,
+        );
 
         let cmd_tx = self.cmd_tx.clone();
         let dest_service_id = ServiceId(self.dest_service_id.clone());
