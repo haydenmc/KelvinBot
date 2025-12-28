@@ -1465,15 +1465,13 @@ async fn test_attendance_relay_tracks_all_participants() {
     // Drain all pending commands and find the summary
     let mut summary_found = false;
     while let Ok(cmd) = cmd_rx.try_recv() {
-        match cmd {
-            Command::SendRoomMessage { body, .. } => {
-                if body.contains("Session summary") {
-                    assert!(body.contains("- Alice"));
-                    assert!(body.contains("- Bob"));
-                    summary_found = true;
-                }
-            }
-            _ => {} // Ignore EditMessage and other commands
+        // Ignore EditMessage and other commands, only check SendRoomMessage
+        if let Command::SendRoomMessage { body, .. } = cmd
+            && body.contains("Session summary")
+        {
+            assert!(body.contains("- Alice"));
+            assert!(body.contains("- Bob"));
+            summary_found = true;
         }
     }
 
