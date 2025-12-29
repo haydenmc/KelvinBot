@@ -56,14 +56,8 @@ async fn test_end_to_end_event_processing_pipeline() {
     let mut service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>> = HashMap::new();
     service_middlewares.insert(service_id, vec![counting_middleware as Arc<dyn Middleware>]);
 
-    let mut bus = Bus::new(
-        evt_rx,
-        evt_tx.clone(),
-        cmd_rx,
-        services,
-        service_middlewares,
-        ReconnectionConfig::default(),
-    );
+    let mut bus =
+        Bus::new(evt_rx, cmd_rx, services, service_middlewares, ReconnectionConfig::default());
 
     let cancel_token = CancellationToken::new();
 
@@ -165,14 +159,8 @@ async fn test_middleware_pipeline_order_and_stopping() {
         ],
     );
 
-    let mut bus = Bus::new(
-        evt_rx,
-        evt_tx.clone(),
-        cmd_rx,
-        services,
-        service_middlewares,
-        ReconnectionConfig::default(),
-    );
+    let mut bus =
+        Bus::new(evt_rx, cmd_rx, services, service_middlewares, ReconnectionConfig::default());
 
     let cancel_token = CancellationToken::new();
 

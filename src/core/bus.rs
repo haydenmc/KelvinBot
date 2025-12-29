@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::core::config::{ExponentialBackoff, ReconnectionConfig};
-use crate::core::event::{Event, EventKind};
+use crate::core::event::Event;
 use crate::core::middleware::{Middleware, Verdict};
 use crate::core::service::{Service, ServiceId};
 
@@ -81,9 +81,6 @@ pub struct Bus {
     // Receive events from services
     evt_rx: Receiver<Event>,
 
-    // Event transmitter for lifecycle events
-    evt_tx: Sender<Event>,
-
     // Receive commands from middlewares
     cmd_rx: Receiver<Command>,
 
@@ -105,7 +102,6 @@ pub struct Bus {
 impl Bus {
     pub fn new(
         evt_rx: Receiver<Event>,
-        evt_tx: Sender<Event>,
         cmd_rx: Receiver<Command>,
         services: HashMap<ServiceId, Arc<dyn Service>>,
         service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
@@ -119,7 +115,6 @@ impl Bus {
 
         Self {
             evt_rx,
-            evt_tx,
             cmd_rx,
             services,
             service_middlewares,
@@ -199,41 +194,21 @@ impl Bus {
                         connection_start.map(|t| t.elapsed().as_secs() > 30).unwrap_or(false);
 
                     if was_long_running && attempt_count > 0 {
-                        // Service recovered - emit reconnected event
-                        let downtime = connection_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                        let _ = self
-                            .evt_tx
-                            .send(Event {
-                                service_id: completed_service_id.clone(),
-                                kind: EventKind::ServiceReconnected {
-                                    downtime_secs: downtime,
-                                    total_attempts: attempt_count,
-                                },
-                            })
-                            .await;
-
-                        // Reset backoff and attempts
+                        // Service recovered - reset backoff and attempts
                         if let Some(backoff) = self.backoff_state.get_mut(&completed_service_id) {
                             backoff.reset();
                         }
                         self.attempt_counters.insert(completed_service_id.clone(), 0);
+                        tracing::info!(
+                            service_id=%completed_service_id,
+                            total_attempts=%attempt_count,
+                            "service recovered after previous failures"
+                        );
                     }
 
                     // Increment attempt counter
                     let new_attempt = attempt_count + 1;
                     self.attempt_counters.insert(completed_service_id.clone(), new_attempt);
-
-                    // Emit disconnected event
-                    let _ = self
-                        .evt_tx
-                        .send(Event {
-                            service_id: completed_service_id.clone(),
-                            kind: EventKind::ServiceDisconnected {
-                                reason: "service exited unexpectedly".to_string(),
-                                attempt: new_attempt,
-                            },
-                        })
-                        .await;
 
                     tracing::warn!(
                         service_id=%completed_service_id,
@@ -248,18 +223,6 @@ impl Bus {
                         } else {
                             Duration::from_secs(1)
                         };
-
-                    // Emit reconnecting event
-                    let _ = self
-                        .evt_tx
-                        .send(Event {
-                            service_id: completed_service_id.clone(),
-                            kind: EventKind::ServiceReconnecting {
-                                attempt: new_attempt,
-                                delay_secs: delay.as_secs(),
-                            },
-                        })
-                        .await;
 
                     tracing::info!(
                         service_id=%completed_service_id,

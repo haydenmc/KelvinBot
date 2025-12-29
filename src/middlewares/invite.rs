@@ -38,11 +38,7 @@ impl Middleware for Invite {
 
     fn on_event(&self, evt: &Event) -> Result<Verdict> {
         match &evt.kind {
-            EventKind::UserListUpdate { .. }
-            | EventKind::RoomMessage { .. }
-            | EventKind::ServiceDisconnected { .. }
-            | EventKind::ServiceReconnecting { .. }
-            | EventKind::ServiceReconnected { .. } => {
+            EventKind::UserListUpdate { .. } | EventKind::RoomMessage { .. } => {
                 // Ignore non-DM events
                 return Ok(Verdict::Continue);
             }

@@ -41,7 +41,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let reconnect_config = cfg.reconnection.clone();
     let bus_task = tokio::spawn({
         async move {
-            bus::Bus::new(evt_rx, evt_tx, cmd_rx, services, service_middlewares, reconnect_config)
+            bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares, reconnect_config)
                 .run(bus_cancel)
                 .await
         }
