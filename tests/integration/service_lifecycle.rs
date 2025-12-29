@@ -1,6 +1,7 @@
 use crate::common::{create_multi_service_config, create_test_config};
 use kelvin_bot::core::{
     bus::{Bus, create_command_channel, create_event_channel},
+    config::ReconnectionConfig,
     middleware::instantiate_middleware_from_config,
     service::instantiate_services_from_config,
 };
@@ -62,7 +63,8 @@ async fn test_bus_creation_and_startup() {
     // No middleware pipelines configured for services in test
     let service_middlewares = std::collections::HashMap::new();
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
+    let mut bus =
+        Bus::new(evt_rx, cmd_rx, services, service_middlewares, ReconnectionConfig::default());
 
     let cancel_token = CancellationToken::new();
 
@@ -96,7 +98,8 @@ async fn test_cancellation_propagates_to_services() {
     // No middleware pipelines configured for services in test
     let service_middlewares = std::collections::HashMap::new();
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
+    let mut bus =
+        Bus::new(evt_rx, cmd_rx, services, service_middlewares, ReconnectionConfig::default());
 
     let cancel_token = CancellationToken::new();
 

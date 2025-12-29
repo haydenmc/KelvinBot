@@ -1890,6 +1890,7 @@ dependencies = [
  "matrix-sdk",
  "mumble-protocol-2x",
  "native-tls",
+ "rand 0.8.5",
  "reqwest",
  "secrecy",
  "serde",

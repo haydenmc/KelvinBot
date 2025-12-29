@@ -38,8 +38,13 @@ async fn main() -> Result<(), anyhow::Error> {
     // Start bus
     let cancel_all = CancellationToken::new();
     let bus_cancel = cancel_all.child_token();
+    let reconnect_config = cfg.reconnection.clone();
     let bus_task = tokio::spawn({
-        async move { bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares).run(bus_cancel).await }
+        async move {
+            bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares, reconnect_config)
+                .run(bus_cancel)
+                .await
+        }
     });
 
     // Graceful shutdown on Ctrl+C
