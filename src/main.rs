@@ -64,9 +64,8 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::builder()
-        .with_default_directive(tracing::Level::WARN.into())
-        .from_env_lossy();
+    let filter =
+        EnvFilter::builder().with_default_directive(tracing::Level::WARN.into()).from_env_lossy();
 
     fmt().with_env_filter(filter).init();
 }
