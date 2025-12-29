@@ -64,19 +64,9 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 fn init_tracing() {
-    // Set a default log level for all crates (warn), then allow RUST_LOG to override
-    // This prevents debug noise from dependencies when setting RUST_LOG=kelvin_bot=debug
-    //
-    // Examples:
-    //   RUST_LOG=kelvin_bot=debug          - Only kelvin_bot at debug, everything else at warn
-    //   RUST_LOG=debug                      - Everything at debug
-    //   RUST_LOG=kelvin_bot=debug,hyper=info - kelvin_bot at debug, hyper at info, rest at warn
     let filter = EnvFilter::builder()
         .with_default_directive(tracing::Level::WARN.into())
-        .from_env_lossy()
-        .add_directive("matrix_sdk=error".parse().unwrap())
-        .add_directive("matrix_sdk_crypto=error".parse().unwrap())
-        .add_directive("matrix_sdk_base=error".parse().unwrap());
+        .from_env_lossy();
 
     fmt().with_env_filter(filter).init();
 }
