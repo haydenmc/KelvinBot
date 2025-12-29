@@ -1,6 +1,6 @@
 use kelvin_bot::core::{
     bus::{create_command_channel, create_event_channel},
-    config::{Config, MiddlewareCfg, MiddlewareKind, ServiceCfg, ServiceKind},
+    config::{Config, MiddlewareCfg, MiddlewareKind, ReconnectionConfig, ServiceCfg, ServiceKind},
     middleware::instantiate_middleware_from_config,
     service::instantiate_services_from_config,
 };
@@ -45,6 +45,7 @@ async fn test_configuration_with_mixed_service_types() {
         services,
         middlewares: HashMap::new(),
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     };
 
     let (evt_tx, _evt_rx) = create_event_channel(10);
@@ -118,6 +119,7 @@ async fn test_service_with_middleware_list_configuration() {
         services,
         middlewares: middlewares_map,
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     };
 
     let (cmd_tx, _cmd_rx) = create_command_channel(10);

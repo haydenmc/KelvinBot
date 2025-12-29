@@ -1,7 +1,7 @@
 use assert_matches::assert_matches;
 use kelvin_bot::core::{
     bus::{Command, create_command_channel},
-    config::{Config, MiddlewareCfg, MiddlewareKind},
+    config::{Config, MiddlewareCfg, MiddlewareKind, ReconnectionConfig},
     event::{Event, EventKind, User},
     middleware::{
         Middleware, Verdict, build_middleware_pipeline, instantiate_middleware_from_config,
@@ -139,6 +139,7 @@ async fn test_middleware_instantiation_with_echo() {
         services: HashMap::new(),
         middlewares: middlewares_map,
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     };
 
     let result = instantiate_middleware_from_config(&config, &cmd_tx);
@@ -422,6 +423,7 @@ async fn test_invite_middleware_instantiation_from_config() {
         services: HashMap::new(),
         middlewares: middlewares_map,
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     };
 
     let result = instantiate_middleware_from_config(&config, &cmd_tx);
@@ -734,6 +736,7 @@ async fn test_chat_relay_instantiation_from_config() {
         services: HashMap::new(),
         middlewares: middlewares_map,
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     };
 
     let result = instantiate_middleware_from_config(&config, &cmd_tx);
@@ -1502,6 +1505,7 @@ async fn test_attendance_relay_instantiation_from_config() {
         services: HashMap::new(),
         middlewares: middlewares_map,
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     };
 
     let result = instantiate_middleware_from_config(&config, &cmd_tx);

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kelvin_bot::core::config::{Config, ServiceCfg, ServiceKind};
+use kelvin_bot::core::config::{Config, ReconnectionConfig, ServiceCfg, ServiceKind};
 use kelvin_bot::core::event::{Event, EventKind};
 use kelvin_bot::core::service::{Service, ServiceId};
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ pub fn create_test_config() -> Config {
         },
         middlewares: HashMap::new(),
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     }
 }
 
@@ -45,6 +46,7 @@ pub fn create_multi_service_config() -> Config {
         services,
         middlewares: HashMap::new(),
         data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
     }
 }
 

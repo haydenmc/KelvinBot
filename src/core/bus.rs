@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::core::event::Event;
+use crate::core::config::{ExponentialBackoff, ReconnectionConfig};
+use crate::core::event::{Event, EventKind};
 use crate::core::middleware::{Middleware, Verdict};
 use crate::core::service::{Service, ServiceId};
 
@@ -80,6 +81,9 @@ pub struct Bus {
     // Receive events from services
     evt_rx: Receiver<Event>,
 
+    // Event transmitter for lifecycle events
+    evt_tx: Sender<Event>,
+
     // Receive commands from middlewares
     cmd_rx: Receiver<Command>,
 
@@ -87,26 +91,59 @@ pub struct Bus {
 
     // Per-service middleware pipelines
     service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
+
+    // Per-service backoff state
+    backoff_state: HashMap<ServiceId, ExponentialBackoff>,
+
+    // Per-service attempt counters
+    attempt_counters: HashMap<ServiceId, u32>,
+
+    // Per-service connection start times
+    connection_start_times: HashMap<ServiceId, Instant>,
 }
 
 impl Bus {
     pub fn new(
         evt_rx: Receiver<Event>,
+        evt_tx: Sender<Event>,
         cmd_rx: Receiver<Command>,
         services: HashMap<ServiceId, Arc<dyn Service>>,
         service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
+        reconnect_config: ReconnectionConfig,
     ) -> Self {
-        Self { evt_rx, cmd_rx, services, service_middlewares }
+        // Initialize backoff state for each service
+        let backoff_state = services
+            .keys()
+            .map(|id| (id.clone(), ExponentialBackoff::new(reconnect_config.clone())))
+            .collect();
+
+        Self {
+            evt_rx,
+            evt_tx,
+            cmd_rx,
+            services,
+            service_middlewares,
+            backoff_state,
+            attempt_counters: HashMap::new(),
+            connection_start_times: HashMap::new(),
+        }
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) -> anyhow::Result<()> {
-        // Start all services
-        info!("starting services...");
-        let mut service_handles = Vec::new();
-        for service in self.services.values() {
+        // Start all services with supervision
+        info!("starting services with supervision...");
+        let mut service_tasks: HashMap<ServiceId, tokio::task::JoinHandle<anyhow::Result<()>>> =
+            HashMap::new();
+
+        for (service_id, service) in &self.services {
             let child_token = cancel.child_token();
             let service_clone = service.clone();
-            service_handles.push(tokio::spawn(async move { service_clone.run(child_token).await }));
+
+            let handle = tokio::spawn(async move { service_clone.run(child_token).await });
+
+            service_tasks.insert(service_id.clone(), handle);
+            // Track connection start time
+            self.connection_start_times.insert(service_id.clone(), Instant::now());
         }
 
         // Start all middlewares (collect unique instances across all services)
@@ -130,9 +167,134 @@ impl Bus {
             }
         }
 
-        // Begin command/event processing
+        // Begin command/event processing with service supervision
         info!("starting event bus...");
+
         loop {
+            // Check for completed service tasks
+            let mut completed_services = Vec::new();
+            service_tasks.retain(|service_id, handle| {
+                if handle.is_finished() {
+                    completed_services.push(service_id.clone());
+                    false // Remove from map
+                } else {
+                    true // Keep in map
+                }
+            });
+
+            // Handle completed services (restart with backoff if not shutting down)
+            for completed_service_id in completed_services {
+                if cancel.is_cancelled() {
+                    // Graceful shutdown - don't restart
+                    tracing::info!(service_id=%completed_service_id, "service exited during shutdown");
+                } else {
+                    // Service exited unexpectedly - apply backoff and restart
+                    let attempt_count =
+                        self.attempt_counters.get(&completed_service_id).copied().unwrap_or(0);
+                    let connection_start =
+                        self.connection_start_times.get(&completed_service_id).copied();
+
+                    // If service ran successfully for >30s, consider it a success and reset backoff
+                    let was_long_running =
+                        connection_start.map(|t| t.elapsed().as_secs() > 30).unwrap_or(false);
+
+                    if was_long_running && attempt_count > 0 {
+                        // Service recovered - emit reconnected event
+                        let downtime = connection_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                        let _ = self
+                            .evt_tx
+                            .send(Event {
+                                service_id: completed_service_id.clone(),
+                                kind: EventKind::ServiceReconnected {
+                                    downtime_secs: downtime,
+                                    total_attempts: attempt_count,
+                                },
+                            })
+                            .await;
+
+                        // Reset backoff and attempts
+                        if let Some(backoff) = self.backoff_state.get_mut(&completed_service_id) {
+                            backoff.reset();
+                        }
+                        self.attempt_counters.insert(completed_service_id.clone(), 0);
+                    }
+
+                    // Increment attempt counter
+                    let new_attempt = attempt_count + 1;
+                    self.attempt_counters.insert(completed_service_id.clone(), new_attempt);
+
+                    // Emit disconnected event
+                    let _ = self
+                        .evt_tx
+                        .send(Event {
+                            service_id: completed_service_id.clone(),
+                            kind: EventKind::ServiceDisconnected {
+                                reason: "service exited unexpectedly".to_string(),
+                                attempt: new_attempt,
+                            },
+                        })
+                        .await;
+
+                    tracing::warn!(
+                        service_id=%completed_service_id,
+                        attempt=%new_attempt,
+                        "service exited unexpectedly, will reconnect"
+                    );
+
+                    // Calculate backoff delay
+                    let delay =
+                        if let Some(backoff) = self.backoff_state.get_mut(&completed_service_id) {
+                            backoff.next_delay()
+                        } else {
+                            Duration::from_secs(1)
+                        };
+
+                    // Emit reconnecting event
+                    let _ = self
+                        .evt_tx
+                        .send(Event {
+                            service_id: completed_service_id.clone(),
+                            kind: EventKind::ServiceReconnecting {
+                                attempt: new_attempt,
+                                delay_secs: delay.as_secs(),
+                            },
+                        })
+                        .await;
+
+                    tracing::info!(
+                        service_id=%completed_service_id,
+                        attempt=%new_attempt,
+                        delay_secs=%delay.as_secs(),
+                        "waiting before restart"
+                    );
+
+                    // Sleep with cancellation support
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!(service_id=%completed_service_id, "cancellation during backoff, not restarting");
+                            continue;
+                        }
+                        _ = tokio::time::sleep(delay) => {
+                            // Continue to restart
+                        }
+                    }
+
+                    // Restart the service
+                    if let Some(service) = self.services.get(&completed_service_id) {
+                        let child_token = cancel.child_token();
+                        let service_clone = service.clone();
+
+                        let handle =
+                            tokio::spawn(async move { service_clone.run(child_token).await });
+
+                        service_tasks.insert(completed_service_id.clone(), handle);
+                        self.connection_start_times
+                            .insert(completed_service_id.clone(), Instant::now());
+                        tracing::info!(service_id=%completed_service_id, "service restarted");
+                    }
+                }
+            }
+
             tokio::select! {
                 _ = cancel.cancelled() => {
                     info!("shutdown signal received");
@@ -174,6 +336,10 @@ impl Bus {
                     } else {
                         tracing::warn!(service_id=%service_id, "command sent to unknown service");
                     }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Periodic check for service completions
+                    // This ensures we detect service exits even if no events/commands are flowing
                 }
             }
         }

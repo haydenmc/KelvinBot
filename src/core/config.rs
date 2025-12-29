@@ -93,10 +93,85 @@ pub struct Config {
     pub middlewares: HashMap<String, MiddlewareCfg>, // key = middleware name
     #[serde(default = "default_data_directory")]
     pub data_directory: PathBuf,
+    #[serde(default)]
+    pub reconnection: ReconnectionConfig,
 }
 
 fn default_data_directory() -> PathBuf {
     PathBuf::from("./data")
+}
+
+// Reconnection configuration with exponential backoff
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReconnectionConfig {
+    #[serde(default = "default_initial_delay", with = "humantime_serde")]
+    pub initial_delay: Duration,
+    #[serde(default = "default_max_delay", with = "humantime_serde")]
+    pub max_delay: Duration,
+    #[serde(default = "default_multiplier")]
+    pub multiplier: f64,
+    #[serde(default = "default_jitter_factor")]
+    pub jitter_factor: f64,
+}
+
+impl Default for ReconnectionConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay: default_initial_delay(),
+            max_delay: default_max_delay(),
+            multiplier: default_multiplier(),
+            jitter_factor: default_jitter_factor(),
+        }
+    }
+}
+
+fn default_initial_delay() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_max_delay() -> Duration {
+    Duration::from_secs(60)
+}
+
+fn default_multiplier() -> f64 {
+    2.0
+}
+
+fn default_jitter_factor() -> f64 {
+    0.1
+}
+
+// Helper for calculating exponential backoff delays
+pub struct ExponentialBackoff {
+    config: ReconnectionConfig,
+    attempt: u32,
+}
+
+impl ExponentialBackoff {
+    pub fn new(config: ReconnectionConfig) -> Self {
+        Self { config, attempt: 0 }
+    }
+
+    pub fn next_delay(&mut self) -> Duration {
+        let base_delay_secs = self.config.initial_delay.as_secs_f64()
+            * self.config.multiplier.powi(self.attempt as i32);
+        let capped_delay_secs = base_delay_secs.min(self.config.max_delay.as_secs_f64());
+
+        // Apply jitter
+        let jitter = {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            1.0 + rng.gen_range(-self.config.jitter_factor..=self.config.jitter_factor)
+        };
+        let final_delay_secs = capped_delay_secs * jitter;
+
+        self.attempt += 1;
+        Duration::from_secs_f64(final_delay_secs.max(0.0))
+    }
+
+    pub fn reset(&mut self) {
+        self.attempt = 0;
+    }
 }
 
 #[derive(Debug, Deserialize)]

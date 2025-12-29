@@ -2,6 +2,7 @@ use crate::common::MockService;
 use async_trait::async_trait;
 use kelvin_bot::core::{
     bus::{Bus, create_command_channel, create_event_channel},
+    config::ReconnectionConfig,
     event::Event,
     middleware::{Middleware, Verdict},
     service::ServiceId,
@@ -42,7 +43,7 @@ async fn test_end_to_end_event_processing_pipeline() {
 
     // Create a controllable mock service
     let service_id = ServiceId("test_mock".to_string());
-    let (mock_service, mock_control) = MockService::new(service_id.clone(), evt_tx);
+    let (mock_service, mock_control) = MockService::new(service_id.clone(), evt_tx.clone());
 
     // Create services map with our mock service
     let mut services = HashMap::new();
@@ -55,7 +56,14 @@ async fn test_end_to_end_event_processing_pipeline() {
     let mut service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>> = HashMap::new();
     service_middlewares.insert(service_id, vec![counting_middleware as Arc<dyn Middleware>]);
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
+    let mut bus = Bus::new(
+        evt_rx,
+        evt_tx.clone(),
+        cmd_rx,
+        services,
+        service_middlewares,
+        ReconnectionConfig::default(),
+    );
 
     let cancel_token = CancellationToken::new();
 
@@ -137,7 +145,7 @@ async fn test_middleware_pipeline_order_and_stopping() {
 
     // Create a controllable mock service
     let service_id = ServiceId("test_mock".to_string());
-    let (mock_service, mock_control) = MockService::new(service_id.clone(), evt_tx);
+    let (mock_service, mock_control) = MockService::new(service_id.clone(), evt_tx.clone());
 
     // Create services map with our mock service
     let mut services = HashMap::new();
@@ -157,7 +165,14 @@ async fn test_middleware_pipeline_order_and_stopping() {
         ],
     );
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, service_middlewares);
+    let mut bus = Bus::new(
+        evt_rx,
+        evt_tx.clone(),
+        cmd_rx,
+        services,
+        service_middlewares,
+        ReconnectionConfig::default(),
+    );
 
     let cancel_token = CancellationToken::new();
 

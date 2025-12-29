@@ -40,6 +40,18 @@ pub enum EventKind {
     UserListUpdate {
         users: Vec<User>,
     },
+    ServiceDisconnected {
+        reason: String,
+        attempt: u32,
+    },
+    ServiceReconnecting {
+        attempt: u32,
+        delay_secs: u64,
+    },
+    ServiceReconnected {
+        downtime_secs: u64,
+        total_attempts: u32,
+    },
 }
 
 impl fmt::Display for Event {
@@ -54,6 +66,19 @@ impl fmt::Display for Event {
             }
             EventKind::UserListUpdate { users } => {
                 write!(f, "[UserList] {} users", users.len())
+            }
+            EventKind::ServiceDisconnected { reason, attempt } => {
+                write!(f, "[Disconnected] attempt {}: {}", attempt, reason)
+            }
+            EventKind::ServiceReconnecting { attempt, delay_secs } => {
+                write!(f, "[Reconnecting] attempt {} after {}s", attempt, delay_secs)
+            }
+            EventKind::ServiceReconnected { downtime_secs, total_attempts } => {
+                write!(
+                    f,
+                    "[Reconnected] after {}s downtime ({} attempts)",
+                    downtime_secs, total_attempts
+                )
             }
         }
     }
