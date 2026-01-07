@@ -124,6 +124,32 @@ async fn test_echo_middleware_ignores_wrong_command() {
 }
 
 #[tokio::test]
+async fn test_echo_middleware_ignores_self_messages() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let echo = Echo::new(cmd_tx, "!echo".to_string());
+
+    let event = Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@bot:example.com".to_string(),
+            body: "!echo this is from myself".to_string(),
+            is_local_user: true,
+            sender_id: "@bot:example.com".to_string(),
+            sender_display_name: Some("Bot".to_string()),
+            is_self: true,
+        },
+    };
+
+    let result = echo.on_event(&event);
+    assert_ok!(result);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // Should NOT have sent a command because is_self is true
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn test_middleware_instantiation_with_echo() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 

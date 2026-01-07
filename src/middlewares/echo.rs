@@ -30,11 +30,16 @@ impl Middleware for Echo {
 
     fn on_event(&self, evt: &Event) -> Result<Verdict> {
         // Only handle message events
-        let body = match &evt.kind {
-            EventKind::DirectMessage { body, .. } => body,
-            EventKind::RoomMessage { body, .. } => body,
+        let (body, is_self) = match &evt.kind {
+            EventKind::DirectMessage { body, is_self, .. } => (body, *is_self),
+            EventKind::RoomMessage { body, is_self, .. } => (body, *is_self),
             EventKind::UserListUpdate { .. } => return Ok(Verdict::Continue),
         };
+
+        // Ignore messages from self to prevent infinite recursion
+        if is_self {
+            return Ok(Verdict::Continue);
+        }
 
         // Build the prefix with a trailing space
         let prefix = format!("{} ", self.command_string);
