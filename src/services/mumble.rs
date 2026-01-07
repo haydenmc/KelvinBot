@@ -357,6 +357,9 @@ impl Service for MumbleService {
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         info!(id=%self.id, "mumble service starting");
 
+        // Reset state on each run (important for reconnections after disconnect)
+        *self.state.lock().await = MumbleState::new();
+
         let mut stream = self.connect().await?;
         self.authenticate(&mut stream).await?;
 
