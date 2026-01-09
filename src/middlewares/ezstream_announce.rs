@@ -13,9 +13,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, Mutex};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, tungstenite::client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 // Configuration for a single announcement destination
 #[derive(Debug, Clone)]
@@ -334,25 +333,27 @@ impl EzStreamAnnounce {
 
     // Connect to WebSocket and process messages
     async fn connect_and_process(&self, cancel: CancellationToken) -> Result<()> {
-        let url = Url::parse(&self.websocket_url)
-            .context("invalid WebSocket URL")?;
-
-        // Connect with "stream-updates" subprotocol
-        let request = tokio_tungstenite::tungstenite::http::Request::builder()
-            .uri(url.as_str())
-            .header("Sec-WebSocket-Protocol", "stream-updates")
-            .body(())
+        // Build WebSocket request with subprotocol
+        // We need to create a properly formed client request
+        let mut request = self.websocket_url.as_str().into_client_request()
             .context("failed to build WebSocket request")?;
 
-        let (ws_stream, _) = connect_async(request)
+        // Add the subprotocol header
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            "stream-updates".parse().unwrap()
+        );
+
+        let (ws_stream, response) = connect_async(request)
             .await
             .map_err(|e| {
-                tracing::debug!(error=%e, "WebSocket connection error details");
-                e
-            })
-            .context("failed to connect to WebSocket")?;
+                anyhow::anyhow!("WebSocket connection failed: {}", e)
+            })?;
 
-        tracing::info!("WebSocket connection established");
+        tracing::info!(
+            status = ?response.status(),
+            "WebSocket connection established"
+        );
 
         let (mut write, mut read) = ws_stream.split();
 
