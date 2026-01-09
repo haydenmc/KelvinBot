@@ -7,6 +7,7 @@ use crate::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
     chat_relay::{ChatRelay, ChatRelayConfig},
     echo::Echo,
+    ezstream_announce::EzStreamAnnounce,
     invite::Invite,
     logger::Logger,
     movie_showtimes::MovieShowtimes,
@@ -118,6 +119,32 @@ pub fn instantiate_middleware_from_config(
                     prefix_tag: prefix_tag.clone(),
                 },
             )),
+            MiddlewareKind::EzStreamAnnounce {
+                websocket_url,
+                stream_url_template,
+                start_message_template,
+                end_message_template,
+                destinations,
+            } => {
+                use crate::middlewares::ezstream_announce::DestinationConfig;
+
+                let dest_configs: Vec<DestinationConfig> = destinations
+                    .values()
+                    .map(|d| DestinationConfig {
+                        service_id: d.service_id.clone(),
+                        room_id: d.room_id.clone(),
+                    })
+                    .collect();
+
+                Arc::new(EzStreamAnnounce::new(
+                    cmd_tx.clone(),
+                    websocket_url.clone(),
+                    stream_url_template.clone(),
+                    start_message_template.clone(),
+                    end_message_template.clone(),
+                    dest_configs,
+                ))
+            }
             MiddlewareKind::Unknown => {
                 warn!(middleware_name=%name, "unknown middleware kind, skipping");
                 continue;
