@@ -10,6 +10,12 @@ use crate::middlewares::movie_showtimes::LatLng;
 pub const ENV_PREFIX: &str = "KELVIN";
 pub const ENV_SEPARATOR: &str = "__";
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnnouncementDestination {
+    pub service_id: String,
+    pub room_id: String,
+}
+
 #[serde_as]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -81,6 +87,14 @@ pub enum MiddlewareKind {
         dest_service_id: String,
         dest_room_id: String,
         prefix_tag: String,
+    },
+    EzStreamAnnounce {
+        websocket_url: String,
+        stream_url_template: String,
+        start_message_template: String,
+        end_message_template: String,
+        #[serde(default)]
+        destinations: HashMap<String, AnnouncementDestination>,
     },
     #[serde(other)]
     Unknown,
