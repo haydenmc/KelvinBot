@@ -12,8 +12,10 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, Mutex};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, tungstenite::client::IntoClientRequest};
+use tokio::sync::{Mutex, mpsc::Sender};
+use tokio_tungstenite::{
+    connect_async, tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
+};
 use tokio_util::sync::CancellationToken;
 
 // Configuration for a single announcement destination
@@ -49,9 +51,7 @@ struct StreamState {
 
 impl StreamState {
     fn new() -> Self {
-        Self {
-            active_streams: HashMap::new(),
-        }
+        Self { active_streams: HashMap::new() }
     }
 }
 
@@ -125,23 +125,15 @@ impl EzStreamAnnounce {
     }
 
     // Handle stream going live
-    async fn handle_stream_start(
-        &self,
-        channel_id: String,
-        channel_name: String,
-    ) -> Result<()> {
+    async fn handle_stream_start(&self, channel_id: String, channel_name: String) -> Result<()> {
         tracing::info!(
             channel_id=%channel_id,
             channel_name=%channel_name,
             "stream started"
         );
 
-        let message_body = self.format_message(
-            &self.start_message_template,
-            &channel_name,
-            &channel_id,
-            None,
-        );
+        let message_body =
+            self.format_message(&self.start_message_template, &channel_name, &channel_id, None);
 
         let mut state = self.state.lock().await;
         let mut message_ids = HashMap::new();
@@ -163,10 +155,7 @@ impl EzStreamAnnounce {
             // Store message ID for later editing
             match response_rx.await {
                 Ok(Ok(message_id)) => {
-                    message_ids.insert(
-                        (dest.service_id.clone(), dest.room_id.clone()),
-                        message_id,
-                    );
+                    message_ids.insert((dest.service_id.clone(), dest.room_id.clone()), message_id);
                     tracing::info!(
                         service_id=%dest.service_id,
                         room_id=%dest.room_id,
@@ -195,11 +184,7 @@ impl EzStreamAnnounce {
         // Track this stream in state
         state.active_streams.insert(
             channel_id.clone(),
-            ActiveStream {
-                name: channel_name,
-                start_time: Utc::now(),
-                message_ids,
-            },
+            ActiveStream { name: channel_name, start_time: Utc::now(), message_ids },
         );
 
         Ok(())
@@ -335,20 +320,18 @@ impl EzStreamAnnounce {
     async fn connect_and_process(&self, cancel: CancellationToken) -> Result<()> {
         // Build WebSocket request with subprotocol
         // We need to create a properly formed client request
-        let mut request = self.websocket_url.as_str().into_client_request()
+        let mut request = self
+            .websocket_url
+            .as_str()
+            .into_client_request()
             .context("failed to build WebSocket request")?;
 
         // Add the subprotocol header
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            "stream-updates".parse().unwrap()
-        );
+        request.headers_mut().insert("Sec-WebSocket-Protocol", "stream-updates".parse().unwrap());
 
         let (ws_stream, response) = connect_async(request)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("WebSocket connection failed: {}", e)
-            })?;
+            .map_err(|e| anyhow::anyhow!("WebSocket connection failed: {}", e))?;
 
         tracing::info!(
             status = ?response.status(),
