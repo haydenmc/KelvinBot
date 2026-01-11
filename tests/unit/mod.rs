@@ -3,3 +3,4 @@ pub mod config;
 pub mod event;
 pub mod middleware;
 pub mod service;
+pub mod thread_reply;
