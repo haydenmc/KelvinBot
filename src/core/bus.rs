@@ -67,7 +67,14 @@ impl std::fmt::Debug for Command {
                 .field("markdown_body", markdown_body)
                 .field("response_tx", &"<Option<oneshot::Sender>>")
                 .finish(),
-            Command::SendThreadReply { service_id, room_id, thread_root_id, body, markdown_body, .. } => f
+            Command::SendThreadReply {
+                service_id,
+                room_id,
+                thread_root_id,
+                body,
+                markdown_body,
+                ..
+            } => f
                 .debug_struct("SendThreadReply")
                 .field("service_id", service_id)
                 .field("room_id", room_id)

@@ -95,7 +95,9 @@ impl Middleware for Echo {
                                 room_id,
                                 thread_root_id: message_id.clone(),
                                 body: "This is a thread reply to the echo!".to_string(),
-                                markdown_body: Some("This is a **thread reply** to the echo!".to_string()),
+                                markdown_body: Some(
+                                    "This is a **thread reply** to the echo!".to_string(),
+                                ),
                                 response_tx: None,
                             };
 

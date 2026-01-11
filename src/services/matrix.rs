@@ -629,7 +629,14 @@ impl Service for MatrixService {
                     let _ = tx.send(result);
                 }
             }
-            Command::SendThreadReply { room_id, thread_root_id, body, markdown_body, response_tx, .. } => {
+            Command::SendThreadReply {
+                room_id,
+                thread_root_id,
+                body,
+                markdown_body,
+                response_tx,
+                ..
+            } => {
                 info!(service=%self.id, room_id=%room_id, thread_root=%thread_root_id, "sending thread reply");
 
                 // Parse the room ID
@@ -651,7 +658,8 @@ impl Service for MatrixService {
                     Err(e) => {
                         error!(thread_root_id=%thread_root_id, error=%e, "invalid thread root event ID");
                         if let Some(tx) = response_tx {
-                            let _ = tx.send(Err(anyhow::anyhow!("invalid thread root event ID: {}", e)));
+                            let _ = tx
+                                .send(Err(anyhow::anyhow!("invalid thread root event ID: {}", e)));
                         }
                         return Ok(());
                     }
@@ -670,7 +678,8 @@ impl Service for MatrixService {
 
                     // Manually set the thread relation
                     use matrix_sdk::ruma::events::{relation::Thread, room::message::Relation};
-                    content.relates_to = Some(Relation::Thread(Thread::without_fallback(thread_root_event_id)));
+                    content.relates_to =
+                        Some(Relation::Thread(Thread::without_fallback(thread_root_event_id)));
 
                     match room.send(content).await {
                         Ok(response) => {
