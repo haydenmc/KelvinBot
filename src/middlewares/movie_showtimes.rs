@@ -1,6 +1,6 @@
 use crate::core::{
     bus::Command,
-    event::Event,
+    event::{Event, EventKind},
     middleware::{Middleware, Verdict},
     service::ServiceId,
 };
@@ -10,7 +10,8 @@ use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Tim
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
-use tokio::sync::mpsc::Sender;
+use std::sync::Arc;
+use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_util::sync::CancellationToken;
 
 #[serde_as]
@@ -57,7 +58,7 @@ struct TmsTheatre {
 }
 
 // Processed movie data for display
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MovieListing {
     title: String,
     year: Option<u16>,
@@ -67,7 +68,7 @@ struct MovieListing {
     other_theaters: Vec<String>, // Just theater names, no showtimes
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TheaterShowtimes {
     name: String,
     times_by_day: HashMap<NaiveDate, Vec<String>>, // Date -> times on that date
@@ -83,6 +84,8 @@ pub struct MovieShowtimes {
     search_radius_mi: u16,
     gracenote_api_key: String,
     theater_id_filter: Option<Vec<String>>,
+    cache: Arc<Mutex<Option<Vec<MovieListing>>>>,
+    command_string: String,
 }
 
 impl MovieShowtimes {
@@ -97,6 +100,7 @@ impl MovieShowtimes {
         search_radius_mi: u16,
         gracenote_api_key: String,
         theater_id_filter: Option<Vec<String>>,
+        command_string: Option<String>,
     ) -> Self {
         Self {
             cmd_tx,
@@ -108,6 +112,8 @@ impl MovieShowtimes {
             search_radius_mi,
             gracenote_api_key,
             theater_id_filter,
+            cache: Arc::new(Mutex::new(None)),
+            command_string: command_string.unwrap_or_else(|| "!movie".to_string()),
         }
     }
 
@@ -259,51 +265,7 @@ impl MovieShowtimes {
             message.push('\n');
         }
 
-        message.push_str("\n*See thread for detailed showtimes at each theater.*");
-        Ok(message)
-    }
-
-    /// Format detailed showtimes for a single movie
-    fn format_movie_detail(&self, listing: &MovieListing) -> Result<String> {
-        let mut message = String::new();
-
-        // Movie header with title, year, rating, runtime
-        message.push_str(&format!("## 📽️ {}", listing.title));
-
-        let mut metadata = Vec::new();
-        if let Some(year) = listing.year {
-            metadata.push(year.to_string());
-        }
-        if let Some(ref rating) = listing.rating {
-            metadata.push(rating.clone());
-        }
-        if let Some(ref runtime) = listing.runtime {
-            metadata.push(runtime.clone());
-        }
-
-        if !metadata.is_empty() {
-            message.push_str(&format!(" *({})*", metadata.join(" • ")));
-        }
-        message.push_str("\n\n");
-
-        // Show primary theater with detailed showtimes grouped by day
-        message.push_str(&format!("**🎭 {}**\n\n", listing.primary_theater.name));
-
-        // Sort days chronologically
-        let mut days: Vec<_> = listing.primary_theater.times_by_day.iter().collect();
-        days.sort_by_key(|(date, _)| *date);
-
-        for (date, times) in days {
-            let day_label = date.format("%a %b %-d").to_string();
-            message.push_str(&format!("- **{}**: {}\n", day_label, times.join(", ")));
-        }
-
-        // Show other theaters if any
-        if !listing.other_theaters.is_empty() {
-            message
-                .push_str(&format!("\n*Also showing at: {}*\n", listing.other_theaters.join(", ")));
-        }
-
+        message.push_str(&format!("\n*To see detailed showtimes, use: {} <movie title>*", self.command_string));
         Ok(message)
     }
 
@@ -343,50 +305,171 @@ impl MovieShowtimes {
         Ok(listings)
     }
 
-    /// Send the summary message and return the message ID for threading
-    async fn send_summary_message(&self, summary: String) -> Result<String> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    /// Find a movie by title query (case-insensitive partial match)
+    fn find_movie_by_query<'a>(
+        listings: &'a [MovieListing],
+        query: &str,
+    ) -> Option<&'a MovieListing> {
+        let query_lower = query.to_lowercase();
 
-        let command = Command::SendRoomMessage {
-            service_id: ServiceId(self.service_id.clone()),
-            room_id: self.room_id.clone(),
-            body: summary.clone(),
-            markdown_body: Some(summary),
-            response_tx: Some(response_tx),
-        };
+        // First try exact match (case-insensitive)
+        let exact_match = listings
+            .iter()
+            .find(|listing| listing.title.to_lowercase() == query_lower);
 
-        self.cmd_tx.send(command).await.context("failed to send summary command")?;
+        if exact_match.is_some() {
+            return exact_match;
+        }
 
-        // Wait for message ID
-        let message_id = response_rx
-            .await
-            .context("failed to receive response")?
-            .context("service returned error")?;
-
-        Ok(message_id)
+        // Then try contains match
+        listings
+            .iter()
+            .find(|listing| listing.title.to_lowercase().contains(&query_lower))
     }
 
-    /// Send a movie's detailed showtimes as a thread reply
-    async fn send_movie_detail_in_thread(
-        &self,
-        listing: &MovieListing,
-        thread_root_id: &str,
-    ) -> Result<()> {
-        let detail = self.format_movie_detail(listing)?;
+    /// Handle a movie query from a user in the configured room
+    fn handle_movie_query(&self, query: &str) {
+        let cmd_tx = self.cmd_tx.clone();
+        let service_id = self.service_id.clone();
+        let room_id = self.room_id.clone();
+        let query = query.to_string();
+        let cache = self.cache.clone();
 
-        let command = Command::SendThreadReply {
-            service_id: ServiceId(self.service_id.clone()),
-            room_id: self.room_id.clone(),
-            thread_root_id: thread_root_id.to_string(),
-            body: detail.clone(),
-            markdown_body: Some(detail),
+        tokio::spawn(async move {
+            // Get cached or fresh listings
+            let listings = match Self::get_cached_listings(&cache).await {
+                Some(l) => l,
+                None => {
+                    // Cache empty and we can't fetch without self
+                    // Send error message
+                    Self::send_room_response(
+                        &cmd_tx,
+                        &service_id,
+                        &room_id,
+                        "Movie showtimes not available yet. Please try again later.".to_string(),
+                        None,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            // Search for movie
+            match Self::find_movie_by_query(&listings, &query) {
+                Some(movie) => {
+                    // Found - send detailed showtimes
+                    if let Ok(detail) = Self::format_movie_detail_static(movie) {
+                        Self::send_room_response(&cmd_tx, &service_id, &room_id, detail.clone(), Some(detail)).await;
+                    }
+                }
+                None => {
+                    // Not found - send helpful message (no movie list, too many to display)
+                    let message = format!(
+                        "Movie '{}' not found in cached listings. Check the most recent summary for available movies.",
+                        query
+                    );
+
+                    Self::send_room_response(&cmd_tx, &service_id, &room_id, message, None).await;
+                }
+            }
+        });
+    }
+
+    /// Helper to get cached listings (static for use in spawned task)
+    async fn get_cached_listings(cache: &Arc<Mutex<Option<Vec<MovieListing>>>>) -> Option<Vec<MovieListing>> {
+        let cache_guard = cache.lock().await;
+        cache_guard.clone()
+    }
+
+    /// Static version of format_movie_detail for use in spawned tasks
+    fn format_movie_detail_static(listing: &MovieListing) -> Result<String> {
+        let mut message = String::new();
+
+        message.push_str(&format!("## 📽️ {}", listing.title));
+
+        let mut metadata = Vec::new();
+        if let Some(year) = listing.year {
+            metadata.push(year.to_string());
+        }
+        if let Some(ref rating) = listing.rating {
+            metadata.push(rating.clone());
+        }
+        if let Some(ref runtime) = listing.runtime {
+            metadata.push(runtime.clone());
+        }
+
+        if !metadata.is_empty() {
+            message.push_str(&format!(" *({})*", metadata.join(" • ")));
+        }
+        message.push_str("\n\n");
+
+        message.push_str(&format!("**🎭 {}**\n\n", listing.primary_theater.name));
+
+        let mut days: Vec<_> = listing.primary_theater.times_by_day.iter().collect();
+        days.sort_by_key(|(date, _)| *date);
+
+        for (date, times) in days {
+            let day_label = date.format("%a %b %-d").to_string();
+            message.push_str(&format!("- **{}**: {}\n", day_label, times.join(", ")));
+        }
+
+        if !listing.other_theaters.is_empty() {
+            message.push_str(&format!(
+                "\n*Also showing at: {}*\n",
+                listing.other_theaters.join(", ")
+            ));
+        }
+
+        Ok(message)
+    }
+
+    /// Send a response message to the configured room
+    async fn send_room_response(
+        cmd_tx: &Sender<Command>,
+        service_id: &str,
+        room_id: &str,
+        body: String,
+        markdown_body: Option<String>,
+    ) {
+        let command = Command::SendRoomMessage {
+            service_id: ServiceId(service_id.to_string()),
+            room_id: room_id.to_string(),
+            body,
+            markdown_body,
             response_tx: None,
         };
 
-        self.cmd_tx.send(command).await.context("failed to send thread reply")?;
+        if let Err(e) = cmd_tx.send(command).await {
+            tracing::error!(error=%e, "failed to send movie query response");
+        }
+    }
 
-        tracing::debug!(title=%listing.title, "posted movie detail in thread");
-        Ok(())
+    /// Send help message when !movie is called without arguments
+    fn send_help_message(&self) {
+        let cmd_tx = self.cmd_tx.clone();
+        let service_id = self.service_id.clone();
+        let room_id = self.room_id.clone();
+        let cache = self.cache.clone();
+        let command_string = self.command_string.clone();
+
+        tokio::spawn(async move {
+            let message = {
+                let cache_guard = cache.lock().await;
+                if cache_guard.is_some() {
+                    format!(
+                        "**Movie Showtimes Help**\n\nUsage: `{} <movie title>`\n\nCheck the most recent summary for available movies.",
+                        command_string
+                    )
+                } else {
+                    format!(
+                        "**Movie Showtimes Help**\n\nUsage: `{} <movie title>`\n\nNo showtimes cached yet. Check back after the next scheduled update.",
+                        command_string
+                    )
+                }
+            };
+
+            Self::send_room_response(&cmd_tx, &service_id, &room_id, message.clone(), Some(message)).await;
+        });
     }
 
     /// Send an error message to the room
@@ -407,7 +490,7 @@ impl MovieShowtimes {
         });
     }
 
-    /// Post showtimes to the configured room with threaded movie details
+    /// Post showtimes summary to the configured room
     async fn post_showtimes(&self) {
         tracing::info!(
             service_id=%self.service_id,
@@ -425,7 +508,14 @@ impl MovieShowtimes {
             }
         };
 
-        // Format and send summary message
+        // Cache the listings
+        {
+            let mut cache = self.cache.lock().await;
+            *cache = Some(listings.clone());
+            tracing::debug!("cached {} movie listings", listings.len());
+        }
+
+        // Format and send summary message (no thread posting)
         let summary = match self.format_summary(&listings) {
             Ok(msg) => msg,
             Err(e) => {
@@ -434,28 +524,19 @@ impl MovieShowtimes {
             }
         };
 
-        // Send summary and get message ID
-        let thread_root_id = match self.send_summary_message(summary).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(error=%e, "failed to send summary message");
-                return;
-            }
+        let command = Command::SendRoomMessage {
+            service_id: ServiceId(self.service_id.clone()),
+            room_id: self.room_id.clone(),
+            body: summary.clone(),
+            markdown_body: Some(summary),
+            response_tx: None,
         };
 
-        tracing::info!(
-            thread_root_id=%thread_root_id,
-            "summary posted, sending movie details in thread"
-        );
-
-        // Send each movie as a thread reply
-        for listing in &listings {
-            if let Err(e) = self.send_movie_detail_in_thread(listing, &thread_root_id).await {
-                tracing::error!(error=%e, title=%listing.title, "failed to send movie detail");
-            }
+        if let Err(e) = self.cmd_tx.send(command).await {
+            tracing::error!(error=%e, "failed to send summary message");
         }
 
-        tracing::info!("finished posting all movie showtimes");
+        tracing::info!("finished posting movie showtimes summary");
     }
 }
 
@@ -498,8 +579,39 @@ impl Middleware for MovieShowtimes {
         Ok(())
     }
 
-    fn on_event(&self, _evt: &Event) -> Result<Verdict> {
-        // This middleware doesn't respond to events, only posts on schedule
+    fn on_event(&self, evt: &Event) -> Result<Verdict> {
+        // Only handle room messages in the configured room
+        let (room_id, body, is_self) = match &evt.kind {
+            EventKind::RoomMessage { room_id, body, is_self, .. } => (room_id, body, is_self),
+            _ => return Ok(Verdict::Continue),
+        };
+
+        // Only respond in the configured room
+        if room_id != &self.room_id {
+            return Ok(Verdict::Continue);
+        }
+
+        // Ignore messages from self
+        if *is_self {
+            return Ok(Verdict::Continue);
+        }
+
+        // Check for movie command
+        let prefix = format!("{} ", self.command_string);
+        if let Some(query) = body.strip_prefix(&prefix) {
+            let query = query.trim();
+
+            if query.is_empty() {
+                // No query provided - send help message
+                self.send_help_message();
+                return Ok(Verdict::Continue);
+            }
+
+            // Handle movie query
+            self.handle_movie_query(query);
+            tracing::info!(query=%query, "processed movie query");
+        }
+
         Ok(Verdict::Continue)
     }
 }

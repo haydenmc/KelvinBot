@@ -81,6 +81,7 @@ pub fn instantiate_middleware_from_config(
                     *search_radius_mi,
                     gracenote_api_key.clone(),
                     theater_id_filter.clone(),
+                    None, // command_string defaults to "!movie"
                 ))
             }
             MiddlewareKind::AttendanceRelay {
