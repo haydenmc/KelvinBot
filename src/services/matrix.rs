@@ -629,6 +629,68 @@ impl Service for MatrixService {
                     let _ = tx.send(result);
                 }
             }
+            Command::SendThreadReply { room_id, thread_root_id, body, markdown_body, response_tx, .. } => {
+                info!(service=%self.id, room_id=%room_id, thread_root=%thread_root_id, "sending thread reply");
+
+                // Parse the room ID
+                let room_id = match RoomId::parse(&room_id) {
+                    Ok(rid) => rid,
+                    Err(e) => {
+                        error!(room_id=%room_id, error=%e, "invalid room ID");
+                        if let Some(tx) = response_tx {
+                            let _ = tx.send(Err(anyhow::anyhow!("invalid room ID: {}", e)));
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // Parse the thread root event ID
+                use matrix_sdk::ruma::EventId;
+                let thread_root_event_id = match EventId::parse(&thread_root_id) {
+                    Ok(eid) => eid,
+                    Err(e) => {
+                        error!(thread_root_id=%thread_root_id, error=%e, "invalid thread root event ID");
+                        if let Some(tx) = response_tx {
+                            let _ = tx.send(Err(anyhow::anyhow!("invalid thread root event ID: {}", e)));
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // Get the room
+                let result = if let Some(room) = self.client.get_room(&room_id) {
+                    // Create the message content
+                    let mut content = if let Some(markdown) = markdown_body {
+                        RoomMessageEventContent::new(MessageType::Text(
+                            TextMessageEventContent::markdown(markdown),
+                        ))
+                    } else {
+                        RoomMessageEventContent::text_plain(&body)
+                    };
+
+                    // Manually set the thread relation
+                    use matrix_sdk::ruma::events::{relation::Thread, room::message::Relation};
+                    content.relates_to = Some(Relation::Thread(Thread::without_fallback(thread_root_event_id)));
+
+                    match room.send(content).await {
+                        Ok(response) => {
+                            debug!("thread reply sent successfully");
+                            Ok(response.event_id.to_string())
+                        }
+                        Err(e) => {
+                            error!(error=%e, "failed to send thread reply");
+                            Err(anyhow::anyhow!("failed to send thread reply: {}", e))
+                        }
+                    }
+                } else {
+                    warn!(room_id=%room_id, "room not found or not joined");
+                    Err(anyhow::anyhow!("room not found or not joined"))
+                };
+
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(result);
+                }
+            }
             Command::EditMessage { message_id, new_body, new_markdown_body, .. } => {
                 info!(service=%self.id, message_id=%message_id, "editing message");
 

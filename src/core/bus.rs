@@ -25,6 +25,14 @@ pub enum Command {
         markdown_body: Option<String>,
         response_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<String>>>,
     },
+    SendThreadReply {
+        service_id: ServiceId,
+        room_id: String,
+        thread_root_id: String,
+        body: String,
+        markdown_body: Option<String>,
+        response_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<String>>>,
+    },
     EditMessage {
         service_id: ServiceId,
         message_id: String,
@@ -55,6 +63,15 @@ impl std::fmt::Debug for Command {
                 .debug_struct("SendRoomMessage")
                 .field("service_id", service_id)
                 .field("room_id", room_id)
+                .field("body", body)
+                .field("markdown_body", markdown_body)
+                .field("response_tx", &"<Option<oneshot::Sender>>")
+                .finish(),
+            Command::SendThreadReply { service_id, room_id, thread_root_id, body, markdown_body, .. } => f
+                .debug_struct("SendThreadReply")
+                .field("service_id", service_id)
+                .field("room_id", room_id)
+                .field("thread_root_id", thread_root_id)
                 .field("body", body)
                 .field("markdown_body", markdown_body)
                 .field("response_tx", &"<Option<oneshot::Sender>>")
@@ -274,6 +291,7 @@ impl Bus {
                     let service_id = match &cmd {
                         Command::SendDirectMessage { service_id, .. } => service_id.clone(),
                         Command::SendRoomMessage { service_id, .. } => service_id.clone(),
+                        Command::SendThreadReply { service_id, .. } => service_id.clone(),
                         Command::EditMessage { service_id, .. } => service_id.clone(),
                         Command::GenerateInviteToken { service_id, .. } => service_id.clone(),
                     };

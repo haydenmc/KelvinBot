@@ -502,6 +502,12 @@ impl Service for MumbleService {
                 warn!("mumble does not support invite token generation");
                 let _ = response_tx.send(Err(anyhow!("not supported by mumble")));
             }
+            Command::SendThreadReply { response_tx, .. } => {
+                warn!("mumble does not support thread replies");
+                if let Some(tx) = response_tx {
+                    let _ = tx.send(Err(anyhow!("thread replies not supported by mumble")));
+                }
+            }
         }
 
         Ok(())
