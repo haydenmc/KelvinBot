@@ -147,42 +147,6 @@ impl MovieShowtimes {
         Local.from_local_datetime(&target_datetime).unwrap()
     }
 
-    /// Fetch movie showtimes from TMS API
-    async fn fetch_showtimes(&self) -> Result<String> {
-        tracing::info!("fetching movie showtimes from TMS API");
-
-        // Build API request URL
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let url = format!(
-            "http://data.tmsapi.com/v1.1/movies/showings?api_key={}&lat={}&lng={}&radius={}&units=mi&startDate={}&numDays=7",
-            self.gracenote_api_key,
-            self.search_location.lat,
-            self.search_location.lng,
-            self.search_radius_mi,
-            today
-        );
-
-        // Fetch data from API
-        let client = reqwest::Client::new();
-        let response =
-            client.get(&url).send().await.context("failed to send request to TMS API")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("TMS API returned error: {}", response.status());
-        }
-
-        let movies: Vec<TmsMovie> =
-            response.json().await.context("failed to parse TMS API response")?;
-
-        tracing::info!(movie_count = movies.len(), "received movies from API");
-
-        // Process and filter movies
-        let listings = self.process_movies(movies);
-
-        // Format into readable message
-        self.format_message(listings)
-    }
-
     /// Process API movies into grouped listings, applying theater priority filter
     fn process_movies(&self, movies: Vec<TmsMovie>) -> Vec<MovieListing> {
         movies
@@ -268,64 +232,182 @@ impl MovieShowtimes {
             .collect()
     }
 
-    /// Format movie listings into a readable message with markdown
-    fn format_message(&self, mut listings: Vec<MovieListing>) -> Result<String> {
+    /// Format a brief summary of all movies for the main channel
+    fn format_summary(&self, listings: &[MovieListing]) -> Result<String> {
         if listings.is_empty() {
             return Ok("🎬 No movies found in your priority theaters this week.".to_string());
         }
 
-        // Sort movies by title
-        listings.sort_by(|a, b| a.title.cmp(&b.title));
-
         let mut message = String::from("# 🎬 Movie Showtimes This Week\n\n");
+        message.push_str(&format!("**{}** movies showing:\n\n", listings.len()));
 
         for listing in listings {
-            // Movie header with title, year, rating, runtime
-            message.push_str(&format!("## 📽️ {}", listing.title));
+            // Just movie title and key metadata
+            message.push_str(&format!("📽️ **{}**", listing.title));
 
             let mut metadata = Vec::new();
             if let Some(year) = listing.year {
                 metadata.push(year.to_string());
             }
-            if let Some(rating) = listing.rating {
-                metadata.push(rating);
-            }
-            if let Some(runtime) = listing.runtime {
-                metadata.push(runtime);
+            if let Some(ref rating) = listing.rating {
+                metadata.push(rating.clone());
             }
 
             if !metadata.is_empty() {
                 message.push_str(&format!(" *({})*", metadata.join(" • ")));
             }
-            message.push_str("\n\n");
+            message.push('\n');
+        }
 
-            // Show primary theater with detailed showtimes grouped by day
-            message.push_str(&format!("**🎭 {}**\n\n", listing.primary_theater.name));
+        message.push_str("\n*See thread for detailed showtimes at each theater.*");
+        Ok(message)
+    }
 
-            // Sort days chronologically
-            let mut days: Vec<_> = listing.primary_theater.times_by_day.into_iter().collect();
-            days.sort_by_key(|(date, _)| *date);
+    /// Format detailed showtimes for a single movie
+    fn format_movie_detail(&self, listing: &MovieListing) -> Result<String> {
+        let mut message = String::new();
 
-            for (date, times) in days {
-                let day_label = date.format("%a %b %-d").to_string();
-                message.push_str(&format!("- **{}**: {}\n", day_label, times.join(", ")));
-            }
+        // Movie header with title, year, rating, runtime
+        message.push_str(&format!("## 📽️ {}", listing.title));
 
-            // Show other theaters if any
-            if !listing.other_theaters.is_empty() {
-                message.push_str(&format!(
-                    "\n*Also showing at: {}*\n",
-                    listing.other_theaters.join(", ")
-                ));
-            }
+        let mut metadata = Vec::new();
+        if let Some(year) = listing.year {
+            metadata.push(year.to_string());
+        }
+        if let Some(ref rating) = listing.rating {
+            metadata.push(rating.clone());
+        }
+        if let Some(ref runtime) = listing.runtime {
+            metadata.push(runtime.clone());
+        }
 
-            message.push_str("\n---\n\n");
+        if !metadata.is_empty() {
+            message.push_str(&format!(" *({})*", metadata.join(" • ")));
+        }
+        message.push_str("\n\n");
+
+        // Show primary theater with detailed showtimes grouped by day
+        message.push_str(&format!("**🎭 {}**\n\n", listing.primary_theater.name));
+
+        // Sort days chronologically
+        let mut days: Vec<_> = listing.primary_theater.times_by_day.iter().collect();
+        days.sort_by_key(|(date, _)| *date);
+
+        for (date, times) in days {
+            let day_label = date.format("%a %b %-d").to_string();
+            message.push_str(&format!("- **{}**: {}\n", day_label, times.join(", ")));
+        }
+
+        // Show other theaters if any
+        if !listing.other_theaters.is_empty() {
+            message
+                .push_str(&format!("\n*Also showing at: {}*\n", listing.other_theaters.join(", ")));
         }
 
         Ok(message)
     }
 
-    /// Post showtimes to the configured room
+    /// Fetch and process movie showtimes from TMS API, returning the movie listings
+    async fn fetch_and_process_showtimes(&self) -> Result<Vec<MovieListing>> {
+        tracing::info!("fetching movie showtimes from TMS API");
+
+        // Build API request (same as before)
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let url = format!(
+            "http://data.tmsapi.com/v1.1/movies/showings?api_key={}&lat={}&lng={}&radius={}&units=mi&startDate={}&numDays=7",
+            self.gracenote_api_key,
+            self.search_location.lat,
+            self.search_location.lng,
+            self.search_radius_mi,
+            today
+        );
+
+        // Fetch from API
+        let client = reqwest::Client::new();
+        let response =
+            client.get(&url).send().await.context("failed to send request to TMS API")?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("TMS API returned error: {}", response.status());
+        }
+
+        let movies: Vec<TmsMovie> =
+            response.json().await.context("failed to parse TMS API response")?;
+        tracing::info!(movie_count = movies.len(), "received movies from API");
+
+        // Process and filter
+        let mut listings = self.process_movies(movies);
+        // Sort movies by title for consistent ordering
+        listings.sort_by(|a, b| a.title.cmp(&b.title));
+
+        Ok(listings)
+    }
+
+    /// Send the summary message and return the message ID for threading
+    async fn send_summary_message(&self, summary: String) -> Result<String> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        let command = Command::SendRoomMessage {
+            service_id: ServiceId(self.service_id.clone()),
+            room_id: self.room_id.clone(),
+            body: summary.clone(),
+            markdown_body: Some(summary),
+            response_tx: Some(response_tx),
+        };
+
+        self.cmd_tx.send(command).await.context("failed to send summary command")?;
+
+        // Wait for message ID
+        let message_id = response_rx
+            .await
+            .context("failed to receive response")?
+            .context("service returned error")?;
+
+        Ok(message_id)
+    }
+
+    /// Send a movie's detailed showtimes as a thread reply
+    async fn send_movie_detail_in_thread(
+        &self,
+        listing: &MovieListing,
+        thread_root_id: &str,
+    ) -> Result<()> {
+        let detail = self.format_movie_detail(listing)?;
+
+        let command = Command::SendThreadReply {
+            service_id: ServiceId(self.service_id.clone()),
+            room_id: self.room_id.clone(),
+            thread_root_id: thread_root_id.to_string(),
+            body: detail.clone(),
+            markdown_body: Some(detail),
+            response_tx: None,
+        };
+
+        self.cmd_tx.send(command).await.context("failed to send thread reply")?;
+
+        tracing::debug!(title=%listing.title, "posted movie detail in thread");
+        Ok(())
+    }
+
+    /// Send an error message to the room
+    async fn send_error_message(&self, error_msg: String) {
+        let command = Command::SendRoomMessage {
+            service_id: ServiceId(self.service_id.clone()),
+            room_id: self.room_id.clone(),
+            body: error_msg,
+            markdown_body: None,
+            response_tx: None,
+        };
+
+        let cmd_tx = self.cmd_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cmd_tx.send(command).await {
+                tracing::error!(error=%e, "failed to send error message");
+            }
+        });
+    }
+
+    /// Post showtimes to the configured room with threaded movie details
     async fn post_showtimes(&self) {
         tracing::info!(
             service_id=%self.service_id,
@@ -333,44 +415,47 @@ impl MovieShowtimes {
             "posting scheduled showtimes"
         );
 
-        match self.fetch_showtimes().await {
-            Ok(message) => {
-                let command = Command::SendRoomMessage {
-                    service_id: ServiceId(self.service_id.clone()),
-                    room_id: self.room_id.clone(),
-                    body: message.clone(),
-                    markdown_body: Some(message),
-                    response_tx: None,
-                };
-
-                let cmd_tx = self.cmd_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = cmd_tx.send(command).await {
-                        tracing::error!(error=%e, "failed to send showtimes message");
-                    }
-                });
-            }
+        // Fetch and process movie listings
+        let listings = match self.fetch_and_process_showtimes().await {
+            Ok(listings) => listings,
             Err(e) => {
                 tracing::error!(error=%e, "failed to fetch showtimes");
+                self.send_error_message(format!("Failed to fetch showtimes: {}", e)).await;
+                return;
+            }
+        };
 
-                // Optionally send error message to room
-                let error_msg = format!("Failed to fetch showtimes: {}", e);
-                let command = Command::SendRoomMessage {
-                    service_id: ServiceId(self.service_id.clone()),
-                    room_id: self.room_id.clone(),
-                    body: error_msg,
-                    markdown_body: None,
-                    response_tx: None,
-                };
+        // Format and send summary message
+        let summary = match self.format_summary(&listings) {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::error!(error=%e, "failed to format summary");
+                return;
+            }
+        };
 
-                let cmd_tx = self.cmd_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = cmd_tx.send(command).await {
-                        tracing::error!(error=%e, "failed to send error message");
-                    }
-                });
+        // Send summary and get message ID
+        let thread_root_id = match self.send_summary_message(summary).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(error=%e, "failed to send summary message");
+                return;
+            }
+        };
+
+        tracing::info!(
+            thread_root_id=%thread_root_id,
+            "summary posted, sending movie details in thread"
+        );
+
+        // Send each movie as a thread reply
+        for listing in &listings {
+            if let Err(e) = self.send_movie_detail_in_thread(listing, &thread_root_id).await {
+                tracing::error!(error=%e, title=%listing.title, "failed to send movie detail");
             }
         }
+
+        tracing::info!("finished posting all movie showtimes");
     }
 }
 
