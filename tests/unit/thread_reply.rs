@@ -7,11 +7,7 @@ use tokio::sync::mpsc;
 async fn test_dummy_service_handles_thread_reply() {
     let (evt_tx, _evt_rx) = mpsc::channel(10);
     let service_id = ServiceId("test_dummy".to_string());
-    let dummy_service = DummyService {
-        id: service_id.clone(),
-        interval_ms: 100,
-        evt_tx,
-    };
+    let dummy_service = DummyService { id: service_id.clone(), interval_ms: 100, evt_tx };
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     let command = Command::SendThreadReply {
@@ -37,11 +33,7 @@ async fn test_dummy_service_handles_thread_reply() {
 async fn test_dummy_service_handles_thread_reply_without_response_channel() {
     let (evt_tx, _evt_rx) = mpsc::channel(10);
     let service_id = ServiceId("test_dummy".to_string());
-    let dummy_service = DummyService {
-        id: service_id.clone(),
-        interval_ms: 100,
-        evt_tx,
-    };
+    let dummy_service = DummyService { id: service_id.clone(), interval_ms: 100, evt_tx };
 
     let command = Command::SendThreadReply {
         service_id: service_id.clone(),

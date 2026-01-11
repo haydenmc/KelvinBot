@@ -68,11 +68,6 @@ impl Middleware for Echo {
             // Send the command and wait for the message ID
             let cmd_tx = self.cmd_tx.clone();
             let echo_content_clone = echo_content.to_string();
-            let room_id_for_thread = match &evt.kind {
-                EventKind::RoomMessage { room_id, .. } => Some(room_id.clone()),
-                _ => None,
-            };
-            let service_id_clone = evt.service_id.clone();
             tokio::spawn(async move {
                 if let Err(e) = cmd_tx.send(command).await {
                     tracing::error!(error=%e, "failed to send echo command");
@@ -87,26 +82,6 @@ impl Middleware for Echo {
                             echo_content=%echo_content_clone,
                             "echo message sent successfully with message ID"
                         );
-
-                        // FOR TESTING: Send a thread reply (only for room messages)
-                        if let Some(room_id) = room_id_for_thread {
-                            let thread_cmd = Command::SendThreadReply {
-                                service_id: service_id_clone.clone(),
-                                room_id,
-                                thread_root_id: message_id.clone(),
-                                body: "This is a thread reply to the echo!".to_string(),
-                                markdown_body: Some(
-                                    "This is a **thread reply** to the echo!".to_string(),
-                                ),
-                                response_tx: None,
-                            };
-
-                            if let Err(e) = cmd_tx.send(thread_cmd).await {
-                                tracing::error!(error=%e, "failed to send thread reply test command");
-                            } else {
-                                tracing::info!("sent test thread reply to message {}", message_id);
-                            }
-                        }
                     }
                     Ok(Err(e)) => {
                         tracing::error!(error=%e, "failed to send echo message");
