@@ -71,6 +71,8 @@ pub enum MiddlewareKind {
         gracenote_api_key: String,
         #[serde(default, deserialize_with = "deserialize_string_list")]
         theater_id_filter: Option<Vec<String>>,
+        #[serde(default)]
+        command_string: Option<String>,
     },
     AttendanceRelay {
         source_service_id: String,
