@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 
 #[serde_as]
@@ -278,7 +278,10 @@ impl MovieShowtimes {
             message.push('\n');
         }
 
-        message.push_str(&format!("\n*To see detailed showtimes, use: {} <movie title>*", self.command_string));
+        message.push_str(&format!(
+            "\n*To see detailed showtimes, use: {} <movie title>*",
+            self.command_string
+        ));
         Ok(message)
     }
 
@@ -350,18 +353,15 @@ impl MovieShowtimes {
         let query_lower = query.to_lowercase();
 
         // First try exact match (case-insensitive)
-        let exact_match = listings
-            .iter()
-            .find(|listing| listing.title.to_lowercase() == query_lower);
+        let exact_match =
+            listings.iter().find(|listing| listing.title.to_lowercase() == query_lower);
 
         if exact_match.is_some() {
             return exact_match;
         }
 
         // Then try contains match
-        listings
-            .iter()
-            .find(|listing| listing.title.to_lowercase().contains(&query_lower))
+        listings.iter().find(|listing| listing.title.to_lowercase().contains(&query_lower))
     }
 
     /// Handle a movie query from a user in the configured room
@@ -433,10 +433,8 @@ impl MovieShowtimes {
         }
 
         if !listing.other_theaters.is_empty() {
-            message.push_str(&format!(
-                "\n*Also showing at: {}*\n",
-                listing.other_theaters.join(", ")
-            ));
+            message
+                .push_str(&format!("\n*Also showing at: {}*\n", listing.other_theaters.join(", ")));
         }
 
         Ok(message)
