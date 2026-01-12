@@ -56,6 +56,7 @@ pub fn instantiate_middleware_from_config(
                 search_radius_mi,
                 gracenote_api_key,
                 theater_id_filter,
+                command_string,
             } => {
                 // Parse day_of_week string to Weekday
                 let weekday = post_on_day_of_week.parse::<chrono::Weekday>()
@@ -81,6 +82,7 @@ pub fn instantiate_middleware_from_config(
                     *search_radius_mi,
                     gracenote_api_key.clone(),
                     theater_id_filter.clone(),
+                    command_string.clone(),
                 ))
             }
             MiddlewareKind::AttendanceRelay {
