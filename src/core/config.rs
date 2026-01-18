@@ -113,6 +113,7 @@ pub enum MiddlewareKind {
         announcement_message: String,
         finalization_virtual_message: String,
         finalization_in_person_message: String,
+        finalization_no_votes_message: String,
         #[serde(default)]
         #[serde_as(as = "DisplayFromStr")]
         avoid_repeat_host: bool,

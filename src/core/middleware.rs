@@ -161,6 +161,7 @@ pub fn instantiate_middleware_from_config(
                 announcement_message,
                 finalization_virtual_message,
                 finalization_in_person_message,
+                finalization_no_votes_message,
                 avoid_repeat_host,
             } => {
                 // Parse day_of_week string to Weekday
@@ -192,6 +193,7 @@ pub fn instantiate_middleware_from_config(
                         announcement_message: announcement_message.clone(),
                         finalization_virtual_message: finalization_virtual_message.clone(),
                         finalization_in_person_message: finalization_in_person_message.clone(),
+                        finalization_no_votes_message: finalization_no_votes_message.clone(),
                         avoid_repeat_host: *avoid_repeat_host,
                     },
                 ))

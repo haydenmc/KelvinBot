@@ -508,6 +508,9 @@ impl Service for MumbleService {
                     let _ = tx.send(Err(anyhow!("thread replies not supported by mumble")));
                 }
             }
+            Command::AddReaction { .. } => {
+                warn!("mumble does not support reactions");
+            }
         }
 
         Ok(())

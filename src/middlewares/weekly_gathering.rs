@@ -26,6 +26,7 @@ pub struct WeeklyGatheringConfig {
     pub announcement_message: String,
     pub finalization_virtual_message: String,
     pub finalization_in_person_message: String,
+    pub finalization_no_votes_message: String,
     pub avoid_repeat_host: bool,
 }
 
@@ -58,16 +59,8 @@ impl Default for GatheringState {
 
 #[derive(Debug)]
 enum ReactionEvent {
-    Added {
-        target_event_id: String,
-        key: String,
-        sender_id: String,
-    },
-    Removed {
-        target_event_id: Option<String>,
-        key: Option<String>,
-        sender_id: String,
-    },
+    Added { target_event_id: String, key: String, sender_id: String },
+    Removed { target_event_id: Option<String>, key: Option<String>, sender_id: String },
 }
 
 pub struct WeeklyGathering {
@@ -103,11 +96,7 @@ impl WeeklyGathering {
 
         let days_until_target = if current_weekday == target_weekday {
             let now_time = now.time();
-            if now_time < target_time {
-                0
-            } else {
-                7
-            }
+            if now_time < target_time { 0 } else { 7 }
         } else if target_num > current_num {
             target_num - current_num
         } else {
@@ -123,6 +112,25 @@ impl WeeklyGathering {
     /// Calculate when to post the announcement
     fn announcement_time(&self) -> DateTime<Local> {
         self.next_event_time() - Duration::minutes(self.config.announce_minutes_before as i64)
+    }
+
+    /// Format event time in a friendly way (e.g., "Today at 7:00pm", "Tomorrow at 7:00pm", "Saturday at 7:00pm")
+    fn format_friendly_time(&self) -> String {
+        let event_datetime = self.next_event_time();
+        let now = Local::now();
+        let today = now.date_naive();
+        let event_date = event_datetime.date_naive();
+
+        let day_part = if event_date == today {
+            "Today".to_string()
+        } else if event_date == today + Duration::days(1) {
+            "Tomorrow".to_string()
+        } else {
+            self.config.event_day_of_week.to_string()
+        };
+
+        let time_part = self.config.event_time.format("%-I:%M%P").to_string();
+        format!("{} at {}", day_part, time_part)
     }
 
     /// Calculate when to finalize and post results
@@ -159,10 +167,14 @@ impl WeeklyGathering {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         // Replace placeholders in announcement message
-        let message = self.config.announcement_message
+        let event_time_friendly = self.format_friendly_time();
+        let message = self
+            .config
+            .announcement_message
             .replace("{reaction_virtual}", &self.config.reaction_virtual)
             .replace("{reaction_in_person}", &self.config.reaction_in_person)
-            .replace("{reaction_host}", &self.config.reaction_host);
+            .replace("{reaction_host}", &self.config.reaction_host)
+            .replace("{event_time}", &event_time_friendly);
 
         let command = Command::SendRoomMessage {
             service_id: ServiceId(self.config.service_id.clone()),
@@ -177,6 +189,25 @@ impl WeeklyGathering {
         match response_rx.await {
             Ok(Ok(message_id)) => {
                 tracing::info!(message_id=%message_id, "announcement posted successfully");
+
+                // Pre-populate reactions on the announcement
+                for reaction_key in [
+                    &self.config.reaction_virtual,
+                    &self.config.reaction_in_person,
+                    &self.config.reaction_host,
+                ] {
+                    let command = Command::AddReaction {
+                        service_id: ServiceId(self.config.service_id.clone()),
+                        room_id: self.config.room_id.clone(),
+                        event_id: message_id.clone(),
+                        key: reaction_key.clone(),
+                    };
+
+                    if let Err(e) = self.cmd_tx.send(command).await {
+                        tracing::error!(error=%e, key=%reaction_key, "failed to send add reaction command");
+                    }
+                }
+
                 Ok(Some(message_id))
             }
             Ok(Err(e)) => {
@@ -204,20 +235,26 @@ impl WeeklyGathering {
             self.config.avoid_repeat_host,
         );
 
-        let host_display = host.as_ref().map(|h| h.as_str()).unwrap_or("No host volunteered");
+        let host_display = host.as_deref().unwrap_or("No host volunteered");
 
         // Choose message based on vote outcome
-        let template = if in_person_count > virtual_count {
+        let template = if virtual_count == 0 && in_person_count == 0 {
+            // No votes
+            &self.config.finalization_no_votes_message
+        } else if in_person_count > virtual_count {
             &self.config.finalization_in_person_message
         } else {
+            // Virtual wins, or tie (prefer virtual)
             &self.config.finalization_virtual_message
         };
 
         // Replace placeholders
+        let event_time_friendly = self.format_friendly_time();
         let message = template
             .replace("{virtual_count}", &virtual_count.to_string())
             .replace("{in_person_count}", &in_person_count.to_string())
-            .replace("{host}", host_display);
+            .replace("{host}", host_display)
+            .replace("{event_time}", &event_time_friendly);
 
         drop(state); // Release lock before sending
 
@@ -291,10 +328,10 @@ impl WeeklyGathering {
             }
             ReactionEvent::Removed { target_event_id, key, sender_id } => {
                 // Check if reaction was on the announcement message
-                if let Some(target) = target_event_id {
-                    if target != announcement_message_id {
-                        return;
-                    }
+                if let Some(target) = target_event_id
+                    && target != announcement_message_id
+                {
+                    return;
                 }
 
                 // Remove vote based on key (if known)
@@ -354,9 +391,8 @@ impl Middleware for WeeklyGathering {
                 }
             };
 
-            let duration_until = (next_action_time - now)
-                .to_std()
-                .unwrap_or(std::time::Duration::from_secs(1));
+            let duration_until =
+                (next_action_time - now).to_std().unwrap_or(std::time::Duration::from_secs(1));
 
             tracing::debug!(
                 phase=?phase,
@@ -409,12 +445,7 @@ impl Middleware for WeeklyGathering {
 
         match &evt.kind {
             EventKind::ReactionAdded {
-                room_id,
-                target_event_id,
-                key,
-                sender_id,
-                is_self,
-                ..
+                room_id, target_event_id, key, sender_id, is_self, ..
             } => {
                 // Ignore reactions from self
                 if *is_self {

@@ -492,61 +492,59 @@ impl MatrixService {
         let reaction_registry = self.reaction_registry.clone();
         let bot_user_id_for_reactions =
             self.client.user_id().expect("client should have user_id after login").to_owned();
-        self.client.add_event_handler(
-            move |event: OriginalSyncReactionEvent, room: Room| {
-                let service_id = service_id.clone();
-                let evt_tx = evt_tx.clone();
-                let reaction_registry = reaction_registry.clone();
-                let bot_user_id = bot_user_id_for_reactions.clone();
-                async move {
-                    if room.state() != RoomState::Joined {
-                        return;
-                    }
-
-                    let reaction_event_id = event.event_id.to_string();
-                    let target_event_id = event.content.relates_to.event_id.to_string();
-                    let key = event.content.relates_to.key.clone();
-                    let sender_id = event.sender.to_string();
-                    let is_self = event.sender == bot_user_id;
-
-                    // Store reaction info for later lookup on redaction
-                    {
-                        let mut registry = reaction_registry.lock().await;
-                        registry.insert(
-                            reaction_event_id.clone(),
-                            ReactionInfo {
-                                target_event_id: target_event_id.clone(),
-                                key: key.clone(),
-                                sender_id: sender_id.clone(),
-                            },
-                        );
-                    }
-
-                    // Get sender display name
-                    let sender_display_name = room
-                        .get_member(&event.sender)
-                        .await
-                        .ok()
-                        .and_then(|m| m)
-                        .and_then(|m| m.display_name().map(|s| s.to_string()));
-
-                    let evt = Event {
-                        service_id,
-                        kind: EventKind::ReactionAdded {
-                            room_id: room.room_id().to_string(),
-                            event_id: reaction_event_id,
-                            target_event_id,
-                            key,
-                            sender_id,
-                            sender_display_name,
-                            is_self,
-                        },
-                    };
-
-                    let _ = evt_tx.send(evt).await;
+        self.client.add_event_handler(move |event: OriginalSyncReactionEvent, room: Room| {
+            let service_id = service_id.clone();
+            let evt_tx = evt_tx.clone();
+            let reaction_registry = reaction_registry.clone();
+            let bot_user_id = bot_user_id_for_reactions.clone();
+            async move {
+                if room.state() != RoomState::Joined {
+                    return;
                 }
-            },
-        );
+
+                let reaction_event_id = event.event_id.to_string();
+                let target_event_id = event.content.relates_to.event_id.to_string();
+                let key = event.content.relates_to.key.clone();
+                let sender_id = event.sender.to_string();
+                let is_self = event.sender == bot_user_id;
+
+                // Store reaction info for later lookup on redaction
+                {
+                    let mut registry = reaction_registry.lock().await;
+                    registry.insert(
+                        reaction_event_id.clone(),
+                        ReactionInfo {
+                            target_event_id: target_event_id.clone(),
+                            key: key.clone(),
+                            sender_id: sender_id.clone(),
+                        },
+                    );
+                }
+
+                // Get sender display name
+                let sender_display_name = room
+                    .get_member(&event.sender)
+                    .await
+                    .ok()
+                    .and_then(|m| m)
+                    .and_then(|m| m.display_name().map(|s| s.to_string()));
+
+                let evt = Event {
+                    service_id,
+                    kind: EventKind::ReactionAdded {
+                        room_id: room.room_id().to_string(),
+                        event_id: reaction_event_id,
+                        target_event_id,
+                        key,
+                        sender_id,
+                        sender_display_name,
+                        is_self,
+                    },
+                };
+
+                let _ = evt_tx.send(evt).await;
+            }
+        });
 
         // Handle redactions (for reaction removal)
         let service_id = self.id.clone();
@@ -554,50 +552,48 @@ impl MatrixService {
         let reaction_registry = self.reaction_registry.clone();
         let bot_user_id_for_redactions =
             self.client.user_id().expect("client should have user_id after login").to_owned();
-        self.client.add_event_handler(
-            move |event: OriginalSyncRoomRedactionEvent, room: Room| {
-                let service_id = service_id.clone();
-                let evt_tx = evt_tx.clone();
-                let reaction_registry = reaction_registry.clone();
-                let bot_user_id = bot_user_id_for_redactions.clone();
-                async move {
-                    if room.state() != RoomState::Joined {
-                        return;
-                    }
-
-                    // The redacts field is Option in room version 11+
-                    let Some(redacted_event_id) = event.redacts else {
-                        return;
-                    };
-                    let redacted_event_id = redacted_event_id.to_string();
-                    let sender_id = event.sender.to_string();
-                    let is_self = event.sender == bot_user_id;
-
-                    // Check if this redaction is for a reaction we tracked
-                    let reaction_info = {
-                        let mut registry = reaction_registry.lock().await;
-                        registry.remove(&redacted_event_id)
-                    };
-
-                    // Only emit ReactionRemoved if we found a tracked reaction
-                    if let Some(info) = reaction_info {
-                        let evt = Event {
-                            service_id,
-                            kind: EventKind::ReactionRemoved {
-                                room_id: room.room_id().to_string(),
-                                event_id: redacted_event_id,
-                                target_event_id: Some(info.target_event_id),
-                                key: Some(info.key),
-                                sender_id,
-                                is_self,
-                            },
-                        };
-
-                        let _ = evt_tx.send(evt).await;
-                    }
+        self.client.add_event_handler(move |event: OriginalSyncRoomRedactionEvent, room: Room| {
+            let service_id = service_id.clone();
+            let evt_tx = evt_tx.clone();
+            let reaction_registry = reaction_registry.clone();
+            let bot_user_id = bot_user_id_for_redactions.clone();
+            async move {
+                if room.state() != RoomState::Joined {
+                    return;
                 }
-            },
-        );
+
+                // The redacts field is Option in room version 11+
+                let Some(redacted_event_id) = event.redacts else {
+                    return;
+                };
+                let redacted_event_id = redacted_event_id.to_string();
+                let sender_id = event.sender.to_string();
+                let is_self = event.sender == bot_user_id;
+
+                // Check if this redaction is for a reaction we tracked
+                let reaction_info = {
+                    let mut registry = reaction_registry.lock().await;
+                    registry.remove(&redacted_event_id)
+                };
+
+                // Only emit ReactionRemoved if we found a tracked reaction
+                if let Some(info) = reaction_info {
+                    let evt = Event {
+                        service_id,
+                        kind: EventKind::ReactionRemoved {
+                            room_id: room.room_id().to_string(),
+                            event_id: redacted_event_id,
+                            target_event_id: Some(info.target_event_id),
+                            key: Some(info.key),
+                            sender_id,
+                            is_self,
+                        },
+                    };
+
+                    let _ = evt_tx.send(evt).await;
+                }
+            }
+        });
 
         Ok(())
     }
@@ -912,6 +908,48 @@ impl Service for MatrixService {
                 // Send response back through oneshot channel
                 // Ignore send errors (receiver may have been dropped)
                 let _ = response_tx.send(result);
+            }
+            Command::AddReaction { room_id, event_id, key, .. } => {
+                info!(service=%self.id, room_id=%room_id, event_id=%event_id, key=%key, "adding reaction");
+
+                // Parse the room ID
+                let room_id = match RoomId::parse(&room_id) {
+                    Ok(rid) => rid,
+                    Err(e) => {
+                        error!(room_id=%room_id, error=%e, "invalid room ID");
+                        return Ok(());
+                    }
+                };
+
+                // Parse the event ID
+                use matrix_sdk::ruma::EventId;
+                let event_id = match EventId::parse(&event_id) {
+                    Ok(eid) => eid,
+                    Err(e) => {
+                        error!(event_id=%event_id, error=%e, "invalid event ID");
+                        return Ok(());
+                    }
+                };
+
+                // Get the room and send reaction
+                if let Some(room) = self.client.get_room(&room_id) {
+                    use matrix_sdk::ruma::events::reaction::ReactionEventContent;
+                    use matrix_sdk::ruma::events::relation::Annotation;
+
+                    let reaction_content =
+                        ReactionEventContent::new(Annotation::new(event_id.to_owned(), key));
+
+                    match room.send(reaction_content).await {
+                        Ok(_) => {
+                            debug!("reaction added successfully");
+                        }
+                        Err(e) => {
+                            error!(error=%e, "failed to add reaction");
+                        }
+                    }
+                } else {
+                    warn!(room_id=%room_id, "room not found or not joined");
+                }
             }
         }
         Ok(())
