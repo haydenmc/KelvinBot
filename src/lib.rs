@@ -20,4 +20,5 @@ pub mod middlewares {
     pub mod invite;
     pub mod logger;
     pub mod movie_showtimes;
+    pub mod weekly_gathering;
 }

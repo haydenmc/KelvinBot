@@ -98,6 +98,25 @@ pub enum MiddlewareKind {
         #[serde(default)]
         destinations: HashMap<String, AnnouncementDestination>,
     },
+    WeeklyGathering {
+        service_id: String,
+        room_id: String,
+        event_day_of_week: String,
+        event_time: String,
+        #[serde_as(as = "DisplayFromStr")]
+        announce_minutes_before: u32,
+        #[serde_as(as = "DisplayFromStr")]
+        finalize_minutes_before: u32,
+        reaction_virtual: String,
+        reaction_in_person: String,
+        reaction_host: String,
+        announcement_message: String,
+        finalization_virtual_message: String,
+        finalization_in_person_message: String,
+        #[serde(default)]
+        #[serde_as(as = "DisplayFromStr")]
+        avoid_repeat_host: bool,
+    },
     #[serde(other)]
     Unknown,
 }
