@@ -6,7 +6,9 @@ use crate::core::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
+use chrono::{
+    DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday,
+};
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
@@ -350,10 +352,7 @@ impl MovieShowtimes {
         tracing::info!("fetching fresh showtimes");
         let listings = self.fetch_and_process_showtimes().await?;
 
-        let cached = CachedListings {
-            listings,
-            cached_at: now,
-        };
+        let cached = CachedListings { listings, cached_at: now };
 
         // Update cache
         {
@@ -437,7 +436,10 @@ impl MovieShowtimes {
     }
 
     /// Format detailed showtimes for a single movie (helper function)
-    fn format_movie_detail_static(listing: &MovieListing, cached_at: DateTime<Local>) -> Result<String> {
+    fn format_movie_detail_static(
+        listing: &MovieListing,
+        cached_at: DateTime<Local>,
+    ) -> Result<String> {
         let mut message = String::new();
 
         message.push_str(&format!("## 📽️ {}", listing.title));
@@ -473,7 +475,10 @@ impl MovieShowtimes {
                 .push_str(&format!("\n*Also showing at: {}*\n", listing.other_theaters.join(", ")));
         }
 
-        message.push_str(&format!("\n*Listings last updated: {}*\n", Self::format_relative_time(cached_at)));
+        message.push_str(&format!(
+            "\n*Listings last updated: {}*\n",
+            Self::format_relative_time(cached_at)
+        ));
 
         Ok(message)
     }
@@ -551,10 +556,7 @@ impl MovieShowtimes {
 
         // Cache the listings with timestamp
         {
-            let cached = CachedListings {
-                listings: listings.clone(),
-                cached_at: Local::now(),
-            };
+            let cached = CachedListings { listings: listings.clone(), cached_at: Local::now() };
             let mut cache = self.cache.lock().await;
             *cache = Some(cached);
             tracing::debug!("cached {} movie listings", listings.len());
