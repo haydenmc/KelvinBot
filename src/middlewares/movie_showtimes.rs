@@ -6,7 +6,9 @@ use crate::core::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
+use chrono::{
+    DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday,
+};
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
@@ -74,6 +76,12 @@ struct TheaterShowtimes {
     times_by_day: HashMap<NaiveDate, Vec<String>>, // Date -> times on that date
 }
 
+#[derive(Debug, Clone)]
+struct CachedListings {
+    listings: Vec<MovieListing>,
+    cached_at: DateTime<Local>,
+}
+
 // Configuration needed for fetching movie data
 struct MovieFetchConfig {
     search_location: LatLng,
@@ -89,7 +97,7 @@ pub struct MovieShowtimes {
     post_on_day_of_week: Weekday,
     post_at_time: NaiveTime,
     fetch_config: Arc<MovieFetchConfig>,
-    cache: Arc<Mutex<Option<Vec<MovieListing>>>>,
+    cache: Arc<Mutex<Option<CachedListings>>>,
     command_string: String,
     query_tx: tokio::sync::mpsc::Sender<String>,
     query_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<String>>>,
@@ -321,28 +329,38 @@ impl MovieShowtimes {
         Ok(listings)
     }
 
-    /// Get cached listings or fetch fresh if cache is empty
-    async fn get_or_fetch_listings(&self) -> Result<Vec<MovieListing>> {
-        // Try cache first
+    /// Get cached listings or fetch fresh if cache is empty or from a different day
+    async fn get_or_fetch_listings(&self) -> Result<CachedListings> {
+        let now = Local::now();
+        let today = now.date_naive();
+
+        // Try cache first and check if it's from today
         {
             let cache = self.cache.lock().await;
-            if let Some(ref listings) = *cache {
-                tracing::debug!("using cached listings ({} movies)", listings.len());
-                return Ok(listings.clone());
+            if let Some(ref cached) = *cache {
+                let cached_date = cached.cached_at.date_naive();
+                if cached_date == today {
+                    tracing::debug!("using cached listings ({} movies)", cached.listings.len());
+                    return Ok(cached.clone());
+                } else {
+                    tracing::info!("cache expired (from {}), fetching fresh", cached_date);
+                }
             }
         }
 
-        // Cache miss - fetch fresh data
-        tracing::info!("cache empty, fetching fresh showtimes");
+        // Cache miss or expired - fetch fresh data
+        tracing::info!("fetching fresh showtimes");
         let listings = self.fetch_and_process_showtimes().await?;
+
+        let cached = CachedListings { listings, cached_at: now };
 
         // Update cache
         {
             let mut cache = self.cache.lock().await;
-            *cache = Some(listings.clone());
+            *cache = Some(cached.clone());
         }
 
-        Ok(listings)
+        Ok(cached)
     }
 
     /// Find a movie by title query (case-insensitive partial match)
@@ -367,8 +385,8 @@ impl MovieShowtimes {
     /// Handle a movie query from a user in the configured room
     async fn handle_movie_query(&self, query: &str) {
         // Get cached or fresh listings
-        let listings = match self.get_or_fetch_listings().await {
-            Ok(l) => l,
+        let cached = match self.get_or_fetch_listings().await {
+            Ok(c) => c,
             Err(e) => {
                 tracing::error!(error=%e, "failed to fetch movie listings");
                 self.send_room_response(
@@ -381,10 +399,10 @@ impl MovieShowtimes {
         };
 
         // Search for movie
-        match Self::find_movie_by_query(&listings, query) {
+        match Self::find_movie_by_query(&cached.listings, query) {
             Some(movie) => {
                 // Found - send detailed showtimes
-                if let Ok(detail) = Self::format_movie_detail_static(movie) {
+                if let Ok(detail) = Self::format_movie_detail_static(movie, cached.cached_at) {
                     self.send_room_response(detail.clone(), Some(detail)).await;
                 }
             }
@@ -400,8 +418,28 @@ impl MovieShowtimes {
         }
     }
 
+    /// Format a timestamp in relative format (e.g., "Today at 7:40 PM")
+    fn format_relative_time(dt: DateTime<Local>) -> String {
+        let now = Local::now();
+        let date = dt.date_naive();
+        let today = now.date_naive();
+
+        let day_label = if date == today {
+            "Today".to_string()
+        } else if date == today - chrono::Days::new(1) {
+            "Yesterday".to_string()
+        } else {
+            dt.format("%a %b %-d").to_string()
+        };
+
+        format!("{} at {}", day_label, dt.format("%-I:%M %p"))
+    }
+
     /// Format detailed showtimes for a single movie (helper function)
-    fn format_movie_detail_static(listing: &MovieListing) -> Result<String> {
+    fn format_movie_detail_static(
+        listing: &MovieListing,
+        cached_at: DateTime<Local>,
+    ) -> Result<String> {
         let mut message = String::new();
 
         message.push_str(&format!("## 📽️ {}", listing.title));
@@ -436,6 +474,11 @@ impl MovieShowtimes {
             message
                 .push_str(&format!("\n*Also showing at: {}*\n", listing.other_theaters.join(", ")));
         }
+
+        message.push_str(&format!(
+            "\n*Listings last updated: {}*\n",
+            Self::format_relative_time(cached_at)
+        ));
 
         Ok(message)
     }
@@ -511,10 +554,11 @@ impl MovieShowtimes {
             }
         };
 
-        // Cache the listings
+        // Cache the listings with timestamp
         {
+            let cached = CachedListings { listings: listings.clone(), cached_at: Local::now() };
             let mut cache = self.cache.lock().await;
-            *cache = Some(listings.clone());
+            *cache = Some(cached);
             tracing::debug!("cached {} movie listings", listings.len());
         }
 
