@@ -1541,3 +1541,600 @@ async fn test_attendance_relay_instantiation_from_config() {
     assert_eq!(middlewares.len(), 1);
     assert!(middlewares.contains_key("test_attendance_relay"));
 }
+
+// Weekly Gathering Middleware Tests
+
+use chrono::{NaiveTime, Weekday};
+use kelvin_bot::middlewares::weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig};
+
+fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
+    WeeklyGatheringConfig {
+        service_id: "matrix".to_string(),
+        room_id: "!test:example.com".to_string(),
+        event_day_of_week: Weekday::Sat,
+        event_time: NaiveTime::from_hms_opt(19, 0, 0).unwrap(),
+        announce_minutes_before: 4320, // 72 hours
+        finalize_minutes_before: 120,  // 2 hours
+        reaction_virtual: "💻".to_string(),
+        reaction_in_person: "🏠".to_string(),
+        reaction_host: "🙋".to_string(),
+        announcement_message: "Weekly Gathering Poll!".to_string(),
+        finalization_virtual_message: "This week is VIRTUAL! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
+        finalization_in_person_message: "This week is IN-PERSON! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
+        finalization_no_votes_message: "No votes received - gathering cancelled.".to_string(),
+        avoid_repeat_host: true,
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_middleware_run() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let weekly_gathering = WeeklyGathering::new(cmd_tx, config);
+    let cancel_token = CancellationToken::new();
+
+    // WeeklyGathering run should complete when cancelled
+    cancel_token.cancel();
+    let result = weekly_gathering.run(cancel_token).await;
+    assert_ok!(result);
+}
+
+#[test]
+fn test_weekly_gathering_host_selection_empty() {
+    use std::collections::HashSet;
+    let volunteers: HashSet<String> = HashSet::new();
+    let result = WeeklyGathering::select_host(&volunteers, None, false);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_weekly_gathering_host_selection_avoids_repeat() {
+    use std::collections::HashSet;
+    let mut volunteers = HashSet::new();
+    volunteers.insert("user1".to_string());
+    volunteers.insert("user2".to_string());
+
+    let last_host = "user1".to_string();
+
+    // Run multiple times to ensure filtering works and isn't passing by random chance
+    for _ in 0..10 {
+        let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+        assert_eq!(result, Some("user2".to_string()));
+    }
+}
+
+#[test]
+fn test_weekly_gathering_host_selection_fallback_when_only_last_host() {
+    use std::collections::HashSet;
+    let mut volunteers = HashSet::new();
+    volunteers.insert("user1".to_string());
+
+    let last_host = "user1".to_string();
+
+    // Should fall back to user1 when only they volunteered
+    let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+    assert_eq!(result, Some("user1".to_string()));
+}
+
+// Functional tests for vote processing and state transitions
+
+#[tokio::test]
+async fn test_weekly_gathering_ignores_reactions_when_idle() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    // Don't set phase to Announced - middleware starts in Idle
+    // Process a reaction - should be ignored since we're in Idle phase
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "user1".to_string())
+        .await;
+
+    let (virtual_count, in_person_count, host_count) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 0);
+    assert_eq!(in_person_count, 0);
+    assert_eq!(host_count, 0);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_records_virtual_votes() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Two users vote virtual
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "bob".to_string())
+        .await;
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 2);
+    assert_eq!(in_person_count, 0);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_records_in_person_votes() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Three users vote in-person
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "bob".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "charlie".to_string())
+        .await;
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 0);
+    assert_eq!(in_person_count, 3);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_switching_vote_removes_previous() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Alice votes virtual first
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 1);
+    assert_eq!(in_person_count, 0);
+
+    // Alice switches to in-person - should remove her virtual vote
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "alice".to_string())
+        .await;
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 0);
+    assert_eq!(in_person_count, 1);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_host_volunteers() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Two users volunteer to host
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "bob".to_string())
+        .await;
+
+    let (_, _, host_count) = middleware.get_vote_counts().await;
+    assert_eq!(host_count, 2);
+
+    let volunteers = middleware.get_host_volunteers().await;
+    assert!(volunteers.contains("alice"));
+    assert!(volunteers.contains("bob"));
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_reaction_removal() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Alice votes virtual
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+
+    let (virtual_count, _, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 1);
+
+    // Alice removes her vote
+    middleware
+        .test_process_reaction_removed(
+            Some("msg123".to_string()),
+            Some("💻".to_string()),
+            "alice".to_string(),
+        )
+        .await;
+
+    let (virtual_count, _, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 0);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_ignores_reactions_on_wrong_message() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Reaction on a different message should be ignored
+    middleware
+        .test_process_reaction_added("other_msg".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+
+    let (virtual_count, _, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 0);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_virtual_wins() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // 3 virtual, 1 in-person
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "bob".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "charlie".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "dave".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "alice".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("VIRTUAL"));
+            assert!(body.contains("3 virtual"));
+            assert!(body.contains("1 in-person"));
+            assert!(body.contains("alice")); // Host
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_in_person_wins() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // 1 virtual, 3 in-person
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "bob".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "charlie".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "dave".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "bob".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("IN-PERSON"));
+            assert!(body.contains("1 virtual"));
+            assert!(body.contains("3 in-person"));
+            assert!(body.contains("bob")); // Host
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_tie_prefers_virtual() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // 2 virtual, 2 in-person - tie should prefer virtual
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "bob".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "charlie".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "dave".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("VIRTUAL"));
+            assert!(body.contains("2 virtual"));
+            assert!(body.contains("2 in-person"));
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_no_votes() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // No votes at all
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("No votes received"));
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_no_host_volunteer() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Votes but no host volunteer
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("No host volunteered"));
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_avoids_repeat_host() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+    middleware.set_last_host(Some("alice".to_string())).await;
+
+    // Both alice and bob volunteer, but alice was last host
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "bob".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            // Should pick bob since alice was last host
+            assert!(body.contains("bob"));
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let config = create_weekly_gathering_config();
+    let middleware = WeeklyGathering::new(cmd_tx, config);
+
+    middleware.set_announced("msg123".to_string()).await;
+    middleware.set_last_host(Some("alice".to_string())).await;
+
+    // Only alice volunteers, and she was last host - should still pick her
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "alice".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            // Should fall back to alice since she's the only volunteer
+            assert!(body.contains("alice"));
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_instantiation_from_config() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "test_weekly_gathering".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::WeeklyGathering {
+                service_id: "matrix".to_string(),
+                room_id: "!gathering:matrix.org".to_string(),
+                event_day_of_week: "Saturday".to_string(),
+                event_time: "19:00".to_string(),
+                announce_minutes_before: 4320,
+                finalize_minutes_before: 120,
+                reaction_virtual: "💻".to_string(),
+                reaction_in_person: "🏠".to_string(),
+                reaction_host: "🙋".to_string(),
+                announcement_message: "Weekly poll!".to_string(),
+                finalization_virtual_message: "Virtual!".to_string(),
+                finalization_in_person_message: "In-person!".to_string(),
+                finalization_no_votes_message: "No votes!".to_string(),
+                avoid_repeat_host: true,
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    assert_ok!(&result);
+
+    let middlewares = result.unwrap();
+    assert_eq!(middlewares.len(), 1);
+    assert!(middlewares.contains_key("test_weekly_gathering"));
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "test_weekly_gathering".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::WeeklyGathering {
+                service_id: "matrix".to_string(),
+                room_id: "!gathering:matrix.org".to_string(),
+                event_day_of_week: "InvalidDay".to_string(),
+                event_time: "19:00".to_string(),
+                announce_minutes_before: 4320,
+                finalize_minutes_before: 120,
+                reaction_virtual: "💻".to_string(),
+                reaction_in_person: "🏠".to_string(),
+                reaction_host: "🙋".to_string(),
+                announcement_message: "Weekly poll!".to_string(),
+                finalization_virtual_message: "Virtual!".to_string(),
+                finalization_in_person_message: "In-person!".to_string(),
+                finalization_no_votes_message: "No votes!".to_string(),
+                avoid_repeat_host: true,
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    assert!(result.is_err());
+    let err_msg = result.err().unwrap().to_string();
+    assert!(err_msg.contains("invalid") && err_msg.contains("day"));
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_instantiation_invalid_time_format() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "test_weekly_gathering".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::WeeklyGathering {
+                service_id: "matrix".to_string(),
+                room_id: "!gathering:matrix.org".to_string(),
+                event_day_of_week: "Saturday".to_string(),
+                event_time: "7pm".to_string(),
+                announce_minutes_before: 4320,
+                finalize_minutes_before: 120,
+                reaction_virtual: "💻".to_string(),
+                reaction_in_person: "🏠".to_string(),
+                reaction_host: "🙋".to_string(),
+                announcement_message: "Weekly poll!".to_string(),
+                finalization_virtual_message: "Virtual!".to_string(),
+                finalization_in_person_message: "In-person!".to_string(),
+                finalization_no_votes_message: "No votes!".to_string(),
+                avoid_repeat_host: true,
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    assert!(result.is_err());
+    let err_msg = result.err().unwrap().to_string();
+    assert!(err_msg.contains("invalid") && err_msg.contains("time"));
+}
