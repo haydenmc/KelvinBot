@@ -46,7 +46,6 @@ impl fmt::Display for MatrixUserId {
 struct ReactionInfo {
     target_event_id: String,
     key: String,
-    sender_id: String,
 }
 
 pub struct MatrixService {
@@ -516,7 +515,6 @@ impl MatrixService {
                         ReactionInfo {
                             target_event_id: target_event_id.clone(),
                             key: key.clone(),
-                            sender_id: sender_id.clone(),
                         },
                     );
                 }

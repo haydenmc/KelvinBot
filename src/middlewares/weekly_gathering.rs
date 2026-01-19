@@ -152,11 +152,7 @@ impl WeeklyGathering {
             let filtered: Vec<&String> =
                 volunteers.iter().filter(|v| Some(*v) != last_host).collect();
             // Fall back to all volunteers if filtering leaves no candidates
-            if filtered.is_empty() {
-                volunteers.iter().collect()
-            } else {
-                filtered
-            }
+            if filtered.is_empty() { volunteers.iter().collect() } else { filtered }
         } else {
             volunteers.iter().collect()
         };
