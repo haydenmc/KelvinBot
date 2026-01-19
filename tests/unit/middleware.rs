@@ -1596,9 +1596,11 @@ fn test_weekly_gathering_host_selection_avoids_repeat() {
 
     let last_host = "user1".to_string();
 
-    // With only 2 volunteers and avoiding last host, should always pick user2
-    let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
-    assert_eq!(result, Some("user2".to_string()));
+    // Run multiple times to ensure filtering works and isn't passing by random chance
+    for _ in 0..10 {
+        let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+        assert_eq!(result, Some("user2".to_string()));
+    }
 }
 
 #[test]
