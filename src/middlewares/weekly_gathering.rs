@@ -148,15 +148,18 @@ impl WeeklyGathering {
             return None;
         }
 
-        let candidates: Vec<&String> = if avoid_repeat && volunteers.len() > 1 {
-            volunteers.iter().filter(|v| Some(*v) != last_host).collect()
+        let candidates: Vec<&String> = if avoid_repeat {
+            let filtered: Vec<&String> =
+                volunteers.iter().filter(|v| Some(*v) != last_host).collect();
+            // Fall back to all volunteers if filtering leaves no candidates
+            if filtered.is_empty() {
+                volunteers.iter().collect()
+            } else {
+                filtered
+            }
         } else {
             volunteers.iter().collect()
         };
-
-        if candidates.is_empty() {
-            return None;
-        }
 
         let mut rng = rand::thread_rng();
         candidates.choose(&mut rng).map(|s| (*s).clone())
