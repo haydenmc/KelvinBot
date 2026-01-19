@@ -19,7 +19,7 @@ pub struct Event {
     pub kind: EventKind,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventKind {
     DirectMessage {
         user_id: String,
@@ -40,6 +40,23 @@ pub enum EventKind {
     UserListUpdate {
         users: Vec<User>,
     },
+    ReactionAdded {
+        room_id: String,
+        event_id: String,
+        target_event_id: String,
+        key: String,
+        sender_id: String,
+        sender_display_name: Option<String>,
+        is_self: bool,
+    },
+    ReactionRemoved {
+        room_id: String,
+        event_id: String,
+        target_event_id: Option<String>,
+        key: Option<String>,
+        sender_id: String,
+        is_self: bool,
+    },
 }
 
 impl fmt::Display for Event {
@@ -54,6 +71,12 @@ impl fmt::Display for Event {
             }
             EventKind::UserListUpdate { users } => {
                 write!(f, "[UserList] {} users", users.len())
+            }
+            EventKind::ReactionAdded { room_id, key, sender_id, target_event_id, .. } => {
+                write!(f, "[React+] {room_id}: {sender_id} reacted {key} to {target_event_id}")
+            }
+            EventKind::ReactionRemoved { room_id, sender_id, event_id, .. } => {
+                write!(f, "[React-] {room_id}: {sender_id} removed reaction {event_id}")
             }
         }
     }

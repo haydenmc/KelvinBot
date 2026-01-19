@@ -46,6 +46,12 @@ pub enum Command {
         expiry: Option<Duration>,
         response_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
     },
+    AddReaction {
+        service_id: ServiceId,
+        room_id: String,
+        event_id: String,
+        key: String,
+    },
 }
 
 // Implement Debug manually since oneshot::Sender doesn't implement Clone
@@ -97,6 +103,13 @@ impl std::fmt::Debug for Command {
                 .field("uses_allowed", uses_allowed)
                 .field("expiry", expiry)
                 .field("response_tx", &"<oneshot::Sender>")
+                .finish(),
+            Command::AddReaction { service_id, room_id, event_id, key } => f
+                .debug_struct("AddReaction")
+                .field("service_id", service_id)
+                .field("room_id", room_id)
+                .field("event_id", event_id)
+                .field("key", key)
                 .finish(),
         }
     }
@@ -301,6 +314,7 @@ impl Bus {
                         Command::SendThreadReply { service_id, .. } => service_id.clone(),
                         Command::EditMessage { service_id, .. } => service_id.clone(),
                         Command::GenerateInviteToken { service_id, .. } => service_id.clone(),
+                        Command::AddReaction { service_id, .. } => service_id.clone(),
                     };
 
                     // Dispatch command to appropriate service

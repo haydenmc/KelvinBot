@@ -77,6 +77,10 @@ impl Service for DummyService {
                     let _ = tx.send(Ok("dummy_message_id_thread_reply".to_string()));
                 }
             }
+            Command::AddReaction { room_id, event_id, key, .. } => {
+                info!(service=%self.id, room_id=%room_id, event_id=%event_id, key=%key,
+                      "dummy service: would add reaction");
+            }
         }
         Ok(())
     }
