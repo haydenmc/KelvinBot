@@ -512,10 +512,7 @@ impl MatrixService {
                     let mut registry = reaction_registry.lock().await;
                     registry.insert(
                         reaction_event_id.clone(),
-                        ReactionInfo {
-                            target_event_id: target_event_id.clone(),
-                            key: key.clone(),
-                        },
+                        ReactionInfo { target_event_id: target_event_id.clone(), key: key.clone() },
                     );
                 }
 
