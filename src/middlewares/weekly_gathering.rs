@@ -139,7 +139,7 @@ impl WeeklyGathering {
     }
 
     /// Select a host from volunteers, optionally avoiding the last host
-    fn select_host(
+    pub fn select_host(
         volunteers: &HashSet<String>,
         last_host: Option<&String>,
         avoid_repeat: bool,
@@ -221,7 +221,7 @@ impl WeeklyGathering {
     }
 
     /// Post the finalization message with vote counts and host
-    async fn post_finalization(&self) {
+    pub async fn post_finalization(&self) {
         let state = self.state.lock().await;
 
         let virtual_count = state.virtual_votes.len();
@@ -348,6 +348,57 @@ impl WeeklyGathering {
                 }
             }
         }
+    }
+}
+
+// Test helpers - exposed for integration tests in tests/unit/middleware.rs
+// TODO: Ideally, move the WeeklyGathering tests into this crate as a #[cfg(test)] mod tests
+// block, which would allow these helpers to be conditionally compiled and hidden from the
+// public API.
+#[doc(hidden)]
+impl WeeklyGathering {
+    /// Set the phase to Announced with a specific message ID (for testing)
+    pub async fn set_announced(&self, message_id: String) {
+        let mut state = self.state.lock().await;
+        state.phase = GatheringPhase::Announced { message_id };
+    }
+
+    /// Get current vote counts (for testing): (virtual, in_person, host_volunteers)
+    pub async fn get_vote_counts(&self) -> (usize, usize, usize) {
+        let state = self.state.lock().await;
+        (state.virtual_votes.len(), state.in_person_votes.len(), state.host_volunteers.len())
+    }
+
+    /// Set the last host (for testing)
+    pub async fn set_last_host(&self, host: Option<String>) {
+        let mut state = self.state.lock().await;
+        state.last_host = host;
+    }
+
+    /// Get host volunteers (for testing)
+    pub async fn get_host_volunteers(&self) -> HashSet<String> {
+        let state = self.state.lock().await;
+        state.host_volunteers.clone()
+    }
+
+    /// Process a reaction directly (for testing)
+    pub async fn test_process_reaction_added(
+        &self,
+        target_event_id: String,
+        key: String,
+        sender_id: String,
+    ) {
+        self.process_reaction(ReactionEvent::Added { target_event_id, key, sender_id }).await;
+    }
+
+    /// Process a reaction removal directly (for testing)
+    pub async fn test_process_reaction_removed(
+        &self,
+        target_event_id: Option<String>,
+        key: Option<String>,
+        sender_id: String,
+    ) {
+        self.process_reaction(ReactionEvent::Removed { target_event_id, key, sender_id }).await;
     }
 }
 
