@@ -409,7 +409,7 @@ impl MovieShowtimes {
             None => {
                 // Not found - send helpful message (no movie list, too many to display)
                 let message = format!(
-                    "Movie '{}' not found in cached listings. Check the most recent summary for available movies.",
+                    "Poop! Movie '{}' not found in cached listings. Check the most recent summary for available movies. Also you don't need quotes, Dan.",
                     query
                 );
 
