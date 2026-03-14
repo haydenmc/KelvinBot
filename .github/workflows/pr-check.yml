@@ -19,6 +19,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
+        toolchain: 1.93.1
         components: rustfmt, clippy
 
     - name: Install protobuf compiler
