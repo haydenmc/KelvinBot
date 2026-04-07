@@ -1594,11 +1594,11 @@ fn test_weekly_gathering_host_selection_avoids_repeat() {
     volunteers.insert("user1".to_string());
     volunteers.insert("user2".to_string());
 
-    let last_host = "user1".to_string();
+    let recent_hosts = vec!["user1".to_string()];
 
     // Run multiple times to ensure filtering works and isn't passing by random chance
     for _ in 0..10 {
-        let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+        let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
         assert_eq!(result, Some("user2".to_string()));
     }
 }
@@ -1609,10 +1609,52 @@ fn test_weekly_gathering_host_selection_fallback_when_only_last_host() {
     let mut volunteers = HashSet::new();
     volunteers.insert("user1".to_string());
 
-    let last_host = "user1".to_string();
+    let recent_hosts = vec!["user1".to_string()];
 
     // Should fall back to user1 when only they volunteered
-    let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+    let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
+    assert_eq!(result, Some("user1".to_string()));
+}
+
+#[test]
+fn test_weekly_gathering_host_selection_avoids_multiple_recent() {
+    use std::collections::HashSet;
+    let mut volunteers = HashSet::new();
+    volunteers.insert("user1".to_string());
+    volunteers.insert("user2".to_string());
+    volunteers.insert("user3".to_string());
+    volunteers.insert("user4".to_string());
+    volunteers.insert("user5".to_string());
+
+    let recent_hosts = vec![
+        "user1".to_string(),
+        "user2".to_string(),
+        "user3".to_string(),
+        "user4".to_string(),
+    ];
+
+    // Only user5 is eligible; run multiple times to confirm
+    for _ in 0..10 {
+        let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
+        assert_eq!(result, Some("user5".to_string()));
+    }
+}
+
+#[test]
+fn test_weekly_gathering_host_selection_fallback_when_all_recent() {
+    use std::collections::HashSet;
+    let mut volunteers = HashSet::new();
+    volunteers.insert("user1".to_string());
+
+    let recent_hosts = vec![
+        "user1".to_string(),
+        "user2".to_string(),
+        "user3".to_string(),
+        "user4".to_string(),
+    ];
+
+    // Should fall back to user1 since they're the only volunteer
+    let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
     assert_eq!(result, Some("user1".to_string()));
 }
 
@@ -1957,7 +1999,7 @@ async fn test_weekly_gathering_finalization_avoids_repeat_host() {
     let middleware = WeeklyGathering::new(cmd_tx, config);
 
     middleware.set_announced("msg123".to_string()).await;
-    middleware.set_last_host(Some("alice".to_string())).await;
+    middleware.set_recent_hosts(vec!["alice".to_string()]).await;
 
     // Both alice and bob volunteer, but alice was last host
     middleware
@@ -1992,7 +2034,7 @@ async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
     let middleware = WeeklyGathering::new(cmd_tx, config);
 
     middleware.set_announced("msg123".to_string()).await;
-    middleware.set_last_host(Some("alice".to_string())).await;
+    middleware.set_recent_hosts(vec!["alice".to_string()]).await;
 
     // Only alice volunteers, and she was last host - should still pick her
     middleware

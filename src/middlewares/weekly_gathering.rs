@@ -8,7 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Weekday};
 use rand::seq::SliceRandom;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
@@ -42,7 +42,7 @@ struct GatheringState {
     virtual_votes: HashSet<String>,
     in_person_votes: HashSet<String>,
     host_volunteers: HashSet<String>,
-    last_host: Option<String>,
+    recent_hosts: VecDeque<String>,
 }
 
 impl Default for GatheringState {
@@ -52,7 +52,7 @@ impl Default for GatheringState {
             virtual_votes: HashSet::new(),
             in_person_votes: HashSet::new(),
             host_volunteers: HashSet::new(),
-            last_host: None,
+            recent_hosts: VecDeque::new(),
         }
     }
 }
@@ -138,10 +138,10 @@ impl WeeklyGathering {
         self.next_event_time() - Duration::minutes(self.config.finalize_minutes_before as i64)
     }
 
-    /// Select a host from volunteers, optionally avoiding the last host
+    /// Select a host from volunteers, optionally avoiding recent hosts
     pub fn select_host(
         volunteers: &HashSet<String>,
-        last_host: Option<&String>,
+        recent_hosts: &[String],
         avoid_repeat: bool,
     ) -> Option<String> {
         if volunteers.is_empty() {
@@ -150,7 +150,7 @@ impl WeeklyGathering {
 
         let candidates: Vec<&String> = if avoid_repeat {
             let filtered: Vec<&String> =
-                volunteers.iter().filter(|v| Some(*v) != last_host).collect();
+                volunteers.iter().filter(|v| !recent_hosts.contains(v)).collect();
             // Fall back to all volunteers if filtering leaves no candidates
             if filtered.is_empty() { volunteers.iter().collect() } else { filtered }
         } else {
@@ -228,9 +228,10 @@ impl WeeklyGathering {
         let in_person_count = state.in_person_votes.len();
 
         // Select host
+        let recent_hosts: Vec<String> = state.recent_hosts.iter().cloned().collect();
         let host = Self::select_host(
             &state.host_volunteers,
-            state.last_host.as_ref(),
+            &recent_hosts,
             self.config.avoid_repeat_host,
         );
 
@@ -269,10 +270,13 @@ impl WeeklyGathering {
             tracing::error!(error=%e, "failed to send finalization message");
         }
 
-        // Update last_host if a host was selected
+        // Update recent_hosts if a host was selected (keep last 4 weeks)
         if let Some(selected_host) = host {
             let mut state = self.state.lock().await;
-            state.last_host = Some(selected_host);
+            state.recent_hosts.push_back(selected_host);
+            while state.recent_hosts.len() > 4 {
+                state.recent_hosts.pop_front();
+            }
         }
 
         tracing::info!(
@@ -369,10 +373,10 @@ impl WeeklyGathering {
         (state.virtual_votes.len(), state.in_person_votes.len(), state.host_volunteers.len())
     }
 
-    /// Set the last host (for testing)
-    pub async fn set_last_host(&self, host: Option<String>) {
+    /// Set the recent hosts (for testing)
+    pub async fn set_recent_hosts(&self, hosts: Vec<String>) {
         let mut state = self.state.lock().await;
-        state.last_host = host;
+        state.recent_hosts = hosts.into_iter().collect();
     }
 
     /// Get host volunteers (for testing)
