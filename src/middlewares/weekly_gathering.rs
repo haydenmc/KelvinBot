@@ -138,7 +138,11 @@ impl WeeklyGathering {
         self.next_event_time() - Duration::minutes(self.config.finalize_minutes_before as i64)
     }
 
-    /// Select a host from volunteers, optionally avoiding recent hosts
+    /// Select a host from volunteers, biasing toward the least-recently-hosted volunteer.
+    ///
+    /// When `avoid_repeat` is true: volunteers who haven't hosted within the look-behind
+    /// window are preferred; if all volunteers have hosted recently, the one who hosted
+    /// longest ago is chosen. Randomness is used only when multiple volunteers tie.
     pub fn select_host(
         volunteers: &HashSet<String>,
         recent_hosts: &[String],
@@ -148,17 +152,23 @@ impl WeeklyGathering {
             return None;
         }
 
-        let candidates: Vec<&String> = if avoid_repeat {
-            let filtered: Vec<&String> =
-                volunteers.iter().filter(|v| !recent_hosts.contains(v)).collect();
-            // Fall back to all volunteers if filtering leaves no candidates
-            if filtered.is_empty() { volunteers.iter().collect() } else { filtered }
-        } else {
-            volunteers.iter().collect()
-        };
+        if !avoid_repeat {
+            let candidates: Vec<&String> = volunteers.iter().collect();
+            let mut rng = rand::thread_rng();
+            return candidates.choose(&mut rng).map(|s| (*s).clone());
+        }
 
-        let mut rng = rand::thread_rng();
-        candidates.choose(&mut rng).map(|s| (*s).clone())
+        // Prefer volunteers who haven't hosted within the look-behind window
+        let unranked: Vec<&String> =
+            volunteers.iter().filter(|v| !recent_hosts.contains(v)).collect();
+        if !unranked.is_empty() {
+            let mut rng = rand::thread_rng();
+            return unranked.choose(&mut rng).map(|s| (*s).clone());
+        }
+
+        // All volunteers hosted recently — pick whoever hosted longest ago
+        // (recent_hosts is oldest-first, so iterate front to back)
+        recent_hosts.iter().find(|h| volunteers.contains(*h)).cloned()
     }
 
     /// Post the announcement message and capture the message ID
@@ -270,13 +280,13 @@ impl WeeklyGathering {
             tracing::error!(error=%e, "failed to send finalization message");
         }
 
-        // Update recent_hosts if a host was selected (keep last 4 weeks)
+        // Update recent_hosts if a host was selected
         if let Some(selected_host) = host {
             let mut state = self.state.lock().await;
-            state.recent_hosts.push_back(selected_host);
-            while state.recent_hosts.len() > 4 {
+            while state.recent_hosts.len() >= 4 {
                 state.recent_hosts.pop_front();
             }
+            state.recent_hosts.push_back(selected_host);
         }
 
         tracing::info!(

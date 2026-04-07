@@ -1583,7 +1583,7 @@ async fn test_weekly_gathering_middleware_run() {
 fn test_weekly_gathering_host_selection_empty() {
     use std::collections::HashSet;
     let volunteers: HashSet<String> = HashSet::new();
-    let result = WeeklyGathering::select_host(&volunteers, None, false);
+    let result = WeeklyGathering::select_host(&volunteers, &[], false);
     assert!(result.is_none());
 }
 
@@ -1653,9 +1653,31 @@ fn test_weekly_gathering_host_selection_fallback_when_all_recent() {
         "user4".to_string(),
     ];
 
-    // Should fall back to user1 since they're the only volunteer
+    // Should pick user1 since they're the only volunteer (hosted longest ago)
     let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
     assert_eq!(result, Some("user1".to_string()));
+}
+
+#[test]
+fn test_weekly_gathering_host_selection_biases_least_recent() {
+    use std::collections::HashSet;
+    // user1 hosted 4 weeks ago (index 0), user3 hosted 2 weeks ago (index 2)
+    // user1 should always be chosen since they hosted least recently
+    let mut volunteers = HashSet::new();
+    volunteers.insert("user1".to_string());
+    volunteers.insert("user3".to_string());
+
+    let recent_hosts = vec![
+        "user1".to_string(),
+        "user2".to_string(),
+        "user3".to_string(),
+        "user4".to_string(),
+    ];
+
+    for _ in 0..10 {
+        let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
+        assert_eq!(result, Some("user1".to_string()));
+    }
 }
 
 // Functional tests for vote processing and state transitions
