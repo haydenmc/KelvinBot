@@ -138,12 +138,7 @@ impl WeeklyGathering {
         self.next_event_time() - Duration::minutes(self.config.finalize_minutes_before as i64)
     }
 
-    /// Select a host from volunteers.
-    ///
-    /// When `avoid_repeat` is false: pure random selection.
-    /// When `avoid_repeat` is true: remove recent hosts from the candidate pool
-    /// and pick randomly. If all volunteers hosted recently, fall back to the
-    /// one who hosted longest ago (oldest-first in `recent_hosts`).
+    /// Select a host from volunteers, optionally biasing against recent hosts
     pub fn select_host(
         volunteers: &HashSet<String>,
         recent_hosts: &[String],
@@ -153,7 +148,7 @@ impl WeeklyGathering {
             return None;
         }
 
-        // First try new volunteers - have not hosted recently or avoid_repeat is false
+        // First try new volunteers - i.e. have not hosted recently
         let new_volunteers: Vec<&String> = if avoid_repeat {
             volunteers.iter().filter(|v| !recent_hosts.contains(v)).collect()
         } else {
