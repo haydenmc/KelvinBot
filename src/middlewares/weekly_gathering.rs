@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 
+const HOST_LOOKBEHIND_WEEKS: usize = 4;
+
 pub struct WeeklyGatheringConfig {
     pub service_id: String,
     pub room_id: String,
@@ -274,7 +276,7 @@ impl WeeklyGathering {
         // Update recent_hosts if a host was selected
         if let Some(selected_host) = host {
             let mut state = self.state.lock().await;
-            while state.recent_hosts.len() >= 4 {
+            while state.recent_hosts.len() >= HOST_LOOKBEHIND_WEEKS {
                 state.recent_hosts.pop_front();
             }
             state.recent_hosts.push_back(selected_host);
