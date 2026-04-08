@@ -138,11 +138,12 @@ impl WeeklyGathering {
         self.next_event_time() - Duration::minutes(self.config.finalize_minutes_before as i64)
     }
 
-    /// Select a host from volunteers, biasing toward the least-recently-hosted volunteer.
+    /// Select a host from volunteers.
     ///
-    /// When `avoid_repeat` is true: volunteers who haven't hosted within the look-behind
-    /// window are preferred; if all volunteers have hosted recently, the one who hosted
-    /// longest ago is chosen. Randomness is used only when multiple volunteers tie.
+    /// When `avoid_repeat` is false: pure random selection.
+    /// When `avoid_repeat` is true: remove recent hosts from the candidate pool
+    /// and pick randomly. If all volunteers hosted recently, fall back to the
+    /// one who hosted longest ago (oldest-first in `recent_hosts`).
     pub fn select_host(
         volunteers: &HashSet<String>,
         recent_hosts: &[String],
@@ -152,22 +153,20 @@ impl WeeklyGathering {
             return None;
         }
 
-        if !avoid_repeat {
-            let candidates: Vec<&String> = volunteers.iter().collect();
-            let mut rng = rand::thread_rng();
-            return candidates.choose(&mut rng).map(|s| (*s).clone());
-        }
+        // First try new volunteers - have not hosted recently or avoid_repeat is false
+        let new_volunteers: Vec<&String> = if avoid_repeat {
+            volunteers.iter().filter(|v| !recent_hosts.contains(v)).collect()
+        } else {
+            volunteers.iter().collect()
+        };
 
-        // Prefer volunteers who haven't hosted within the look-behind window
-        let unranked: Vec<&String> =
-            volunteers.iter().filter(|v| !recent_hosts.contains(v)).collect();
-        if !unranked.is_empty() {
-            let mut rng = rand::thread_rng();
-            return unranked.choose(&mut rng).map(|s| (*s).clone());
+        let mut rng = rand::thread_rng();
+
+        if !new_volunteers.is_empty() {
+            return new_volunteers.choose(&mut rng).map(|s| (*s).clone());
         }
 
         // All volunteers hosted recently — pick whoever hosted longest ago
-        // (recent_hosts is oldest-first, so iterate front to back)
         recent_hosts.iter().find(|h| volunteers.contains(*h)).cloned()
     }
 
