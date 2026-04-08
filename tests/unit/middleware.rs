@@ -1626,12 +1626,8 @@ fn test_weekly_gathering_host_selection_avoids_multiple_recent() {
     volunteers.insert("user4".to_string());
     volunteers.insert("user5".to_string());
 
-    let recent_hosts = vec![
-        "user1".to_string(),
-        "user2".to_string(),
-        "user3".to_string(),
-        "user4".to_string(),
-    ];
+    let recent_hosts =
+        vec!["user1".to_string(), "user2".to_string(), "user3".to_string(), "user4".to_string()];
 
     // Only user5 is eligible; run multiple times to confirm
     for _ in 0..10 {
@@ -1646,12 +1642,8 @@ fn test_weekly_gathering_host_selection_fallback_when_all_recent() {
     let mut volunteers = HashSet::new();
     volunteers.insert("user1".to_string());
 
-    let recent_hosts = vec![
-        "user1".to_string(),
-        "user2".to_string(),
-        "user3".to_string(),
-        "user4".to_string(),
-    ];
+    let recent_hosts =
+        vec!["user1".to_string(), "user2".to_string(), "user3".to_string(), "user4".to_string()];
 
     // Should pick user1 since they're the only volunteer (hosted longest ago)
     let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);
@@ -1667,12 +1659,8 @@ fn test_weekly_gathering_host_selection_biases_least_recent() {
     volunteers.insert("user1".to_string());
     volunteers.insert("user3".to_string());
 
-    let recent_hosts = vec![
-        "user1".to_string(),
-        "user2".to_string(),
-        "user3".to_string(),
-        "user4".to_string(),
-    ];
+    let recent_hosts =
+        vec!["user1".to_string(), "user2".to_string(), "user3".to_string(), "user4".to_string()];
 
     for _ in 0..10 {
         let result = WeeklyGathering::select_host(&volunteers, &recent_hosts, true);

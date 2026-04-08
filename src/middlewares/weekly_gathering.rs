@@ -238,11 +238,8 @@ impl WeeklyGathering {
 
         // Select host
         let recent_hosts: Vec<String> = state.recent_hosts.iter().cloned().collect();
-        let host = Self::select_host(
-            &state.host_volunteers,
-            &recent_hosts,
-            self.config.avoid_repeat_host,
-        );
+        let host =
+            Self::select_host(&state.host_volunteers, &recent_hosts, self.config.avoid_repeat_host);
 
         let host_display = host.as_deref().unwrap_or("No host volunteered");
 
