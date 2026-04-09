@@ -56,7 +56,7 @@ pub fn instantiate_middleware_from_config(
         // opens (or creates) the middleware's dedicated store file on disk. Only
         // middlewares that actually need the context call this.
         let make_ctx = || -> Result<MiddlewareContext> {
-            let store_path = config.data_directory.join(name).join("store.json");
+            let store_path = config.data_directory.join(format!("{name}.store.json"));
             let store = Arc::new(PersistentStore::load(store_path)?);
             Ok(MiddlewareContext { cmd_tx: cmd_tx.clone(), store })
         };
