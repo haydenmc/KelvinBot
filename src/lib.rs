@@ -1,3 +1,5 @@
+pub mod store;
+
 pub mod core {
     pub mod bus;
     pub mod config;

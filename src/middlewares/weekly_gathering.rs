@@ -1,14 +1,15 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
     service::ServiceId,
 };
+use crate::store::PersistentStore;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Weekday};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
 use rand::seq::SliceRandom;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
@@ -27,7 +28,6 @@ pub struct WeeklyGatheringConfig {
     pub finalization_virtual_message: String,
     pub finalization_in_person_message: String,
     pub finalization_no_votes_message: String,
-    pub avoid_repeat_host: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +42,6 @@ struct GatheringState {
     virtual_votes: HashSet<String>,
     in_person_votes: HashSet<String>,
     host_volunteers: HashSet<String>,
-    last_host: Option<String>,
 }
 
 impl Default for GatheringState {
@@ -52,7 +51,6 @@ impl Default for GatheringState {
             virtual_votes: HashSet::new(),
             in_person_votes: HashSet::new(),
             host_volunteers: HashSet::new(),
-            last_host: None,
         }
     }
 }
@@ -67,18 +65,21 @@ pub struct WeeklyGathering {
     cmd_tx: Sender<Command>,
     config: WeeklyGatheringConfig,
     state: Arc<Mutex<GatheringState>>,
+    store: Arc<PersistentStore>,
     reaction_tx: tokio::sync::mpsc::Sender<ReactionEvent>,
     reaction_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<ReactionEvent>>>,
 }
 
 impl WeeklyGathering {
-    pub fn new(cmd_tx: Sender<Command>, config: WeeklyGatheringConfig) -> Self {
+    pub fn new(ctx: MiddlewareContext, config: WeeklyGatheringConfig) -> Self {
+        let MiddlewareContext { cmd_tx, store } = ctx;
         let (reaction_tx, reaction_rx) = tokio::sync::mpsc::channel(100);
 
         Self {
             cmd_tx,
             config,
             state: Arc::new(Mutex::new(GatheringState::default())),
+            store,
             reaction_tx,
             reaction_rx: Arc::new(Mutex::new(reaction_rx)),
         }
@@ -138,24 +139,31 @@ impl WeeklyGathering {
         self.next_event_time() - Duration::minutes(self.config.finalize_minutes_before as i64)
     }
 
-    /// Select a host from volunteers, optionally avoiding the last host
+    /// Select a host from volunteers, preferring those who have hosted least recently.
+    ///
+    /// Volunteers absent from `host_history` are treated as having never hosted and are
+    /// always preferred over those with any recorded history. Among candidates with equal
+    /// last-hosted timestamps, one is chosen at random.
     pub fn select_host(
         volunteers: &HashSet<String>,
-        last_host: Option<&String>,
-        avoid_repeat: bool,
+        host_history: &HashMap<String, DateTime<Utc>>,
     ) -> Option<String> {
         if volunteers.is_empty() {
             return None;
         }
 
-        let candidates: Vec<&String> = if avoid_repeat {
-            let filtered: Vec<&String> =
-                volunteers.iter().filter(|v| Some(*v) != last_host).collect();
-            // Fall back to all volunteers if filtering leaves no candidates
-            if filtered.is_empty() { volunteers.iter().collect() } else { filtered }
-        } else {
-            volunteers.iter().collect()
-        };
+        // Treat "never hosted" as the Unix epoch so they sort before anyone who has hosted.
+        let epoch = DateTime::<Utc>::UNIX_EPOCH;
+        let min_time = volunteers
+            .iter()
+            .map(|v| host_history.get(v).copied().unwrap_or(epoch))
+            .min()
+            .expect("volunteers is non-empty");
+
+        let candidates: Vec<&String> = volunteers
+            .iter()
+            .filter(|v| host_history.get(*v).copied().unwrap_or(epoch) == min_time)
+            .collect();
 
         let mut rng = rand::thread_rng();
         candidates.choose(&mut rng).map(|s| (*s).clone())
@@ -222,17 +230,17 @@ impl WeeklyGathering {
 
     /// Post the finalization message with vote counts and host
     pub async fn post_finalization(&self) {
+        // Load host history before acquiring the state lock.
+        let mut host_history: HashMap<String, DateTime<Utc>> =
+            self.store.get("host_history").await.unwrap_or_default();
+
         let state = self.state.lock().await;
 
         let virtual_count = state.virtual_votes.len();
         let in_person_count = state.in_person_votes.len();
 
         // Select host
-        let host = Self::select_host(
-            &state.host_volunteers,
-            state.last_host.as_ref(),
-            self.config.avoid_repeat_host,
-        );
+        let host = Self::select_host(&state.host_volunteers, &host_history);
 
         let host_display = host.as_deref().unwrap_or("No host volunteered");
 
@@ -269,10 +277,12 @@ impl WeeklyGathering {
             tracing::error!(error=%e, "failed to send finalization message");
         }
 
-        // Update last_host if a host was selected
-        if let Some(selected_host) = host {
-            let mut state = self.state.lock().await;
-            state.last_host = Some(selected_host);
+        // Persist the newly selected host so future weeks prefer someone else.
+        if let Some(ref selected_host) = host {
+            host_history.insert(selected_host.clone(), Utc::now());
+            if let Err(e) = self.store.set("host_history", &host_history).await {
+                tracing::error!(error=%e, "failed to persist host history");
+            }
         }
 
         tracing::info!(
@@ -369,10 +379,12 @@ impl WeeklyGathering {
         (state.virtual_votes.len(), state.in_person_votes.len(), state.host_volunteers.len())
     }
 
-    /// Set the last host (for testing)
-    pub async fn set_last_host(&self, host: Option<String>) {
-        let mut state = self.state.lock().await;
-        state.last_host = host;
+    /// Set the host history in the backing store (for testing)
+    pub async fn set_host_history(&self, history: HashMap<String, DateTime<Utc>>) {
+        self.store
+            .set("host_history", &history)
+            .await
+            .expect("failed to set host history in store");
     }
 
     /// Get host volunteers (for testing)

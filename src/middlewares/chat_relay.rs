@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
     service::ServiceId,
 };
 
@@ -29,9 +29,9 @@ pub struct ChatRelay {
 }
 
 impl ChatRelay {
-    pub fn new(cmd_tx: Sender<Command>, config: ChatRelayConfig) -> Self {
+    pub fn new(ctx: MiddlewareContext, config: ChatRelayConfig) -> Self {
         Self {
-            cmd_tx,
+            cmd_tx: ctx.cmd_tx,
             source_service_id: config.source_service_id,
             source_room_id: config.source_room_id,
             dest_service_id: config.dest_service_id,

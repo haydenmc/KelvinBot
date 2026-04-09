@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,8 +14,8 @@ pub struct Echo {
 }
 
 impl Echo {
-    pub fn new(cmd_tx: Sender<Command>, command_string: String) -> Self {
-        Self { cmd_tx, command_string }
+    pub fn new(ctx: MiddlewareContext, command_string: String) -> Self {
+        Self { cmd_tx: ctx.cmd_tx, command_string }
     }
 }
 

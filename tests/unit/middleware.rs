@@ -4,7 +4,8 @@ use kelvin_bot::core::{
     config::{Config, MiddlewareCfg, MiddlewareKind, ReconnectionConfig},
     event::{Event, EventKind, User},
     middleware::{
-        Middleware, Verdict, build_middleware_pipeline, instantiate_middleware_from_config,
+        Middleware, MiddlewareContext, Verdict, build_middleware_pipeline,
+        instantiate_middleware_from_config,
     },
     service::ServiceId,
 };
@@ -15,12 +16,18 @@ use kelvin_bot::middlewares::{
     invite::Invite,
     logger::Logger,
 };
+use kelvin_bot::store::PersistentStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::mpsc::Sender;
 use tokio_test::assert_ok;
 use tokio_util::sync::CancellationToken;
+
+fn make_ctx(cmd_tx: Sender<Command>) -> MiddlewareContext {
+    MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) }
+}
 
 #[test]
 fn test_verdict_copy_trait() {
@@ -64,7 +71,7 @@ fn test_logger_middleware_on_event() {
 #[tokio::test]
 async fn test_echo_middleware_with_custom_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let echo = Echo::new(cmd_tx, "!test".to_string());
+    let echo = Echo::new(make_ctx(cmd_tx), "!test".to_string());
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -100,7 +107,7 @@ async fn test_echo_middleware_with_custom_command() {
 #[tokio::test]
 async fn test_echo_middleware_ignores_wrong_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let echo = Echo::new(cmd_tx, "!echo".to_string());
+    let echo = Echo::new(make_ctx(cmd_tx), "!echo".to_string());
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -126,7 +133,7 @@ async fn test_echo_middleware_ignores_wrong_command() {
 #[tokio::test]
 async fn test_echo_middleware_ignores_self_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let echo = Echo::new(cmd_tx, "!echo".to_string());
+    let echo = Echo::new(make_ctx(cmd_tx), "!echo".to_string());
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -182,8 +189,10 @@ fn test_build_middleware_pipeline() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 
     let mut all_middlewares: HashMap<String, Arc<dyn Middleware>> = HashMap::new();
-    all_middlewares
-        .insert("echo1".to_string(), Arc::new(Echo::new(cmd_tx.clone(), "!echo".to_string())));
+    all_middlewares.insert(
+        "echo1".to_string(),
+        Arc::new(Echo::new(make_ctx(cmd_tx.clone()), "!echo".to_string())),
+    );
     all_middlewares.insert("logger1".to_string(), Arc::new(Logger {}));
 
     let middleware_names = vec!["echo1".to_string(), "logger1".to_string()];
@@ -221,8 +230,12 @@ fn test_build_middleware_pipeline_empty() {
 #[tokio::test]
 async fn test_invite_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
     let cancel_token = CancellationToken::new();
 
     // Invite run should complete immediately when cancelled
@@ -234,8 +247,12 @@ async fn test_invite_middleware_run() {
 #[tokio::test]
 async fn test_invite_middleware_accepts_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -272,8 +289,12 @@ async fn test_invite_middleware_accepts_local_user() {
 #[tokio::test]
 async fn test_invite_middleware_rejects_non_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -309,8 +330,12 @@ async fn test_invite_middleware_rejects_non_local_user() {
 #[tokio::test]
 async fn test_invite_middleware_ignores_wrong_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -336,8 +361,12 @@ async fn test_invite_middleware_ignores_wrong_command() {
 #[tokio::test]
 async fn test_invite_middleware_ignores_room_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -364,7 +393,7 @@ async fn test_invite_middleware_ignores_room_messages() {
 async fn test_invite_middleware_with_default_config() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     // Create invite with no explicit config (will use defaults)
-    let invite = Invite::new(cmd_tx, "!invite".to_string(), None, None);
+    let invite = Invite::new(make_ctx(cmd_tx), "!invite".to_string(), None, None);
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -399,7 +428,7 @@ async fn test_invite_middleware_with_default_config() {
 async fn test_invite_middleware_with_custom_expiry() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let custom_expiry = Duration::from_secs(3600); // 1 hour
-    let invite = Invite::new(cmd_tx, "!invite".to_string(), Some(5), Some(custom_expiry));
+    let invite = Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(5), Some(custom_expiry));
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -466,7 +495,7 @@ async fn test_invite_middleware_instantiation_from_config() {
 async fn test_chat_relay_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "source".to_string(),
             source_room_id: None,
@@ -487,7 +516,7 @@ async fn test_chat_relay_middleware_run() {
 async fn test_chat_relay_forwards_message_with_correct_format() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -533,7 +562,7 @@ async fn test_chat_relay_forwards_message_with_correct_format() {
 async fn test_chat_relay_filters_bot_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -569,7 +598,7 @@ async fn test_chat_relay_filters_bot_messages() {
 async fn test_chat_relay_ignores_wrong_service() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -604,7 +633,7 @@ async fn test_chat_relay_ignores_wrong_service() {
 async fn test_chat_relay_filters_by_source_room() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "matrix".to_string(),
             source_room_id: Some("!general:matrix.org".to_string()),
@@ -667,7 +696,7 @@ async fn test_chat_relay_filters_by_source_room() {
 async fn test_chat_relay_ignores_direct_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -702,7 +731,7 @@ async fn test_chat_relay_ignores_direct_messages() {
 async fn test_chat_relay_handles_missing_display_name() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -779,7 +808,7 @@ async fn test_chat_relay_instantiation_from_config() {
 async fn test_attendance_relay_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -802,7 +831,7 @@ async fn test_attendance_relay_middleware_run() {
 async fn test_attendance_relay_session_start() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -863,7 +892,7 @@ async fn test_attendance_relay_session_start() {
 async fn test_attendance_relay_session_update_with_edit() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -951,7 +980,7 @@ async fn test_attendance_relay_session_update_with_edit() {
 async fn test_attendance_relay_multiple_updates() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1117,7 +1146,7 @@ async fn test_attendance_relay_multiple_updates() {
 async fn test_attendance_relay_session_end() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1218,7 +1247,7 @@ async fn test_attendance_relay_session_end() {
 async fn test_attendance_relay_ignores_wrong_service() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1257,7 +1286,7 @@ async fn test_attendance_relay_ignores_wrong_service() {
 async fn test_attendance_relay_ignores_non_userlist_events() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1295,7 +1324,7 @@ async fn test_attendance_relay_ignores_non_userlist_events() {
 async fn test_attendance_relay_filters_self_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1351,7 +1380,7 @@ async fn test_attendance_relay_filters_self_user() {
 async fn test_attendance_relay_filters_inactive_users() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1407,7 +1436,7 @@ async fn test_attendance_relay_filters_inactive_users() {
 async fn test_attendance_relay_tracks_all_participants() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1544,7 +1573,7 @@ async fn test_attendance_relay_instantiation_from_config() {
 
 // Weekly Gathering Middleware Tests
 
-use chrono::{NaiveTime, Weekday};
+use chrono::{NaiveTime, Utc, Weekday};
 use kelvin_bot::middlewares::weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig};
 
 fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
@@ -1562,15 +1591,17 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
         finalization_virtual_message: "This week is VIRTUAL! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_in_person_message: "This week is IN-PERSON! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_no_votes_message: "No votes received - gathering cancelled.".to_string(),
-        avoid_repeat_host: true,
     }
+}
+
+fn make_weekly_gathering(cmd_tx: Sender<Command>) -> WeeklyGathering {
+    WeeklyGathering::new(make_ctx(cmd_tx), create_weekly_gathering_config())
 }
 
 #[tokio::test]
 async fn test_weekly_gathering_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let weekly_gathering = WeeklyGathering::new(cmd_tx, config);
+    let weekly_gathering = make_weekly_gathering(cmd_tx);
     let cancel_token = CancellationToken::new();
 
     // WeeklyGathering run should complete when cancelled
@@ -1583,36 +1614,39 @@ async fn test_weekly_gathering_middleware_run() {
 fn test_weekly_gathering_host_selection_empty() {
     use std::collections::HashSet;
     let volunteers: HashSet<String> = HashSet::new();
-    let result = WeeklyGathering::select_host(&volunteers, None, false);
+    let history = HashMap::new();
+    let result = WeeklyGathering::select_host(&volunteers, &history);
     assert!(result.is_none());
 }
 
 #[test]
-fn test_weekly_gathering_host_selection_avoids_repeat() {
+fn test_weekly_gathering_host_selection_prefers_least_recently_hosted() {
     use std::collections::HashSet;
     let mut volunteers = HashSet::new();
     volunteers.insert("user1".to_string());
     volunteers.insert("user2".to_string());
 
-    let last_host = "user1".to_string();
+    // user1 hosted recently; user2 has no history → user2 should always be chosen
+    let mut history = HashMap::new();
+    history.insert("user1".to_string(), Utc::now());
 
-    // Run multiple times to ensure filtering works and isn't passing by random chance
     for _ in 0..10 {
-        let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+        let result = WeeklyGathering::select_host(&volunteers, &history);
         assert_eq!(result, Some("user2".to_string()));
     }
 }
 
 #[test]
-fn test_weekly_gathering_host_selection_fallback_when_only_last_host() {
+fn test_weekly_gathering_host_selection_only_candidate_chosen_despite_history() {
     use std::collections::HashSet;
     let mut volunteers = HashSet::new();
     volunteers.insert("user1".to_string());
 
-    let last_host = "user1".to_string();
+    // user1 is the only volunteer; must be chosen even though they hosted recently
+    let mut history = HashMap::new();
+    history.insert("user1".to_string(), Utc::now());
 
-    // Should fall back to user1 when only they volunteered
-    let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+    let result = WeeklyGathering::select_host(&volunteers, &history);
     assert_eq!(result, Some("user1".to_string()));
 }
 
@@ -1621,8 +1655,7 @@ fn test_weekly_gathering_host_selection_fallback_when_only_last_host() {
 #[tokio::test]
 async fn test_weekly_gathering_ignores_reactions_when_idle() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     // Don't set phase to Announced - middleware starts in Idle
     // Process a reaction - should be ignored since we're in Idle phase
@@ -1639,8 +1672,7 @@ async fn test_weekly_gathering_ignores_reactions_when_idle() {
 #[tokio::test]
 async fn test_weekly_gathering_records_virtual_votes() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1660,8 +1692,7 @@ async fn test_weekly_gathering_records_virtual_votes() {
 #[tokio::test]
 async fn test_weekly_gathering_records_in_person_votes() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1684,8 +1715,7 @@ async fn test_weekly_gathering_records_in_person_votes() {
 #[tokio::test]
 async fn test_weekly_gathering_switching_vote_removes_previous() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1711,8 +1741,7 @@ async fn test_weekly_gathering_switching_vote_removes_previous() {
 #[tokio::test]
 async fn test_weekly_gathering_host_volunteers() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1735,8 +1764,7 @@ async fn test_weekly_gathering_host_volunteers() {
 #[tokio::test]
 async fn test_weekly_gathering_reaction_removal() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1764,8 +1792,7 @@ async fn test_weekly_gathering_reaction_removal() {
 #[tokio::test]
 async fn test_weekly_gathering_ignores_reactions_on_wrong_message() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1781,8 +1808,7 @@ async fn test_weekly_gathering_ignores_reactions_on_wrong_message() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_virtual_wins() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1823,8 +1849,7 @@ async fn test_weekly_gathering_finalization_virtual_wins() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_in_person_wins() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1865,8 +1890,7 @@ async fn test_weekly_gathering_finalization_in_person_wins() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_tie_prefers_virtual() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1903,8 +1927,7 @@ async fn test_weekly_gathering_finalization_tie_prefers_virtual() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_no_votes() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1926,8 +1949,7 @@ async fn test_weekly_gathering_finalization_no_votes() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_no_host_volunteer() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1951,15 +1973,17 @@ async fn test_weekly_gathering_finalization_no_host_volunteer() {
 }
 
 #[tokio::test]
-async fn test_weekly_gathering_finalization_avoids_repeat_host() {
+async fn test_weekly_gathering_finalization_prefers_least_recently_hosted() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
-    middleware.set_last_host(Some("alice".to_string())).await;
 
-    // Both alice and bob volunteer, but alice was last host
+    // alice hosted recently; bob has no history → bob should be chosen
+    let mut history = HashMap::new();
+    history.insert("alice".to_string(), Utc::now());
+    middleware.set_host_history(history).await;
+
     middleware
         .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
         .await;
@@ -1978,7 +2002,6 @@ async fn test_weekly_gathering_finalization_avoids_repeat_host() {
     assert!(cmd.is_ok());
     match cmd.unwrap() {
         Command::SendRoomMessage { body, .. } => {
-            // Should pick bob since alice was last host
             assert!(body.contains("bob"));
         }
         _ => panic!("Expected SendRoomMessage command"),
@@ -1986,15 +2009,17 @@ async fn test_weekly_gathering_finalization_avoids_repeat_host() {
 }
 
 #[tokio::test]
-async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
+async fn test_weekly_gathering_finalization_sole_volunteer_chosen_despite_history() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
-    middleware.set_last_host(Some("alice".to_string())).await;
 
-    // Only alice volunteers, and she was last host - should still pick her
+    // alice hosted recently and is the only volunteer → must still be chosen
+    let mut history = HashMap::new();
+    history.insert("alice".to_string(), Utc::now());
+    middleware.set_host_history(history).await;
+
     middleware
         .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
         .await;
@@ -2010,7 +2035,6 @@ async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
     assert!(cmd.is_ok());
     match cmd.unwrap() {
         Command::SendRoomMessage { body, .. } => {
-            // Should fall back to alice since she's the only volunteer
             assert!(body.contains("alice"));
         }
         _ => panic!("Expected SendRoomMessage command"),
@@ -2020,6 +2044,7 @@ async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
 #[tokio::test]
 async fn test_weekly_gathering_instantiation_from_config() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
@@ -2039,7 +2064,6 @@ async fn test_weekly_gathering_instantiation_from_config() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
-                avoid_repeat_host: true,
             },
         },
     );
@@ -2047,7 +2071,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
     let config = Config {
         services: HashMap::new(),
         middlewares: middlewares_map,
-        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        data_directory: data_dir.path().to_path_buf(),
         reconnection: ReconnectionConfig::default(),
     };
 
@@ -2062,6 +2086,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
 #[tokio::test]
 async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
@@ -2081,7 +2106,6 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
-                avoid_repeat_host: true,
             },
         },
     );
@@ -2089,7 +2113,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
     let config = Config {
         services: HashMap::new(),
         middlewares: middlewares_map,
-        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        data_directory: data_dir.path().to_path_buf(),
         reconnection: ReconnectionConfig::default(),
     };
 
@@ -2102,6 +2126,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
 #[tokio::test]
 async fn test_weekly_gathering_instantiation_invalid_time_format() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
@@ -2121,7 +2146,6 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
-                avoid_repeat_host: true,
             },
         },
     );
@@ -2129,7 +2153,7 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
     let config = Config {
         services: HashMap::new(),
         middlewares: middlewares_map,
-        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        data_directory: data_dir.path().to_path_buf(),
         reconnection: ReconnectionConfig::default(),
     };
 

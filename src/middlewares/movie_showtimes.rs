@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
     service::ServiceId,
 };
 use anyhow::{Context, Result};
@@ -106,7 +106,7 @@ pub struct MovieShowtimes {
 impl MovieShowtimes {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        cmd_tx: Sender<Command>,
+        ctx: MiddlewareContext,
         service_id: String,
         room_id: String,
         post_on_day_of_week: Weekday,
@@ -120,7 +120,7 @@ impl MovieShowtimes {
         let (query_tx, query_rx) = tokio::sync::mpsc::channel(100);
 
         Self {
-            cmd_tx,
+            cmd_tx: ctx.cmd_tx,
             service_id,
             room_id,
             post_on_day_of_week,
