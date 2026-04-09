@@ -4,7 +4,8 @@ use kelvin_bot::core::{
     config::{Config, MiddlewareCfg, MiddlewareKind, ReconnectionConfig},
     event::{Event, EventKind, User},
     middleware::{
-        Middleware, Verdict, build_middleware_pipeline, instantiate_middleware_from_config,
+        MiddlewareContext, Middleware, Verdict, build_middleware_pipeline,
+        instantiate_middleware_from_config,
     },
     service::ServiceId,
 };
@@ -20,7 +21,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio_test::assert_ok;
+use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
+use kelvin_bot::store::PersistentStore;
+
+fn make_ctx(cmd_tx: Sender<Command>) -> MiddlewareContext {
+    MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) }
+}
 
 #[test]
 fn test_verdict_copy_trait() {
@@ -64,7 +71,7 @@ fn test_logger_middleware_on_event() {
 #[tokio::test]
 async fn test_echo_middleware_with_custom_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let echo = Echo::new(cmd_tx, "!test".to_string());
+    let echo = Echo::new(make_ctx(cmd_tx), "!test".to_string());
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -100,7 +107,7 @@ async fn test_echo_middleware_with_custom_command() {
 #[tokio::test]
 async fn test_echo_middleware_ignores_wrong_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let echo = Echo::new(cmd_tx, "!echo".to_string());
+    let echo = Echo::new(make_ctx(cmd_tx), "!echo".to_string());
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -126,7 +133,7 @@ async fn test_echo_middleware_ignores_wrong_command() {
 #[tokio::test]
 async fn test_echo_middleware_ignores_self_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let echo = Echo::new(cmd_tx, "!echo".to_string());
+    let echo = Echo::new(make_ctx(cmd_tx), "!echo".to_string());
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -183,7 +190,7 @@ fn test_build_middleware_pipeline() {
 
     let mut all_middlewares: HashMap<String, Arc<dyn Middleware>> = HashMap::new();
     all_middlewares
-        .insert("echo1".to_string(), Arc::new(Echo::new(cmd_tx.clone(), "!echo".to_string())));
+        .insert("echo1".to_string(), Arc::new(Echo::new(make_ctx(cmd_tx.clone()), "!echo".to_string())));
     all_middlewares.insert("logger1".to_string(), Arc::new(Logger {}));
 
     let middleware_names = vec!["echo1".to_string(), "logger1".to_string()];
@@ -222,7 +229,7 @@ fn test_build_middleware_pipeline_empty() {
 async fn test_invite_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
     let cancel_token = CancellationToken::new();
 
     // Invite run should complete immediately when cancelled
@@ -235,7 +242,7 @@ async fn test_invite_middleware_run() {
 async fn test_invite_middleware_accepts_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -273,7 +280,7 @@ async fn test_invite_middleware_accepts_local_user() {
 async fn test_invite_middleware_rejects_non_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -310,7 +317,7 @@ async fn test_invite_middleware_rejects_non_local_user() {
 async fn test_invite_middleware_ignores_wrong_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -337,7 +344,7 @@ async fn test_invite_middleware_ignores_wrong_command() {
 async fn test_invite_middleware_ignores_room_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let invite =
-        Invite::new(cmd_tx, "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -364,7 +371,7 @@ async fn test_invite_middleware_ignores_room_messages() {
 async fn test_invite_middleware_with_default_config() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     // Create invite with no explicit config (will use defaults)
-    let invite = Invite::new(cmd_tx, "!invite".to_string(), None, None);
+    let invite = Invite::new(make_ctx(cmd_tx), "!invite".to_string(), None, None);
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -399,7 +406,7 @@ async fn test_invite_middleware_with_default_config() {
 async fn test_invite_middleware_with_custom_expiry() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let custom_expiry = Duration::from_secs(3600); // 1 hour
-    let invite = Invite::new(cmd_tx, "!invite".to_string(), Some(5), Some(custom_expiry));
+    let invite = Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(5), Some(custom_expiry));
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -466,7 +473,7 @@ async fn test_invite_middleware_instantiation_from_config() {
 async fn test_chat_relay_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "source".to_string(),
             source_room_id: None,
@@ -487,7 +494,7 @@ async fn test_chat_relay_middleware_run() {
 async fn test_chat_relay_forwards_message_with_correct_format() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -533,7 +540,7 @@ async fn test_chat_relay_forwards_message_with_correct_format() {
 async fn test_chat_relay_filters_bot_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -569,7 +576,7 @@ async fn test_chat_relay_filters_bot_messages() {
 async fn test_chat_relay_ignores_wrong_service() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -604,7 +611,7 @@ async fn test_chat_relay_ignores_wrong_service() {
 async fn test_chat_relay_filters_by_source_room() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "matrix".to_string(),
             source_room_id: Some("!general:matrix.org".to_string()),
@@ -667,7 +674,7 @@ async fn test_chat_relay_filters_by_source_room() {
 async fn test_chat_relay_ignores_direct_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -702,7 +709,7 @@ async fn test_chat_relay_ignores_direct_messages() {
 async fn test_chat_relay_handles_missing_display_name() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         ChatRelayConfig {
             source_service_id: "mumble".to_string(),
             source_room_id: None,
@@ -779,7 +786,7 @@ async fn test_chat_relay_instantiation_from_config() {
 async fn test_attendance_relay_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -802,7 +809,7 @@ async fn test_attendance_relay_middleware_run() {
 async fn test_attendance_relay_session_start() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -863,7 +870,7 @@ async fn test_attendance_relay_session_start() {
 async fn test_attendance_relay_session_update_with_edit() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -951,7 +958,7 @@ async fn test_attendance_relay_session_update_with_edit() {
 async fn test_attendance_relay_multiple_updates() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1117,7 +1124,7 @@ async fn test_attendance_relay_multiple_updates() {
 async fn test_attendance_relay_session_end() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1218,7 +1225,7 @@ async fn test_attendance_relay_session_end() {
 async fn test_attendance_relay_ignores_wrong_service() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1257,7 +1264,7 @@ async fn test_attendance_relay_ignores_wrong_service() {
 async fn test_attendance_relay_ignores_non_userlist_events() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1295,7 +1302,7 @@ async fn test_attendance_relay_ignores_non_userlist_events() {
 async fn test_attendance_relay_filters_self_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1351,7 +1358,7 @@ async fn test_attendance_relay_filters_self_user() {
 async fn test_attendance_relay_filters_inactive_users() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1407,7 +1414,7 @@ async fn test_attendance_relay_filters_inactive_users() {
 async fn test_attendance_relay_tracks_all_participants() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let attendance_relay = AttendanceRelay::new(
-        cmd_tx,
+        make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
             source_room_id: None,
@@ -1544,9 +1551,8 @@ async fn test_attendance_relay_instantiation_from_config() {
 
 // Weekly Gathering Middleware Tests
 
-use chrono::{DateTime, NaiveTime, Utc, Weekday};
+use chrono::{NaiveTime, Utc, Weekday};
 use kelvin_bot::middlewares::weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig};
-use kelvin_bot::store::PersistentStore;
 
 fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
     WeeklyGatheringConfig {
@@ -1566,9 +1572,8 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
     }
 }
 
-fn make_weekly_gathering(cmd_tx: tokio::sync::mpsc::Sender<Command>) -> WeeklyGathering {
-    let store = Arc::new(PersistentStore::in_memory());
-    WeeklyGathering::new(cmd_tx, create_weekly_gathering_config(), store)
+fn make_weekly_gathering(cmd_tx: Sender<Command>) -> WeeklyGathering {
+    WeeklyGathering::new(make_ctx(cmd_tx), create_weekly_gathering_config())
 }
 
 #[tokio::test]

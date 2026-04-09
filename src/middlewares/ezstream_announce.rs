@@ -2,7 +2,7 @@ use crate::core::{
     bus::Command,
     config::ExponentialBackoff,
     event::Event,
-    middleware::{Middleware, Verdict},
+    middleware::{MiddlewareContext, Middleware, Verdict},
     service::ServiceId,
 };
 use anyhow::{Context, Result};
@@ -67,7 +67,7 @@ pub struct EzStreamAnnounce {
 
 impl EzStreamAnnounce {
     pub fn new(
-        cmd_tx: Sender<Command>,
+        ctx: MiddlewareContext,
         websocket_url: String,
         stream_url_template: String,
         start_message_template: String,
@@ -75,7 +75,7 @@ impl EzStreamAnnounce {
         destinations: Vec<DestinationConfig>,
     ) -> Self {
         Self {
-            cmd_tx,
+            cmd_tx: ctx.cmd_tx,
             websocket_url,
             stream_url_template,
             start_message_template,

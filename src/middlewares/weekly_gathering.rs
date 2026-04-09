@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{MiddlewareContext, Middleware, Verdict},
     service::ServiceId,
 };
 use crate::store::PersistentStore;
@@ -71,11 +71,8 @@ pub struct WeeklyGathering {
 }
 
 impl WeeklyGathering {
-    pub fn new(
-        cmd_tx: Sender<Command>,
-        config: WeeklyGatheringConfig,
-        store: Arc<PersistentStore>,
-    ) -> Self {
+    pub fn new(ctx: MiddlewareContext, config: WeeklyGatheringConfig) -> Self {
+        let MiddlewareContext { cmd_tx, store } = ctx;
         let (reaction_tx, reaction_rx) = tokio::sync::mpsc::channel(100);
 
         Self {

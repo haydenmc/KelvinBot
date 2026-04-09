@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{MiddlewareContext, Middleware, Verdict},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,12 +18,12 @@ pub struct Invite {
 
 impl Invite {
     pub fn new(
-        cmd_tx: Sender<Command>,
+        ctx: MiddlewareContext,
         command_string: String,
         uses_allowed: Option<u32>,
         expiry: Option<Duration>,
     ) -> Self {
-        Self { cmd_tx, command_string, uses_allowed, expiry }
+        Self { cmd_tx: ctx.cmd_tx, command_string, uses_allowed, expiry }
     }
 }
 

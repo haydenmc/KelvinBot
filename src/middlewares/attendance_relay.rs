@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::{MiddlewareContext, Middleware, Verdict},
     service::ServiceId,
 };
 use anyhow::Result;
@@ -68,9 +68,9 @@ impl SessionState {
 }
 
 impl AttendanceRelay {
-    pub fn new(cmd_tx: Sender<Command>, config: AttendanceRelayConfig) -> Self {
+    pub fn new(ctx: MiddlewareContext, config: AttendanceRelayConfig) -> Self {
         Self {
-            cmd_tx,
+            cmd_tx: ctx.cmd_tx,
             source_service_id: config.source_service_id,
             source_room_id: config.source_room_id,
             dest_service_id: config.dest_service_id,

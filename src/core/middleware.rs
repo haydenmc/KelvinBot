@@ -27,6 +27,17 @@ pub enum Verdict {
     Stop, // This will be used eventually.
 }
 
+/// Per-middleware context passed to every middleware constructor.
+///
+/// Bundles the shared command sender and a dedicated persistent store so that
+/// any middleware can opt into storage simply by using `ctx.store` — no
+/// changes to `instantiate_middleware_from_config` required.
+#[derive(Clone)]
+pub struct MiddlewareContext {
+    pub cmd_tx: Sender<Command>,
+    pub store: Arc<PersistentStore>,
+}
+
 #[async_trait]
 pub trait Middleware: Send + Sync {
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
@@ -41,12 +52,21 @@ pub fn instantiate_middleware_from_config(
     let mut middlewares = HashMap::new();
 
     for (name, cfg) in &config.middlewares {
+        // Lazily build a MiddlewareContext for this middleware. Calling make_ctx()
+        // opens (or creates) the middleware's dedicated store file on disk. Only
+        // middlewares that actually need the context call this.
+        let make_ctx = || -> Result<MiddlewareContext> {
+            let store_path = config.data_directory.join(name).join("store.json");
+            let store = Arc::new(PersistentStore::load(store_path)?);
+            Ok(MiddlewareContext { cmd_tx: cmd_tx.clone(), store })
+        };
+
         let middleware: Arc<dyn Middleware> = match &cfg.kind {
             MiddlewareKind::Echo { command_string } => {
-                Arc::new(Echo::new(cmd_tx.clone(), command_string.clone()))
+                Arc::new(Echo::new(make_ctx()?, command_string.clone()))
             }
             MiddlewareKind::Invite { command_string, uses_allowed, expiry } => Arc::new(
-                Invite::new(cmd_tx.clone(), command_string.clone(), *uses_allowed, *expiry),
+                Invite::new(make_ctx()?, command_string.clone(), *uses_allowed, *expiry),
             ),
             MiddlewareKind::Logger {} => Arc::new(Logger {}),
             MiddlewareKind::MovieShowtimes {
@@ -75,7 +95,7 @@ pub fn instantiate_middleware_from_config(
                     ))?;
 
                 Arc::new(MovieShowtimes::new(
-                    cmd_tx.clone(),
+                    make_ctx()?,
                     service_id.clone(),
                     room_id.clone(),
                     weekday,
@@ -96,7 +116,7 @@ pub fn instantiate_middleware_from_config(
                 session_end_message,
                 session_ended_edit_message,
             } => Arc::new(AttendanceRelay::new(
-                cmd_tx.clone(),
+                make_ctx()?,
                 AttendanceRelayConfig {
                     source_service_id: source_service_id.clone(),
                     source_room_id: source_room_id.clone(),
@@ -114,7 +134,7 @@ pub fn instantiate_middleware_from_config(
                 dest_room_id,
                 prefix_tag,
             } => Arc::new(ChatRelay::new(
-                cmd_tx.clone(),
+                make_ctx()?,
                 ChatRelayConfig {
                     source_service_id: source_service_id.clone(),
                     source_room_id: source_room_id.clone(),
@@ -141,7 +161,7 @@ pub fn instantiate_middleware_from_config(
                     .collect();
 
                 Arc::new(EzStreamAnnounce::new(
-                    cmd_tx.clone(),
+                    make_ctx()?,
                     websocket_url.clone(),
                     stream_url_template.clone(),
                     start_message_template.clone(),
@@ -178,11 +198,8 @@ pub fn instantiate_middleware_from_config(
                         event_time, name
                     ))?;
 
-                let store_path = config.data_directory.join(name).join("store.json");
-                let store = Arc::new(PersistentStore::load(store_path)?);
-
                 Arc::new(WeeklyGathering::new(
-                    cmd_tx.clone(),
+                    make_ctx()?,
                     WeeklyGatheringConfig {
                         service_id: service_id.clone(),
                         room_id: room_id.clone(),
@@ -198,7 +215,6 @@ pub fn instantiate_middleware_from_config(
                         finalization_in_person_message: finalization_in_person_message.clone(),
                         finalization_no_votes_message: finalization_no_votes_message.clone(),
                     },
-                    store,
                 ))
             }
             MiddlewareKind::Unknown => {
