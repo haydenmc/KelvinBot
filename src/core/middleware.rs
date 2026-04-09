@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::core::bus::Command;
 use crate::core::config::{Config, MiddlewareKind};
 use crate::core::event::Event;
-use crate::store::PersistentStore;
 use crate::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
     chat_relay::{ChatRelay, ChatRelayConfig},
@@ -14,6 +13,7 @@ use crate::middlewares::{
     movie_showtimes::MovieShowtimes,
     weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig},
 };
+use crate::store::PersistentStore;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
@@ -65,9 +65,9 @@ pub fn instantiate_middleware_from_config(
             MiddlewareKind::Echo { command_string } => {
                 Arc::new(Echo::new(make_ctx()?, command_string.clone()))
             }
-            MiddlewareKind::Invite { command_string, uses_allowed, expiry } => Arc::new(
-                Invite::new(make_ctx()?, command_string.clone(), *uses_allowed, *expiry),
-            ),
+            MiddlewareKind::Invite { command_string, uses_allowed, expiry } => {
+                Arc::new(Invite::new(make_ctx()?, command_string.clone(), *uses_allowed, *expiry))
+            }
             MiddlewareKind::Logger {} => Arc::new(Logger {}),
             MiddlewareKind::MovieShowtimes {
                 service_id,

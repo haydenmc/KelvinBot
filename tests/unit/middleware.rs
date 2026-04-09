@@ -4,7 +4,7 @@ use kelvin_bot::core::{
     config::{Config, MiddlewareCfg, MiddlewareKind, ReconnectionConfig},
     event::{Event, EventKind, User},
     middleware::{
-        MiddlewareContext, Middleware, Verdict, build_middleware_pipeline,
+        Middleware, MiddlewareContext, Verdict, build_middleware_pipeline,
         instantiate_middleware_from_config,
     },
     service::ServiceId,
@@ -16,14 +16,14 @@ use kelvin_bot::middlewares::{
     invite::Invite,
     logger::Logger,
 };
+use kelvin_bot::store::PersistentStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio_test::assert_ok;
 use tokio::sync::mpsc::Sender;
+use tokio_test::assert_ok;
 use tokio_util::sync::CancellationToken;
-use kelvin_bot::store::PersistentStore;
 
 fn make_ctx(cmd_tx: Sender<Command>) -> MiddlewareContext {
     MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) }
@@ -189,8 +189,10 @@ fn test_build_middleware_pipeline() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 
     let mut all_middlewares: HashMap<String, Arc<dyn Middleware>> = HashMap::new();
-    all_middlewares
-        .insert("echo1".to_string(), Arc::new(Echo::new(make_ctx(cmd_tx.clone()), "!echo".to_string())));
+    all_middlewares.insert(
+        "echo1".to_string(),
+        Arc::new(Echo::new(make_ctx(cmd_tx.clone()), "!echo".to_string())),
+    );
     all_middlewares.insert("logger1".to_string(), Arc::new(Logger {}));
 
     let middleware_names = vec!["echo1".to_string(), "logger1".to_string()];
@@ -228,8 +230,12 @@ fn test_build_middleware_pipeline_empty() {
 #[tokio::test]
 async fn test_invite_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
     let cancel_token = CancellationToken::new();
 
     // Invite run should complete immediately when cancelled
@@ -241,8 +247,12 @@ async fn test_invite_middleware_run() {
 #[tokio::test]
 async fn test_invite_middleware_accepts_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -279,8 +289,12 @@ async fn test_invite_middleware_accepts_local_user() {
 #[tokio::test]
 async fn test_invite_middleware_rejects_non_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -316,8 +330,12 @@ async fn test_invite_middleware_rejects_non_local_user() {
 #[tokio::test]
 async fn test_invite_middleware_ignores_wrong_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -343,8 +361,12 @@ async fn test_invite_middleware_ignores_wrong_command() {
 #[tokio::test]
 async fn test_invite_middleware_ignores_room_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite =
-        Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(1), Some(Duration::from_secs(604800)));
+    let invite = Invite::new(
+        make_ctx(cmd_tx),
+        "!invite".to_string(),
+        Some(1),
+        Some(Duration::from_secs(604800)),
+    );
 
     let event = Event {
         service_id: ServiceId("test".to_string()),

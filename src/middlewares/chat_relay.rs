@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{MiddlewareContext, Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
     service::ServiceId,
 };
 

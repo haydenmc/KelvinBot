@@ -2,7 +2,7 @@ use crate::core::{
     bus::Command,
     config::ExponentialBackoff,
     event::Event,
-    middleware::{MiddlewareContext, Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
     service::ServiceId,
 };
 use anyhow::{Context, Result};

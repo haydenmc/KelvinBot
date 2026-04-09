@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{MiddlewareContext, Middleware, Verdict},
+    middleware::{Middleware, MiddlewareContext, Verdict},
 };
 use anyhow::Result;
 use async_trait::async_trait;
