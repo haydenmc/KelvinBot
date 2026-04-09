@@ -1544,8 +1544,9 @@ async fn test_attendance_relay_instantiation_from_config() {
 
 // Weekly Gathering Middleware Tests
 
-use chrono::{NaiveTime, Weekday};
+use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use kelvin_bot::middlewares::weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig};
+use kelvin_bot::store::PersistentStore;
 
 fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
     WeeklyGatheringConfig {
@@ -1562,15 +1563,18 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
         finalization_virtual_message: "This week is VIRTUAL! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_in_person_message: "This week is IN-PERSON! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_no_votes_message: "No votes received - gathering cancelled.".to_string(),
-        avoid_repeat_host: true,
     }
+}
+
+fn make_weekly_gathering(cmd_tx: tokio::sync::mpsc::Sender<Command>) -> WeeklyGathering {
+    let store = Arc::new(PersistentStore::in_memory());
+    WeeklyGathering::new(cmd_tx, create_weekly_gathering_config(), store)
 }
 
 #[tokio::test]
 async fn test_weekly_gathering_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let weekly_gathering = WeeklyGathering::new(cmd_tx, config);
+    let weekly_gathering = make_weekly_gathering(cmd_tx);
     let cancel_token = CancellationToken::new();
 
     // WeeklyGathering run should complete when cancelled
@@ -1583,36 +1587,39 @@ async fn test_weekly_gathering_middleware_run() {
 fn test_weekly_gathering_host_selection_empty() {
     use std::collections::HashSet;
     let volunteers: HashSet<String> = HashSet::new();
-    let result = WeeklyGathering::select_host(&volunteers, None, false);
+    let history = HashMap::new();
+    let result = WeeklyGathering::select_host(&volunteers, &history);
     assert!(result.is_none());
 }
 
 #[test]
-fn test_weekly_gathering_host_selection_avoids_repeat() {
+fn test_weekly_gathering_host_selection_prefers_least_recently_hosted() {
     use std::collections::HashSet;
     let mut volunteers = HashSet::new();
     volunteers.insert("user1".to_string());
     volunteers.insert("user2".to_string());
 
-    let last_host = "user1".to_string();
+    // user1 hosted recently; user2 has no history → user2 should always be chosen
+    let mut history = HashMap::new();
+    history.insert("user1".to_string(), Utc::now());
 
-    // Run multiple times to ensure filtering works and isn't passing by random chance
     for _ in 0..10 {
-        let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+        let result = WeeklyGathering::select_host(&volunteers, &history);
         assert_eq!(result, Some("user2".to_string()));
     }
 }
 
 #[test]
-fn test_weekly_gathering_host_selection_fallback_when_only_last_host() {
+fn test_weekly_gathering_host_selection_only_candidate_chosen_despite_history() {
     use std::collections::HashSet;
     let mut volunteers = HashSet::new();
     volunteers.insert("user1".to_string());
 
-    let last_host = "user1".to_string();
+    // user1 is the only volunteer; must be chosen even though they hosted recently
+    let mut history = HashMap::new();
+    history.insert("user1".to_string(), Utc::now());
 
-    // Should fall back to user1 when only they volunteered
-    let result = WeeklyGathering::select_host(&volunteers, Some(&last_host), true);
+    let result = WeeklyGathering::select_host(&volunteers, &history);
     assert_eq!(result, Some("user1".to_string()));
 }
 
@@ -1621,8 +1628,7 @@ fn test_weekly_gathering_host_selection_fallback_when_only_last_host() {
 #[tokio::test]
 async fn test_weekly_gathering_ignores_reactions_when_idle() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     // Don't set phase to Announced - middleware starts in Idle
     // Process a reaction - should be ignored since we're in Idle phase
@@ -1639,8 +1645,7 @@ async fn test_weekly_gathering_ignores_reactions_when_idle() {
 #[tokio::test]
 async fn test_weekly_gathering_records_virtual_votes() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1660,8 +1665,7 @@ async fn test_weekly_gathering_records_virtual_votes() {
 #[tokio::test]
 async fn test_weekly_gathering_records_in_person_votes() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1684,8 +1688,7 @@ async fn test_weekly_gathering_records_in_person_votes() {
 #[tokio::test]
 async fn test_weekly_gathering_switching_vote_removes_previous() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1711,8 +1714,7 @@ async fn test_weekly_gathering_switching_vote_removes_previous() {
 #[tokio::test]
 async fn test_weekly_gathering_host_volunteers() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1735,8 +1737,7 @@ async fn test_weekly_gathering_host_volunteers() {
 #[tokio::test]
 async fn test_weekly_gathering_reaction_removal() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1764,8 +1765,7 @@ async fn test_weekly_gathering_reaction_removal() {
 #[tokio::test]
 async fn test_weekly_gathering_ignores_reactions_on_wrong_message() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1781,8 +1781,7 @@ async fn test_weekly_gathering_ignores_reactions_on_wrong_message() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_virtual_wins() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1823,8 +1822,7 @@ async fn test_weekly_gathering_finalization_virtual_wins() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_in_person_wins() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1865,8 +1863,7 @@ async fn test_weekly_gathering_finalization_in_person_wins() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_tie_prefers_virtual() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1903,8 +1900,7 @@ async fn test_weekly_gathering_finalization_tie_prefers_virtual() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_no_votes() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1926,8 +1922,7 @@ async fn test_weekly_gathering_finalization_no_votes() {
 #[tokio::test]
 async fn test_weekly_gathering_finalization_no_host_volunteer() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
@@ -1951,15 +1946,17 @@ async fn test_weekly_gathering_finalization_no_host_volunteer() {
 }
 
 #[tokio::test]
-async fn test_weekly_gathering_finalization_avoids_repeat_host() {
+async fn test_weekly_gathering_finalization_prefers_least_recently_hosted() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
-    middleware.set_last_host(Some("alice".to_string())).await;
 
-    // Both alice and bob volunteer, but alice was last host
+    // alice hosted recently; bob has no history → bob should be chosen
+    let mut history = HashMap::new();
+    history.insert("alice".to_string(), Utc::now());
+    middleware.set_host_history(history).await;
+
     middleware
         .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
         .await;
@@ -1978,7 +1975,6 @@ async fn test_weekly_gathering_finalization_avoids_repeat_host() {
     assert!(cmd.is_ok());
     match cmd.unwrap() {
         Command::SendRoomMessage { body, .. } => {
-            // Should pick bob since alice was last host
             assert!(body.contains("bob"));
         }
         _ => panic!("Expected SendRoomMessage command"),
@@ -1986,15 +1982,17 @@ async fn test_weekly_gathering_finalization_avoids_repeat_host() {
 }
 
 #[tokio::test]
-async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
+async fn test_weekly_gathering_finalization_sole_volunteer_chosen_despite_history() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let config = create_weekly_gathering_config();
-    let middleware = WeeklyGathering::new(cmd_tx, config);
+    let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
-    middleware.set_last_host(Some("alice".to_string())).await;
 
-    // Only alice volunteers, and she was last host - should still pick her
+    // alice hosted recently and is the only volunteer → must still be chosen
+    let mut history = HashMap::new();
+    history.insert("alice".to_string(), Utc::now());
+    middleware.set_host_history(history).await;
+
     middleware
         .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
         .await;
@@ -2010,7 +2008,6 @@ async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
     assert!(cmd.is_ok());
     match cmd.unwrap() {
         Command::SendRoomMessage { body, .. } => {
-            // Should fall back to alice since she's the only volunteer
             assert!(body.contains("alice"));
         }
         _ => panic!("Expected SendRoomMessage command"),
@@ -2020,6 +2017,7 @@ async fn test_weekly_gathering_finalization_fallback_to_repeat_host() {
 #[tokio::test]
 async fn test_weekly_gathering_instantiation_from_config() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
@@ -2039,7 +2037,6 @@ async fn test_weekly_gathering_instantiation_from_config() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
-                avoid_repeat_host: true,
             },
         },
     );
@@ -2047,7 +2044,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
     let config = Config {
         services: HashMap::new(),
         middlewares: middlewares_map,
-        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        data_directory: data_dir.path().to_path_buf(),
         reconnection: ReconnectionConfig::default(),
     };
 
@@ -2062,6 +2059,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
 #[tokio::test]
 async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
@@ -2081,7 +2079,6 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
-                avoid_repeat_host: true,
             },
         },
     );
@@ -2089,7 +2086,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
     let config = Config {
         services: HashMap::new(),
         middlewares: middlewares_map,
-        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        data_directory: data_dir.path().to_path_buf(),
         reconnection: ReconnectionConfig::default(),
     };
 
@@ -2102,6 +2099,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
 #[tokio::test]
 async fn test_weekly_gathering_instantiation_invalid_time_format() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
@@ -2121,7 +2119,6 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
-                avoid_repeat_host: true,
             },
         },
     );
@@ -2129,7 +2126,7 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
     let config = Config {
         services: HashMap::new(),
         middlewares: middlewares_map,
-        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        data_directory: data_dir.path().to_path_buf(),
         reconnection: ReconnectionConfig::default(),
     };
 

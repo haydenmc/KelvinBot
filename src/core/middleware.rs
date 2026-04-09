@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::core::bus::Command;
 use crate::core::config::{Config, MiddlewareKind};
 use crate::core::event::Event;
+use crate::store::PersistentStore;
 use crate::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
     chat_relay::{ChatRelay, ChatRelayConfig},
@@ -162,7 +163,6 @@ pub fn instantiate_middleware_from_config(
                 finalization_virtual_message,
                 finalization_in_person_message,
                 finalization_no_votes_message,
-                avoid_repeat_host,
             } => {
                 // Parse day_of_week string to Weekday
                 let weekday = event_day_of_week.parse::<chrono::Weekday>()
@@ -177,6 +177,9 @@ pub fn instantiate_middleware_from_config(
                         "invalid event_time format '{}' for middleware '{}'. Expected format: HH:MM (e.g., 19:00)",
                         event_time, name
                     ))?;
+
+                let store_path = config.data_directory.join(name).join("store.json");
+                let store = Arc::new(PersistentStore::load(store_path)?);
 
                 Arc::new(WeeklyGathering::new(
                     cmd_tx.clone(),
@@ -194,8 +197,8 @@ pub fn instantiate_middleware_from_config(
                         finalization_virtual_message: finalization_virtual_message.clone(),
                         finalization_in_person_message: finalization_in_person_message.clone(),
                         finalization_no_votes_message: finalization_no_votes_message.clone(),
-                        avoid_repeat_host: *avoid_repeat_host,
                     },
+                    store,
                 ))
             }
             MiddlewareKind::Unknown => {
