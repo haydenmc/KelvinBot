@@ -153,7 +153,8 @@ impl WeeklyGathering {
     /// last-hosted timestamps, one is chosen at random.
     ///
     /// Members of the same household are treated as a single candidate unit. The household's
-    /// effective last-hosted time is the maximum of all its members' times in `host_history`.
+    /// effective last-hosted time is the most recent time any member has hosted — so if one
+    /// member hosted last week, the whole household is considered to have hosted last week.
     /// When a household member hosts, all members should have their history updated together.
     ///
     /// Returns `(user_id, display_name)` where `display_name` is the household name for
