@@ -46,6 +46,14 @@ pub enum ServiceKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct HouseholdCfg {
+    pub name: String,
+    /// Comma-separated list of member user IDs.
+    /// Stored as a string for env-var config compatibility.
+    pub members: String,
+}
+
 #[serde_as]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -114,6 +122,8 @@ pub enum MiddlewareKind {
         finalization_virtual_message: String,
         finalization_in_person_message: String,
         finalization_no_votes_message: String,
+        #[serde(default)]
+        households: HashMap<String, HouseholdCfg>,
     },
     #[serde(other)]
     Unknown,

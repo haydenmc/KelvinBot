@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::bus::Command;
-use crate::core::config::{Config, MiddlewareKind};
+use crate::core::config::{Config, HouseholdCfg, MiddlewareKind};
 use crate::core::event::Event;
 use crate::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
@@ -11,7 +11,7 @@ use crate::middlewares::{
     invite::Invite,
     logger::Logger,
     movie_showtimes::MovieShowtimes,
-    weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig},
+    weekly_gathering::{Household, WeeklyGathering, WeeklyGatheringConfig},
 };
 use crate::store::PersistentStore;
 use anyhow::{Result, bail};
@@ -183,6 +183,7 @@ pub fn instantiate_middleware_from_config(
                 finalization_virtual_message,
                 finalization_in_person_message,
                 finalization_no_votes_message,
+                households,
             } => {
                 // Parse day_of_week string to Weekday
                 let weekday = event_day_of_week.parse::<chrono::Weekday>()
@@ -197,6 +198,19 @@ pub fn instantiate_middleware_from_config(
                         "invalid event_time format '{}' for middleware '{}'. Expected format: HH:MM (e.g., 19:00)",
                         event_time, name
                     ))?;
+
+                let runtime_households: Vec<Household> = households
+                    .values()
+                    .map(|h: &HouseholdCfg| Household {
+                        name: h.name.clone(),
+                        members: h
+                            .members
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    })
+                    .collect();
 
                 Arc::new(WeeklyGathering::new(
                     make_ctx()?,
@@ -214,6 +228,7 @@ pub fn instantiate_middleware_from_config(
                         finalization_virtual_message: finalization_virtual_message.clone(),
                         finalization_in_person_message: finalization_in_person_message.clone(),
                         finalization_no_votes_message: finalization_no_votes_message.clone(),
+                        households: runtime_households,
                     },
                 ))
             }
