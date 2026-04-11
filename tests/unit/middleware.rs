@@ -29,6 +29,10 @@ fn make_ctx(cmd_tx: Sender<Command>) -> MiddlewareContext {
     MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) }
 }
 
+fn make_ctx_with_store(cmd_tx: Sender<Command>, store: Arc<PersistentStore>) -> MiddlewareContext {
+    MiddlewareContext { cmd_tx, store }
+}
+
 #[test]
 fn test_verdict_copy_trait() {
     let verdict1 = Verdict::Continue;
@@ -1574,7 +1578,9 @@ async fn test_attendance_relay_instantiation_from_config() {
 // Weekly Gathering Middleware Tests
 
 use chrono::{NaiveTime, Utc, Weekday};
-use kelvin_bot::middlewares::weekly_gathering::{WeeklyGathering, WeeklyGatheringConfig};
+use kelvin_bot::middlewares::weekly_gathering::{
+    Household, WeeklyGathering, WeeklyGatheringConfig,
+};
 
 fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
     WeeklyGatheringConfig {
@@ -1591,6 +1597,7 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
         finalization_virtual_message: "This week is VIRTUAL! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_in_person_message: "This week is IN-PERSON! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_no_votes_message: "No votes received - gathering cancelled.".to_string(),
+        households: vec![],
     }
 }
 
@@ -1615,7 +1622,7 @@ fn test_weekly_gathering_host_selection_empty() {
     use std::collections::HashSet;
     let volunteers: HashSet<String> = HashSet::new();
     let history = HashMap::new();
-    let result = WeeklyGathering::select_host(&volunteers, &history);
+    let result = WeeklyGathering::select_host(&volunteers, &history, &[]);
     assert!(result.is_none());
 }
 
@@ -1631,8 +1638,8 @@ fn test_weekly_gathering_host_selection_prefers_least_recently_hosted() {
     history.insert("user1".to_string(), Utc::now());
 
     for _ in 0..10 {
-        let result = WeeklyGathering::select_host(&volunteers, &history);
-        assert_eq!(result, Some("user2".to_string()));
+        let result = WeeklyGathering::select_host(&volunteers, &history, &[]);
+        assert_eq!(result.map(|(id, _)| id), Some("user2".to_string()));
     }
 }
 
@@ -1646,8 +1653,8 @@ fn test_weekly_gathering_host_selection_only_candidate_chosen_despite_history() 
     let mut history = HashMap::new();
     history.insert("user1".to_string(), Utc::now());
 
-    let result = WeeklyGathering::select_host(&volunteers, &history);
-    assert_eq!(result, Some("user1".to_string()));
+    let result = WeeklyGathering::select_host(&volunteers, &history, &[]);
+    assert_eq!(result.map(|(id, _)| id), Some("user1".to_string()));
 }
 
 // Functional tests for vote processing and state transitions
@@ -2064,6 +2071,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                households: HashMap::new(),
             },
         },
     );
@@ -2106,6 +2114,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                households: HashMap::new(),
             },
         },
     );
@@ -2146,6 +2155,7 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                households: HashMap::new(),
             },
         },
     );
@@ -2161,4 +2171,212 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
     assert!(result.is_err());
     let err_msg = result.err().unwrap().to_string();
     assert!(err_msg.contains("invalid") && err_msg.contains("time"));
+}
+
+// Household grouping tests
+
+#[test]
+fn test_select_host_household_deduplication() {
+    use std::collections::HashSet;
+
+    // @hayden and @gun are the same household; @alice is solo.
+    // Give the household a very recent history so @alice always wins.
+    let households = vec![Household {
+        name: "Hayden and Gunnar".to_string(),
+        members: vec!["@hayden".to_string(), "@gun".to_string()],
+    }];
+
+    let mut volunteers = HashSet::new();
+    volunteers.insert("@hayden".to_string());
+    volunteers.insert("@gun".to_string());
+    volunteers.insert("@alice".to_string());
+
+    let mut history = HashMap::new();
+    history.insert("@hayden".to_string(), Utc::now());
+    history.insert("@gun".to_string(), Utc::now());
+    // @alice has no history → epoch → always preferred
+
+    for _ in 0..10 {
+        let result = WeeklyGathering::select_host(&volunteers, &history, &households);
+        assert_eq!(result.map(|(id, _)| id), Some("@alice".to_string()));
+    }
+}
+
+#[test]
+fn test_select_host_household_effective_time() {
+    use std::collections::HashSet;
+
+    // Household: [@hayden, @gun]. @gun hosted 1 day ago.
+    // @alice hosted 2 days ago → @alice is older, so @alice should be preferred.
+    let households = vec![Household {
+        name: "Hayden and Gunnar".to_string(),
+        members: vec!["@hayden".to_string(), "@gun".to_string()],
+    }];
+
+    let mut volunteers = HashSet::new();
+    volunteers.insert("@hayden".to_string());
+    volunteers.insert("@alice".to_string());
+
+    let mut history = HashMap::new();
+    let one_day_ago = Utc::now() - chrono::Duration::days(1);
+    let two_days_ago = Utc::now() - chrono::Duration::days(2);
+    history.insert("@gun".to_string(), one_day_ago); // household effective time = 1 day ago
+    history.insert("@alice".to_string(), two_days_ago); // alice = 2 days ago → older → preferred
+
+    for _ in 0..10 {
+        let result = WeeklyGathering::select_host(&volunteers, &history, &households);
+        assert_eq!(result.map(|(id, _)| id), Some("@alice".to_string()));
+    }
+}
+
+#[test]
+fn test_select_host_household_display_name() {
+    use std::collections::HashSet;
+
+    let households = vec![Household {
+        name: "Hayden and Gunnar".to_string(),
+        members: vec!["@hayden".to_string(), "@gun".to_string()],
+    }];
+
+    let mut volunteers = HashSet::new();
+    volunteers.insert("@hayden".to_string());
+
+    let history = HashMap::new();
+
+    let result = WeeklyGathering::select_host(&volunteers, &history, &households);
+    assert!(result.is_some());
+    let (user_id, display_name) = result.unwrap();
+    assert_eq!(user_id, "@hayden");
+    assert_eq!(display_name, "Hayden and Gunnar");
+}
+
+#[tokio::test]
+async fn test_finalization_propagates_history_to_all_household_members() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let store = Arc::new(PersistentStore::in_memory());
+
+    let mut config = create_weekly_gathering_config();
+    config.households = vec![Household {
+        name: "Hayden and Gunnar".to_string(),
+        members: vec!["@hayden".to_string(), "@gun".to_string()],
+    }];
+
+    let middleware = WeeklyGathering::new(make_ctx_with_store(cmd_tx, store.clone()), config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // @hayden is the only host volunteer (but @gun is in the same household)
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "@hayden".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "@hayden".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    // Drain the SendRoomMessage command
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    let _ = cmd_rx.try_recv();
+
+    // Both household members should have the same timestamp in host_history
+    let host_history: HashMap<String, chrono::DateTime<Utc>> =
+        store.get("host_history").await.expect("host history should be persisted");
+
+    assert!(host_history.contains_key("@hayden"), "@hayden should be in host history");
+    assert!(host_history.contains_key("@gun"), "@gun should be in host history (same household)");
+    assert_eq!(
+        host_history["@hayden"], host_history["@gun"],
+        "both household members should have the same timestamp"
+    );
+}
+
+#[tokio::test]
+async fn test_finalization_household_display_name_in_message() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+
+    let mut config = create_weekly_gathering_config();
+    config.households = vec![Household {
+        name: "Hayden and Gunnar".to_string(),
+        members: vec!["@hayden".to_string(), "@gun".to_string()],
+    }];
+
+    let middleware = WeeklyGathering::new(make_ctx(cmd_tx), config);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "@hayden".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "@hayden".to_string())
+        .await;
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(
+                body.contains("Hayden and Gunnar"),
+                "message should use household display name, got: {body}"
+            );
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_instantiation_with_households() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    use kelvin_bot::core::config::HouseholdCfg;
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "test_weekly_gathering".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::WeeklyGathering {
+                service_id: "matrix".to_string(),
+                room_id: "!gathering:matrix.org".to_string(),
+                event_day_of_week: "Saturday".to_string(),
+                event_time: "19:00".to_string(),
+                announce_minutes_before: 4320,
+                finalize_minutes_before: 120,
+                reaction_virtual: "💻".to_string(),
+                reaction_in_person: "🏠".to_string(),
+                reaction_host: "🙋".to_string(),
+                announcement_message: "Weekly poll!".to_string(),
+                finalization_virtual_message: "Virtual!".to_string(),
+                finalization_in_person_message: "In-person!".to_string(),
+                finalization_no_votes_message: "No votes!".to_string(),
+                households: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "h1".to_string(),
+                        HouseholdCfg {
+                            name: "Hayden and Gunnar".to_string(),
+                            members: "@hayden:warmitup.chat,@gun:warmitup.chat".to_string(),
+                        },
+                    );
+                    m
+                },
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    assert_ok!(&result);
+    assert_eq!(result.unwrap().len(), 1);
 }

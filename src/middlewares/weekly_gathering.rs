@@ -14,6 +14,12 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone)]
+pub struct Household {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
 pub struct WeeklyGatheringConfig {
     pub service_id: String,
     pub room_id: String,
@@ -28,6 +34,7 @@ pub struct WeeklyGatheringConfig {
     pub finalization_virtual_message: String,
     pub finalization_in_person_message: String,
     pub finalization_no_votes_message: String,
+    pub households: Vec<Household>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,29 +151,81 @@ impl WeeklyGathering {
     /// Volunteers absent from `host_history` are treated as having never hosted and are
     /// always preferred over those with any recorded history. Among candidates with equal
     /// last-hosted timestamps, one is chosen at random.
+    ///
+    /// Members of the same household are treated as a single candidate unit. The household's
+    /// effective last-hosted time is the most recent time any member has hosted — so if one
+    /// member hosted last week, the whole household is considered to have hosted last week.
+    /// When a household member hosts, all members should have their history updated together.
+    ///
+    /// Returns `(user_id, display_name)` where `display_name` is the household name for
+    /// household volunteers, or the user_id for solo volunteers.
     pub fn select_host(
         volunteers: &HashSet<String>,
         host_history: &HashMap<String, DateTime<Utc>>,
-    ) -> Option<String> {
+        households: &[Household],
+    ) -> Option<(String, String)> {
         if volunteers.is_empty() {
             return None;
         }
 
         // Treat "never hosted" as the Unix epoch so they sort before anyone who has hosted.
         let epoch = DateTime::<Utc>::UNIX_EPOCH;
-        let min_time = volunteers
-            .iter()
-            .map(|v| host_history.get(v).copied().unwrap_or(epoch))
-            .min()
-            .expect("volunteers is non-empty");
 
-        let candidates: Vec<&String> = volunteers
-            .iter()
-            .filter(|v| host_history.get(*v).copied().unwrap_or(epoch) == min_time)
-            .collect();
+        struct CandidateUnit {
+            effective_time: DateTime<Utc>,
+            volunteering_members: Vec<String>,
+            display_name: String,
+        }
+
+        let mut seen_households: HashSet<String> = HashSet::new();
+        let mut units: Vec<CandidateUnit> = Vec::new();
+
+        for volunteer in volunteers {
+            if let Some(household) = households.iter().find(|h| h.members.contains(volunteer)) {
+                if seen_households.contains(&household.name) {
+                    continue; // Already added this household as a unit
+                }
+                seen_households.insert(household.name.clone());
+
+                // Effective time = max of all household members' history
+                let effective_time = household
+                    .members
+                    .iter()
+                    .map(|m| host_history.get(m).copied().unwrap_or(epoch))
+                    .max()
+                    .unwrap_or(epoch);
+
+                // Only the members who actually volunteered are candidates for selection
+                let volunteering_members: Vec<String> =
+                    household.members.iter().filter(|m| volunteers.contains(*m)).cloned().collect();
+
+                units.push(CandidateUnit {
+                    effective_time,
+                    volunteering_members,
+                    display_name: household.name.clone(),
+                });
+            } else {
+                // Solo volunteer — not in any household
+                units.push(CandidateUnit {
+                    effective_time: host_history.get(volunteer).copied().unwrap_or(epoch),
+                    volunteering_members: vec![volunteer.clone()],
+                    display_name: volunteer.clone(),
+                });
+            }
+        }
+
+        let min_time = units.iter().map(|u| u.effective_time).min().expect("units is non-empty");
+
+        let tied_units: Vec<&CandidateUnit> =
+            units.iter().filter(|u| u.effective_time == min_time).collect();
 
         let mut rng = rand::thread_rng();
-        candidates.choose(&mut rng).map(|s| (*s).clone())
+        let chosen_unit = tied_units.choose(&mut rng)?;
+
+        // Pick one of the volunteering members from the chosen unit at random
+        let user_id = chosen_unit.volunteering_members.choose(&mut rng)?.clone();
+
+        Some((user_id, chosen_unit.display_name.clone()))
     }
 
     /// Post the announcement message and capture the message ID
@@ -240,9 +299,13 @@ impl WeeklyGathering {
         let in_person_count = state.in_person_votes.len();
 
         // Select host
-        let host = Self::select_host(&state.host_volunteers, &host_history);
+        let host =
+            Self::select_host(&state.host_volunteers, &host_history, &self.config.households);
 
-        let host_display = host.as_deref().unwrap_or("No host volunteered");
+        let host_display = match &host {
+            Some((_, display)) => display.as_str(),
+            None => "No host volunteered",
+        };
 
         // Choose message based on vote outcome
         let template = if virtual_count == 0 && in_person_count == 0 {
@@ -278,8 +341,19 @@ impl WeeklyGathering {
         }
 
         // Persist the newly selected host so future weeks prefer someone else.
-        if let Some(ref selected_host) = host {
-            host_history.insert(selected_host.clone(), Utc::now());
+        // If the host is part of a household, update all members at the same timestamp.
+        if let Some((ref selected_user_id, _)) = host {
+            let now = Utc::now();
+            let members_to_update: Vec<String> = self
+                .config
+                .households
+                .iter()
+                .find(|h| h.members.contains(selected_user_id))
+                .map(|h| h.members.clone())
+                .unwrap_or_else(|| vec![selected_user_id.clone()]);
+            for member in &members_to_update {
+                host_history.insert(member.clone(), now);
+            }
             if let Err(e) = self.store.set("host_history", &host_history).await {
                 tracing::error!(error=%e, "failed to persist host history");
             }
