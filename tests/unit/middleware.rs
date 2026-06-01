@@ -1720,13 +1720,33 @@ async fn test_weekly_gathering_records_in_person_votes() {
 }
 
 #[tokio::test]
-async fn test_weekly_gathering_switching_vote_removes_previous() {
+async fn test_weekly_gathering_dual_vote_counts_for_both() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let middleware = make_weekly_gathering(cmd_tx);
 
     middleware.set_announced("msg123".to_string()).await;
 
-    // Alice votes virtual first
+    // Alice reacts with both virtual and in-person — she should count in both sets
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "alice".to_string())
+        .await;
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 1);
+    assert_eq!(in_person_count, 1);
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_explicit_reaction_removal_switches_vote() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let middleware = make_weekly_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Alice votes virtual
     middleware
         .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
         .await;
@@ -1735,7 +1755,14 @@ async fn test_weekly_gathering_switching_vote_removes_previous() {
     assert_eq!(virtual_count, 1);
     assert_eq!(in_person_count, 0);
 
-    // Alice switches to in-person - should remove her virtual vote
+    // Alice explicitly removes her virtual reaction then adds in-person
+    middleware
+        .test_process_reaction_removed(
+            Some("msg123".to_string()),
+            Some("💻".to_string()),
+            "alice".to_string(),
+        )
+        .await;
     middleware
         .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "alice".to_string())
         .await;
@@ -2324,6 +2351,84 @@ async fn test_finalization_household_display_name_in_message() {
                 body.contains("Hayden and Gunnar"),
                 "message should use household display name, got: {body}"
             );
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_virtual_wins_when_some_voted_both() {
+    // Regression: users who reacted with both emojis previously had their virtual vote
+    // silently removed, causing in-person to win despite virtual having more raw reactions.
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let middleware = make_weekly_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // 4 users react 💻 (virtual). 2 of them also react 🏠.
+    // Virtual raw reactions: 4, in-person raw reactions: 2 → virtual should win.
+    for user in ["alice", "bob", "charlie", "dave"] {
+        middleware
+            .test_process_reaction_added("msg123".to_string(), "💻".to_string(), user.to_string())
+            .await;
+    }
+    for user in ["alice", "bob"] {
+        middleware
+            .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), user.to_string())
+            .await;
+    }
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 4);
+    assert_eq!(in_person_count, 2);
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("VIRTUAL"), "virtual should win with 4 vs 2, got: {body}");
+        }
+        _ => panic!("Expected SendRoomMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_finalization_in_person_wins_when_some_voted_both() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let middleware = make_weekly_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // 4 users react 🏠. 2 of them also react 💻.
+    // In-person raw reactions: 4, virtual raw reactions: 2 → in-person should win.
+    for user in ["alice", "bob", "charlie", "dave"] {
+        middleware
+            .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), user.to_string())
+            .await;
+    }
+    for user in ["alice", "bob"] {
+        middleware
+            .test_process_reaction_added("msg123".to_string(), "💻".to_string(), user.to_string())
+            .await;
+    }
+
+    let (virtual_count, in_person_count, _) = middleware.get_vote_counts().await;
+    assert_eq!(virtual_count, 2);
+    assert_eq!(in_person_count, 4);
+
+    middleware.post_finalization().await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    let cmd = cmd_rx.try_recv();
+    assert!(cmd.is_ok());
+    match cmd.unwrap() {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("IN-PERSON"), "in-person should win with 4 vs 2, got: {body}");
         }
         _ => panic!("Expected SendRoomMessage command"),
     }
