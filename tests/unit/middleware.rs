@@ -2369,20 +2369,12 @@ async fn test_weekly_gathering_finalization_virtual_wins_when_some_voted_both() 
     // Virtual raw reactions: 4, in-person raw reactions: 2 → virtual should win.
     for user in ["alice", "bob", "charlie", "dave"] {
         middleware
-            .test_process_reaction_added(
-                "msg123".to_string(),
-                "💻".to_string(),
-                user.to_string(),
-            )
+            .test_process_reaction_added("msg123".to_string(), "💻".to_string(), user.to_string())
             .await;
     }
     for user in ["alice", "bob"] {
         middleware
-            .test_process_reaction_added(
-                "msg123".to_string(),
-                "🏠".to_string(),
-                user.to_string(),
-            )
+            .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), user.to_string())
             .await;
     }
 
@@ -2415,20 +2407,12 @@ async fn test_weekly_gathering_finalization_in_person_wins_when_some_voted_both(
     // In-person raw reactions: 4, virtual raw reactions: 2 → in-person should win.
     for user in ["alice", "bob", "charlie", "dave"] {
         middleware
-            .test_process_reaction_added(
-                "msg123".to_string(),
-                "🏠".to_string(),
-                user.to_string(),
-            )
+            .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), user.to_string())
             .await;
     }
     for user in ["alice", "bob"] {
         middleware
-            .test_process_reaction_added(
-                "msg123".to_string(),
-                "💻".to_string(),
-                user.to_string(),
-            )
+            .test_process_reaction_added("msg123".to_string(), "💻".to_string(), user.to_string())
             .await;
     }
 
