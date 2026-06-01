@@ -26,6 +26,7 @@ FROM debian:bookworm-slim
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
