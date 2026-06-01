@@ -396,13 +396,9 @@ impl WeeklyGathering {
                 // Process based on reaction type
                 if key == self.config.reaction_virtual {
                     state.virtual_votes.insert(sender_id.clone());
-                    // Remove from in-person if switching
-                    state.in_person_votes.remove(&sender_id);
                     tracing::debug!(sender_id=%sender_id, "virtual vote recorded");
                 } else if key == self.config.reaction_in_person {
                     state.in_person_votes.insert(sender_id.clone());
-                    // Remove from virtual if switching
-                    state.virtual_votes.remove(&sender_id);
                     tracing::debug!(sender_id=%sender_id, "in-person vote recorded");
                 } else if key == self.config.reaction_host {
                     state.host_volunteers.insert(sender_id.clone());
