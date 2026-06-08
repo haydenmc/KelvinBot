@@ -499,7 +499,7 @@ impl MatrixService {
                                 format: MediaFormat::File,
                             };
                             let image_data = match _client.media().get_media_content(&request, false).await {
-                                Ok(bytes) => Some(bytes),
+                                Ok(bytes) => Some(Arc::from(bytes)),
                                 Err(e) => {
                                     warn!(error=%e, "failed to fetch image content for relay");
                                     None

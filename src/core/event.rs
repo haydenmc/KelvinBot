@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +69,7 @@ pub enum EventKind {
         /// Pre-fetched raw image bytes. Populated by services that have
         /// authenticated access to the media (e.g. Matrix). When present,
         /// the relay uses these directly instead of re-fetching via source_url.
-        image_data: Option<Vec<u8>>,
+        image_data: Option<Arc<[u8]>>,
     },
 }
 

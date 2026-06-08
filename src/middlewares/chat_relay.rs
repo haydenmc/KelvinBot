@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
@@ -95,14 +97,14 @@ impl ChatRelay {
         sender_display_name: Option<String>,
         body: String,
         source_url: String,
-        image_data: Option<Vec<u8>>,
+        image_data: Option<Arc<[u8]>>,
         thumbnail_max_width: u32,
         thumbnail_max_height: u32,
         thumbnail_jpeg_quality: u8,
     ) {
         // Use pre-fetched bytes when available (e.g. from an authenticated Matrix client).
         // Fall back to an HTTP fetch for services that don't pre-fetch.
-        let raw_bytes: Vec<u8> = if let Some(data) = image_data {
+        let raw_bytes: Arc<[u8]> = if let Some(data) = image_data {
             data
         } else {
             let response = match http_client.get(&source_url).send().await {
@@ -118,7 +120,7 @@ impl ChatRelay {
             };
             match response.error_for_status() {
                 Ok(r) => match r.bytes().await {
-                    Ok(b) => b.to_vec(),
+                    Ok(b) => Arc::from(b.as_ref()),
                     Err(e) => {
                         error!(error=%e, "failed to read image bytes");
                         Self::send_text_fallback(
@@ -273,7 +275,7 @@ impl Middleware for ChatRelay {
                 is_self,
                 body,
                 source_url,
-                image_data,
+                image_data, // Option<Arc<[u8]>> — clone is one atomic increment
                 ..
             } => {
                 if let Some(ref expected_room) = self.source_room_id
