@@ -506,6 +506,9 @@ async fn test_chat_relay_middleware_run() {
             dest_service_id: "dest".to_string(),
             dest_room_id: "!dest:example.com".to_string(),
             prefix_tag: "Test".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
     let cancel_token = CancellationToken::new();
@@ -527,6 +530,9 @@ async fn test_chat_relay_forwards_message_with_correct_format() {
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!voice:matrix.org".to_string(),
             prefix_tag: "Mumble".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
 
@@ -573,6 +579,9 @@ async fn test_chat_relay_filters_bot_messages() {
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!voice:matrix.org".to_string(),
             prefix_tag: "Mumble".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
 
@@ -609,6 +618,9 @@ async fn test_chat_relay_ignores_wrong_service() {
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!voice:matrix.org".to_string(),
             prefix_tag: "Mumble".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
 
@@ -644,6 +656,9 @@ async fn test_chat_relay_filters_by_source_room() {
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!announcements:matrix.org".to_string(),
             prefix_tag: "General".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
 
@@ -707,6 +722,9 @@ async fn test_chat_relay_ignores_direct_messages() {
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!voice:matrix.org".to_string(),
             prefix_tag: "Mumble".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
 
@@ -742,6 +760,9 @@ async fn test_chat_relay_handles_missing_display_name() {
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!voice:matrix.org".to_string(),
             prefix_tag: "Mumble".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
         },
     );
 
@@ -787,6 +808,9 @@ async fn test_chat_relay_instantiation_from_config() {
                 dest_service_id: "matrix_main".to_string(),
                 dest_room_id: "!voice:matrix.org".to_string(),
                 prefix_tag: "Mumble".to_string(),
+                thumbnail_max_width: 200,
+                thumbnail_max_height: 150,
+                thumbnail_jpeg_quality: 60,
             },
         },
     );

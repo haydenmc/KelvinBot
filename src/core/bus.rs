@@ -52,6 +52,14 @@ pub enum Command {
         event_id: String,
         key: String,
     },
+    SendRoomImage {
+        service_id: ServiceId,
+        room_id: String,
+        caption: String,
+        source_url: String,
+        thumbnail_data: Vec<u8>,
+        thumbnail_mimetype: String,
+    },
 }
 
 // Implement Debug manually since oneshot::Sender doesn't implement Clone
@@ -110,6 +118,12 @@ impl std::fmt::Debug for Command {
                 .field("room_id", room_id)
                 .field("event_id", event_id)
                 .field("key", key)
+                .finish(),
+            Command::SendRoomImage { service_id, room_id, caption, .. } => f
+                .debug_struct("SendRoomImage")
+                .field("service_id", service_id)
+                .field("room_id", room_id)
+                .field("caption", caption)
                 .finish(),
         }
     }
@@ -315,6 +329,7 @@ impl Bus {
                         Command::EditMessage { service_id, .. } => service_id.clone(),
                         Command::GenerateInviteToken { service_id, .. } => service_id.clone(),
                         Command::AddReaction { service_id, .. } => service_id.clone(),
+                        Command::SendRoomImage { service_id, .. } => service_id.clone(),
                     };
 
                     // Dispatch command to appropriate service

@@ -133,6 +133,9 @@ pub fn instantiate_middleware_from_config(
                 dest_service_id,
                 dest_room_id,
                 prefix_tag,
+                thumbnail_max_width,
+                thumbnail_max_height,
+                thumbnail_jpeg_quality,
             } => Arc::new(ChatRelay::new(
                 make_ctx()?,
                 ChatRelayConfig {
@@ -141,6 +144,9 @@ pub fn instantiate_middleware_from_config(
                     dest_service_id: dest_service_id.clone(),
                     dest_room_id: dest_room_id.clone(),
                     prefix_tag: prefix_tag.clone(),
+                    thumbnail_max_width: *thumbnail_max_width,
+                    thumbnail_max_height: *thumbnail_max_height,
+                    thumbnail_jpeg_quality: *thumbnail_jpeg_quality,
                 },
             )),
             MiddlewareKind::EzStreamAnnounce {

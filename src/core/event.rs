@@ -57,6 +57,20 @@ pub enum EventKind {
         sender_id: String,
         is_self: bool,
     },
+    RoomImage {
+        room_id: String,
+        sender_id: String,
+        sender_display_name: Option<String>,
+        is_self: bool,
+        is_local_user: bool,
+        body: String,
+        source_url: String,
+        mimetype: Option<String>,
+        /// Pre-fetched raw image bytes. Populated by services that have
+        /// authenticated access to the media (e.g. Matrix). When present,
+        /// the relay uses these directly instead of re-fetching via source_url.
+        image_data: Option<Vec<u8>>,
+    },
 }
 
 impl fmt::Display for Event {
@@ -77,6 +91,9 @@ impl fmt::Display for Event {
             }
             EventKind::ReactionRemoved { room_id, sender_id, event_id, .. } => {
                 write!(f, "[React-] {room_id}: {sender_id} removed reaction {event_id}")
+            }
+            EventKind::RoomImage { room_id, body, .. } => {
+                write!(f, "[IMG] {room_id}: {body}")
             }
         }
     }
