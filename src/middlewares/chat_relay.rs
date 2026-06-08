@@ -63,6 +63,7 @@ impl ChatRelay {
         format!("[{}] {}: {}", prefix_tag, sender_display, body)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_text_fallback(
         cmd_tx: &Sender<Command>,
         dest_service_id: &ServiceId,
@@ -73,7 +74,8 @@ impl ChatRelay {
         body: &str,
         source_url: &str,
     ) {
-        let caption = Self::format_relayed_message(prefix_tag, sender_id, sender_display_name, body);
+        let caption =
+            Self::format_relayed_message(prefix_tag, sender_id, sender_display_name, body);
         let text = format!("{caption} [image: {source_url}]");
         let command = Command::SendRoomMessage {
             service_id: dest_service_id.clone(),
@@ -87,6 +89,7 @@ impl ChatRelay {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn relay_image(
         http_client: reqwest::Client,
         cmd_tx: Sender<Command>,
@@ -112,9 +115,16 @@ impl ChatRelay {
                 Err(e) => {
                     error!(error=%e, source_url=%source_url, "failed to fetch image for relay");
                     Self::send_text_fallback(
-                        &cmd_tx, &dest_service_id, &dest_room_id, &prefix_tag,
-                        &sender_id, sender_display_name.as_deref(), &body, &source_url,
-                    ).await;
+                        &cmd_tx,
+                        &dest_service_id,
+                        &dest_room_id,
+                        &prefix_tag,
+                        &sender_id,
+                        sender_display_name.as_deref(),
+                        &body,
+                        &source_url,
+                    )
+                    .await;
                     return;
                 }
             };
@@ -124,18 +134,32 @@ impl ChatRelay {
                     Err(e) => {
                         error!(error=%e, "failed to read image bytes");
                         Self::send_text_fallback(
-                            &cmd_tx, &dest_service_id, &dest_room_id, &prefix_tag,
-                            &sender_id, sender_display_name.as_deref(), &body, &source_url,
-                        ).await;
+                            &cmd_tx,
+                            &dest_service_id,
+                            &dest_room_id,
+                            &prefix_tag,
+                            &sender_id,
+                            sender_display_name.as_deref(),
+                            &body,
+                            &source_url,
+                        )
+                        .await;
                         return;
                     }
                 },
                 Err(e) => {
                     error!(error=%e, source_url=%source_url, "image fetch returned error status");
                     Self::send_text_fallback(
-                        &cmd_tx, &dest_service_id, &dest_room_id, &prefix_tag,
-                        &sender_id, sender_display_name.as_deref(), &body, &source_url,
-                    ).await;
+                        &cmd_tx,
+                        &dest_service_id,
+                        &dest_room_id,
+                        &prefix_tag,
+                        &sender_id,
+                        sender_display_name.as_deref(),
+                        &body,
+                        &source_url,
+                    )
+                    .await;
                     return;
                 }
             }
@@ -150,9 +174,7 @@ impl ChatRelay {
         let thumbnail_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
             use image::{ImageEncoder, ImageReader, codecs::jpeg::JpegEncoder};
             use std::io::Cursor;
-            let img = ImageReader::new(Cursor::new(&raw_bytes))
-                .with_guessed_format()?
-                .decode()?;
+            let img = ImageReader::new(Cursor::new(&raw_bytes)).with_guessed_format()?.decode()?;
             let thumb = img.thumbnail(thumbnail_max_width, thumbnail_max_height).into_rgb8();
             let mut out = Vec::new();
             JpegEncoder::new_with_quality(&mut out, thumbnail_jpeg_quality).write_image(
@@ -162,7 +184,8 @@ impl ChatRelay {
                 image::ExtendedColorType::Rgb8,
             )?;
             Ok(out)
-        }).await;
+        })
+        .await;
 
         let thumbnail_data = match thumbnail_result {
             Ok(Ok(data)) => {
@@ -172,17 +195,31 @@ impl ChatRelay {
             Ok(Err(e)) => {
                 error!(error=%e, "failed to process image thumbnail");
                 Self::send_text_fallback(
-                    &cmd_tx, &dest_service_id, &dest_room_id, &prefix_tag,
-                    &sender_id, sender_display_name.as_deref(), &body, &source_url,
-                ).await;
+                    &cmd_tx,
+                    &dest_service_id,
+                    &dest_room_id,
+                    &prefix_tag,
+                    &sender_id,
+                    sender_display_name.as_deref(),
+                    &body,
+                    &source_url,
+                )
+                .await;
                 return;
             }
             Err(e) => {
                 error!(error=%e, "image processing task panicked");
                 Self::send_text_fallback(
-                    &cmd_tx, &dest_service_id, &dest_room_id, &prefix_tag,
-                    &sender_id, sender_display_name.as_deref(), &body, &source_url,
-                ).await;
+                    &cmd_tx,
+                    &dest_service_id,
+                    &dest_room_id,
+                    &prefix_tag,
+                    &sender_id,
+                    sender_display_name.as_deref(),
+                    &body,
+                    &source_url,
+                )
+                .await;
                 return;
             }
         };
@@ -228,7 +265,14 @@ impl Middleware for ChatRelay {
         }
 
         match &event.kind {
-            EventKind::RoomMessage { room_id, body, sender_id, sender_display_name, is_self, .. } => {
+            EventKind::RoomMessage {
+                room_id,
+                body,
+                sender_id,
+                sender_display_name,
+                is_self,
+                ..
+            } => {
                 if let Some(ref expected_room) = self.source_room_id
                     && room_id != expected_room
                 {

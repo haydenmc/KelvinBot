@@ -12,8 +12,8 @@ use matrix_sdk::{
             room::{
                 member::{MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent},
                 message::{
-                    MessageType, OriginalSyncRoomMessageEvent,
-                    RoomMessageEventContent, TextMessageEventContent,
+                    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+                    TextMessageEventContent,
                 },
                 redaction::OriginalSyncRoomRedactionEvent,
             },
@@ -32,7 +32,6 @@ use crate::core::{
     event::{Event, EventKind},
     service::{Service, ServiceId},
 };
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MatrixUserId(pub String);
@@ -427,104 +426,111 @@ impl MatrixService {
                 let evt_tx = evt_tx.clone();
                 let bot_user_id_for_handler = bot_user_id_for_handler.clone();
                 async move {
-                if room.state() != RoomState::Joined {
-                    return;
-                }
-
-                let Ok(is_direct) = room.is_direct().await else {
-                    warn!("could not determine if message was a direct message");
-                    return;
-                };
-
-                // Check if user is from the same homeserver as the bot
-                let is_local_user =
-                    event.sender.server_name() == bot_user_id_for_handler.server_name();
-
-                // Get sender display name
-                let sender_display_name = room
-                    .get_member(&event.sender)
-                    .await
-                    .ok()
-                    .and_then(|m| m)
-                    .and_then(|m| m.display_name().map(|s| s.to_string()));
-
-                let sender_id = event.sender.to_string();
-                let is_self = event.sender == bot_user_id_for_handler;
-
-                match event.content.msgtype {
-                    MessageType::Text(text_content) => match is_direct {
-                        true => {
-                            let event = Event {
-                                service_id,
-                                kind: EventKind::DirectMessage {
-                                    user_id: sender_id.clone(),
-                                    body: text_content.body,
-                                    is_local_user,
-                                    sender_id,
-                                    sender_display_name: sender_display_name.clone(),
-                                    is_self,
-                                },
-                            };
-                            let _ = evt_tx.send(event).await;
-                        }
-                        false => {
-                            let event = Event {
-                                service_id,
-                                kind: EventKind::RoomMessage {
-                                    room_id: room.room_id().to_string(),
-                                    body: text_content.body,
-                                    is_local_user,
-                                    sender_id,
-                                    sender_display_name,
-                                    is_self,
-                                },
-                            };
-                            let _ = evt_tx.send(event).await;
-                        }
-                    },
-                    MessageType::Image(image_content) => {
-                        if is_direct {
-                            return; // only relay room images, not DM images
-                        }
-                        let mimetype = image_content.info.as_ref().and_then(|i| i.mimetype.clone());
-                        let room_id = room.room_id().to_string();
-                        let source_url = format!("https://matrix.to/#/{}/{}", room_id, event.event_id);
-
-                        // Fetch image bytes using the authenticated SDK client.
-                        // Spawned so the event handler returns promptly.
-                        tokio::spawn(async move {
-                            use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
-                            let request = MediaRequestParameters {
-                                source: image_content.source.clone(),
-                                format: MediaFormat::File,
-                            };
-                            let image_data = match _client.media().get_media_content(&request, false).await {
-                                Ok(bytes) => Some(Arc::from(bytes)),
-                                Err(e) => {
-                                    warn!(error=%e, "failed to fetch image content for relay");
-                                    None
-                                }
-                            };
-                            let event = Event {
-                                service_id,
-                                kind: EventKind::RoomImage {
-                                    room_id,
-                                    sender_id,
-                                    sender_display_name,
-                                    is_self,
-                                    is_local_user,
-                                    body: image_content.body,
-                                    source_url,
-                                    mimetype,
-                                    image_data,
-                                },
-                            };
-                            let _ = evt_tx.send(event).await;
-                        });
+                    if room.state() != RoomState::Joined {
+                        return;
                     }
-                    _ => {} // ignore other message types
+
+                    let Ok(is_direct) = room.is_direct().await else {
+                        warn!("could not determine if message was a direct message");
+                        return;
+                    };
+
+                    // Check if user is from the same homeserver as the bot
+                    let is_local_user =
+                        event.sender.server_name() == bot_user_id_for_handler.server_name();
+
+                    // Get sender display name
+                    let sender_display_name = room
+                        .get_member(&event.sender)
+                        .await
+                        .ok()
+                        .and_then(|m| m)
+                        .and_then(|m| m.display_name().map(|s| s.to_string()));
+
+                    let sender_id = event.sender.to_string();
+                    let is_self = event.sender == bot_user_id_for_handler;
+
+                    match event.content.msgtype {
+                        MessageType::Text(text_content) => match is_direct {
+                            true => {
+                                let event = Event {
+                                    service_id,
+                                    kind: EventKind::DirectMessage {
+                                        user_id: sender_id.clone(),
+                                        body: text_content.body,
+                                        is_local_user,
+                                        sender_id,
+                                        sender_display_name: sender_display_name.clone(),
+                                        is_self,
+                                    },
+                                };
+                                let _ = evt_tx.send(event).await;
+                            }
+                            false => {
+                                let event = Event {
+                                    service_id,
+                                    kind: EventKind::RoomMessage {
+                                        room_id: room.room_id().to_string(),
+                                        body: text_content.body,
+                                        is_local_user,
+                                        sender_id,
+                                        sender_display_name,
+                                        is_self,
+                                    },
+                                };
+                                let _ = evt_tx.send(event).await;
+                            }
+                        },
+                        MessageType::Image(image_content) => {
+                            if is_direct {
+                                return; // only relay room images, not DM images
+                            }
+                            let mimetype =
+                                image_content.info.as_ref().and_then(|i| i.mimetype.clone());
+                            let room_id = room.room_id().to_string();
+                            let source_url =
+                                format!("https://matrix.to/#/{}/{}", room_id, event.event_id);
+
+                            // Fetch image bytes using the authenticated SDK client.
+                            // Spawned so the event handler returns promptly.
+                            tokio::spawn(async move {
+                                use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+                                let request = MediaRequestParameters {
+                                    source: image_content.source.clone(),
+                                    format: MediaFormat::File,
+                                };
+                                let image_data = match _client
+                                    .media()
+                                    .get_media_content(&request, false)
+                                    .await
+                                {
+                                    Ok(bytes) => Some(Arc::from(bytes)),
+                                    Err(e) => {
+                                        warn!(error=%e, "failed to fetch image content for relay");
+                                        None
+                                    }
+                                };
+                                let event = Event {
+                                    service_id,
+                                    kind: EventKind::RoomImage {
+                                        room_id,
+                                        sender_id,
+                                        sender_display_name,
+                                        is_self,
+                                        is_local_user,
+                                        body: image_content.body,
+                                        source_url,
+                                        mimetype,
+                                        image_data,
+                                    },
+                                };
+                                let _ = evt_tx.send(event).await;
+                            });
+                        }
+                        _ => {} // ignore other message types
+                    }
                 }
-            }},
+            },
         );
 
         // Handle reactions
