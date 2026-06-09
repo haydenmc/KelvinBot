@@ -97,6 +97,12 @@ pub enum MiddlewareKind {
         dest_service_id: String,
         dest_room_id: String,
         prefix_tag: String,
+        #[serde(default = "default_thumbnail_max_width")]
+        thumbnail_max_width: u32,
+        #[serde(default = "default_thumbnail_max_height")]
+        thumbnail_max_height: u32,
+        #[serde(default = "default_thumbnail_jpeg_quality")]
+        thumbnail_jpeg_quality: u8,
     },
     EzStreamAnnounce {
         websocket_url: String,
@@ -142,6 +148,18 @@ pub struct Config {
 
 fn default_data_directory() -> PathBuf {
     PathBuf::from("./data")
+}
+
+fn default_thumbnail_max_width() -> u32 {
+    480
+}
+
+fn default_thumbnail_max_height() -> u32 {
+    360
+}
+
+fn default_thumbnail_jpeg_quality() -> u8 {
+    75
 }
 
 // Reconnection configuration with exponential backoff

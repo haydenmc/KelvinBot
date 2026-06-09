@@ -511,6 +511,44 @@ impl Service for MumbleService {
             Command::AddReaction { .. } => {
                 warn!("mumble does not support reactions");
             }
+            Command::SendRoomImage {
+                room_id,
+                caption,
+                source_url,
+                thumbnail_data,
+                thumbnail_mimetype,
+                ..
+            } => {
+                debug!(room_id=%room_id, "sending image to mumble channel");
+
+                let state = self.state.lock().await;
+                let result = match state.channel_ids.get(&room_id) {
+                    Some(channel_id) => {
+                        use base64::Engine as _;
+                        let encoded =
+                            base64::engine::general_purpose::STANDARD.encode(&thumbnail_data);
+                        let html = format!(
+                            "{caption}<br/>\
+                             <img src=\"data:{thumbnail_mimetype};base64,{encoded}\"/><br/>\
+                             <a href=\"{source_url}\">View full image</a>"
+                        );
+
+                        let mut msg = TextMessage::new();
+                        msg.set_message(html);
+                        msg.channel_id = vec![*channel_id];
+
+                        match tx.send(ControlPacket::TextMessage(Box::new(msg))).await {
+                            Ok(_) => Ok(String::new()),
+                            Err(e) => Err(anyhow!("failed to send image message: {}", e)),
+                        }
+                    }
+                    None => Err(anyhow!("unknown channel: {}", room_id)),
+                };
+
+                if let Err(e) = result {
+                    error!(error=%e, room_id=%room_id, "failed to relay image to mumble");
+                }
+            }
         }
 
         Ok(())

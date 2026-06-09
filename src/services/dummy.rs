@@ -81,6 +81,9 @@ impl Service for DummyService {
                 info!(service=%self.id, room_id=%room_id, event_id=%event_id, key=%key,
                       "dummy service: would add reaction");
             }
+            Command::SendRoomImage { room_id, caption, .. } => {
+                info!(service=%self.id, room_id=%room_id, caption=%caption, "dummy service: would send room image");
+            }
         }
         Ok(())
     }

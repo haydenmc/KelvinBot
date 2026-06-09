@@ -35,7 +35,8 @@ impl Middleware for Echo {
             EventKind::RoomMessage { body, is_self, .. } => (body, *is_self),
             EventKind::UserListUpdate { .. }
             | EventKind::ReactionAdded { .. }
-            | EventKind::ReactionRemoved { .. } => return Ok(Verdict::Continue),
+            | EventKind::ReactionRemoved { .. }
+            | EventKind::RoomImage { .. } => return Ok(Verdict::Continue),
         };
 
         // Ignore messages from self to prevent infinite recursion
@@ -66,7 +67,8 @@ impl Middleware for Echo {
                 },
                 EventKind::UserListUpdate { .. }
                 | EventKind::ReactionAdded { .. }
-                | EventKind::ReactionRemoved { .. } => unreachable!(),
+                | EventKind::ReactionRemoved { .. }
+                | EventKind::RoomImage { .. } => unreachable!(),
             };
 
             // Send the command and wait for the message ID

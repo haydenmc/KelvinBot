@@ -41,7 +41,8 @@ impl Middleware for Invite {
             EventKind::UserListUpdate { .. }
             | EventKind::RoomMessage { .. }
             | EventKind::ReactionAdded { .. }
-            | EventKind::ReactionRemoved { .. } => {
+            | EventKind::ReactionRemoved { .. }
+            | EventKind::RoomImage { .. } => {
                 // Ignore non-DM events
                 return Ok(Verdict::Continue);
             }
