@@ -8,7 +8,7 @@ use crate::middlewares::{
     chat_relay::{ChatRelay, ChatRelayConfig},
     echo::Echo,
     ezstream_announce::EzStreamAnnounce,
-    invite::Invite,
+    kanidm::{KanidmConfig, KanidmIdentity},
     logger::Logger,
     movie_showtimes::MovieShowtimes,
     weekly_gathering::{Household, WeeklyGathering, WeeklyGatheringConfig},
@@ -65,9 +65,32 @@ pub fn instantiate_middleware_from_config(
             MiddlewareKind::Echo { command_string } => {
                 Arc::new(Echo::new(make_ctx()?, command_string.clone()))
             }
-            MiddlewareKind::Invite { command_string, uses_allowed, expiry } => {
-                Arc::new(Invite::new(make_ctx()?, command_string.clone(), *uses_allowed, *expiry))
-            }
+            MiddlewareKind::Kanidm {
+                command_reset,
+                command_invite,
+                kanidm_url,
+                kanidm_token,
+                mas_url,
+                mas_client_id,
+                mas_client_secret,
+                mas_provider_id,
+                reset_token_ttl,
+                invite_token_ttl,
+            } => Arc::new(KanidmIdentity::new(
+                make_ctx()?,
+                command_reset.clone(),
+                command_invite.clone(),
+                KanidmConfig {
+                    kanidm_url: kanidm_url.clone(),
+                    kanidm_token: kanidm_token.clone(),
+                    mas_url: mas_url.clone(),
+                    mas_client_id: mas_client_id.clone(),
+                    mas_client_secret: mas_client_secret.clone(),
+                    mas_provider_id: mas_provider_id.clone(),
+                    reset_token_ttl: *reset_token_ttl,
+                    invite_token_ttl: *invite_token_ttl,
+                },
+            )),
             MiddlewareKind::Logger {} => Arc::new(Logger {}),
             MiddlewareKind::MovieShowtimes {
                 service_id,

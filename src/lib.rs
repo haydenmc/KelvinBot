@@ -19,7 +19,7 @@ pub mod middlewares {
     pub mod chat_relay;
     pub mod echo;
     pub mod ezstream_announce;
-    pub mod invite;
+    pub mod kanidm;
     pub mod logger;
     pub mod movie_showtimes;
     pub mod weekly_gathering;

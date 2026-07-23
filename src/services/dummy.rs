@@ -65,11 +65,6 @@ impl Service for DummyService {
             Command::EditMessage { message_id, new_body, .. } => {
                 info!(service=%self.id, message_id=%message_id, new_body=%new_body, "dummy service: would edit message");
             }
-            Command::GenerateInviteToken { user_id, uses_allowed, expiry, response_tx, .. } => {
-                info!(service=%self.id, user_id=%user_id, uses_allowed=?uses_allowed, expiry=?expiry, "dummy service: generating fake invite token");
-                // Send a fake token response
-                let _ = response_tx.send(Ok("DUMMY_TOKEN_12345".to_string()));
-            }
             Command::SendThreadReply { room_id, thread_root_id, body, response_tx, .. } => {
                 info!(service=%self.id, room_id=%room_id, thread_root_id=%thread_root_id, body=%body,
                       "dummy service: would send thread reply");

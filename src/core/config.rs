@@ -61,11 +61,38 @@ pub enum MiddlewareKind {
     Echo {
         command_string: String,
     },
-    Invite {
-        command_string: String,
-        uses_allowed: Option<u32>,
-        #[serde(default, with = "humantime_serde")]
-        expiry: Option<Duration>,
+    Kanidm {
+        /// DM command that generates a credential reset link for the caller's
+        /// own kanidm account (default `!reset`).
+        #[serde(default = "default_reset_command")]
+        command_reset: String,
+        /// DM command that creates a new kanidm person account and returns a
+        /// credential reset link (default `!invite`).
+        #[serde(default = "default_invite_command")]
+        command_invite: String,
+        /// Base URL / origin of the kanidm server, e.g. `https://idm.example.com`.
+        /// Also used to build the `/ui/reset?token=...` link.
+        kanidm_url: String,
+        /// Service-account API token used as `Authorization: Bearer` against the
+        /// kanidm REST API. The account must have people write/onboarding rights.
+        kanidm_token: SecretString,
+        /// Base URL of the Matrix Authentication Service, used to resolve a
+        /// Matrix user to their linked kanidm account for `!reset`.
+        mas_url: String,
+        /// MAS OAuth2 client id (client_credentials grant, `urn:mas:admin` scope).
+        mas_client_id: String,
+        /// MAS OAuth2 client secret.
+        mas_client_secret: SecretString,
+        /// The MAS upstream OAuth provider id corresponding to kanidm. Used to
+        /// select the correct upstream link when resolving `!reset`.
+        mas_provider_id: String,
+        /// Validity window for `!reset` links (kanidm clamps to 5m..=24h).
+        #[serde(default = "default_reset_ttl", with = "humantime_serde")]
+        reset_token_ttl: Duration,
+        /// Validity window for `!invite` links, which are forwarded out-of-band
+        /// to a new person (kanidm clamps to 5m..=24h).
+        #[serde(default = "default_invite_ttl", with = "humantime_serde")]
+        invite_token_ttl: Duration,
     },
     Logger {},
     MovieShowtimes {
@@ -148,6 +175,22 @@ pub struct Config {
 
 fn default_data_directory() -> PathBuf {
     PathBuf::from("./data")
+}
+
+fn default_reset_command() -> String {
+    "!reset".to_string()
+}
+
+fn default_invite_command() -> String {
+    "!invite".to_string()
+}
+
+fn default_reset_ttl() -> Duration {
+    Duration::from_secs(10 * 60) // 10 minutes
+}
+
+fn default_invite_ttl() -> Duration {
+    Duration::from_secs(24 * 60 * 60) // 24 hours
 }
 
 fn default_thumbnail_max_width() -> u32 {

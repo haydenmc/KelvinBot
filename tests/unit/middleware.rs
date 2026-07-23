@@ -13,10 +13,11 @@ use kelvin_bot::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
     chat_relay::{ChatRelay, ChatRelayConfig},
     echo::Echo,
-    invite::Invite,
+    kanidm::{KanidmConfig, KanidmIdentity},
     logger::Logger,
 };
 use kelvin_bot::store::PersistentStore;
+use secrecy::SecretString;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,154 +230,129 @@ fn test_build_middleware_pipeline_empty() {
     assert_eq!(result.unwrap().len(), 0);
 }
 
-// Invite Middleware Tests
+// Kanidm Identity Middleware Tests
+
+fn make_kanidm(cmd_tx: Sender<Command>) -> KanidmIdentity {
+    KanidmIdentity::new(
+        make_ctx(cmd_tx),
+        "!reset".to_string(),
+        "!invite".to_string(),
+        KanidmConfig {
+            kanidm_url: "https://idm.example.com".to_string(),
+            kanidm_token: SecretString::from("kanidm-token"),
+            mas_url: "https://auth.example.com".to_string(),
+            mas_client_id: "client".to_string(),
+            mas_client_secret: SecretString::from("secret"),
+            mas_provider_id: "provider".to_string(),
+            reset_token_ttl: Duration::from_secs(600),
+            invite_token_ttl: Duration::from_secs(86400),
+        },
+    )
+}
+
+fn dm_event(body: &str, is_local_user: bool, is_self: bool) -> Event {
+    Event {
+        service_id: ServiceId("test".to_string()),
+        kind: EventKind::DirectMessage {
+            user_id: "@user:example.com".to_string(),
+            body: body.to_string(),
+            is_local_user,
+            sender_id: "@user:example.com".to_string(),
+            sender_display_name: Some("Test User".to_string()),
+            is_self,
+        },
+    }
+}
 
 #[tokio::test]
-async fn test_invite_middleware_run() {
+async fn test_kanidm_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
-    let invite = Invite::new(
-        make_ctx(cmd_tx),
-        "!invite".to_string(),
-        Some(1),
-        Some(Duration::from_secs(604800)),
-    );
+    let kanidm = make_kanidm(cmd_tx);
     let cancel_token = CancellationToken::new();
 
-    // Invite run should complete immediately when cancelled
+    // run should complete immediately when cancelled
     cancel_token.cancel();
-    let result = invite.run(cancel_token).await;
+    let result = kanidm.run(cancel_token).await;
     assert_ok!(result);
 }
 
 #[tokio::test]
-async fn test_invite_middleware_accepts_local_user() {
+async fn test_kanidm_rejects_non_local_user() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite = Invite::new(
-        make_ctx(cmd_tx),
-        "!invite".to_string(),
-        Some(1),
-        Some(Duration::from_secs(604800)),
-    );
+    let kanidm = make_kanidm(cmd_tx);
 
-    let event = Event {
-        service_id: ServiceId("test".to_string()),
-        kind: EventKind::DirectMessage {
-            user_id: "@user:example.com".to_string(),
-            body: "!invite".to_string(),
-            is_local_user: true, // Local user
-            sender_id: "@user:example.com".to_string(),
-            sender_display_name: Some("Test User".to_string()),
-            is_self: false,
-        },
-    };
-
-    let result = invite.on_event(&event);
+    let event = dm_event("!reset", false, false);
+    let result = kanidm.on_event(&event);
     assert_ok!(&result);
     assert_matches!(result.unwrap(), Verdict::Continue);
 
-    // Give async command sending time to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    // Should have sent a GenerateInviteToken command
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::GenerateInviteToken { user_id, uses_allowed, expiry, .. } => {
+    // Non-local users get a rejection DM, no API call is attempted.
+    match cmd_rx.try_recv() {
+        Ok(Command::SendDirectMessage { user_id, body, .. }) => {
             assert_eq!(user_id, "@user:example.com");
-            assert_eq!(uses_allowed, Some(1));
-            assert_eq!(expiry, Some(Duration::from_secs(604800)));
+            assert!(body.contains("can only be used by users on this server"));
         }
-        _ => panic!("Expected GenerateInviteToken command"),
+        other => panic!("Expected SendDirectMessage rejection, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn test_invite_middleware_rejects_non_local_user() {
+async fn test_kanidm_invite_missing_username_replies_usage() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite = Invite::new(
-        make_ctx(cmd_tx),
-        "!invite".to_string(),
-        Some(1),
-        Some(Duration::from_secs(604800)),
-    );
+    let kanidm = make_kanidm(cmd_tx);
 
-    let event = Event {
-        service_id: ServiceId("test".to_string()),
-        kind: EventKind::DirectMessage {
-            user_id: "@user:different.com".to_string(),
-            body: "!invite".to_string(),
-            is_local_user: false, // Non-local user
-            sender_id: "@user:different.com".to_string(),
-            sender_display_name: Some("Different User".to_string()),
-            is_self: false,
-        },
-    };
+    // Bare "!invite" with no username should return a usage hint (no network).
+    let event = dm_event("!invite", true, false);
+    assert_ok!(&kanidm.on_event(&event));
 
-    let result = invite.on_event(&event);
-    assert_ok!(&result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
-
-    // Give async command sending time to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    // Should have sent a rejection message, not a GenerateInviteToken
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendDirectMessage { user_id, body, .. } => {
-            assert_eq!(user_id, "@user:different.com");
-            assert!(body.contains("only be generated for users from this server"));
+    match cmd_rx.try_recv() {
+        Ok(Command::SendDirectMessage { body, .. }) => {
+            assert!(body.contains("Usage:"));
+            assert!(body.contains("!invite"));
         }
-        _ => panic!("Expected SendDirectMessage command for rejection"),
+        other => panic!("Expected usage SendDirectMessage, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn test_invite_middleware_ignores_wrong_command() {
+async fn test_kanidm_ignores_wrong_command() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite = Invite::new(
-        make_ctx(cmd_tx),
-        "!invite".to_string(),
-        Some(1),
-        Some(Duration::from_secs(604800)),
-    );
+    let kanidm = make_kanidm(cmd_tx);
 
-    let event = Event {
-        service_id: ServiceId("test".to_string()),
-        kind: EventKind::DirectMessage {
-            user_id: "@user:example.com".to_string(),
-            body: "!different".to_string(),
-            is_local_user: true,
-            sender_id: "@user:example.com".to_string(),
-            sender_display_name: Some("Test User".to_string()),
-            is_self: false,
-        },
-    };
-
-    let result = invite.on_event(&event);
-    assert_ok!(&result);
+    let event = dm_event("!different", true, false);
+    assert_ok!(&kanidm.on_event(&event));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    // Should NOT have sent any command
     assert!(cmd_rx.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn test_invite_middleware_ignores_room_messages() {
+async fn test_kanidm_ignores_self_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let invite = Invite::new(
-        make_ctx(cmd_tx),
-        "!invite".to_string(),
-        Some(1),
-        Some(Duration::from_secs(604800)),
-    );
+    let kanidm = make_kanidm(cmd_tx);
+
+    // A message from the bot itself must never trigger a command.
+    let event = dm_event("!reset", true, true);
+    assert_ok!(&kanidm.on_event(&event));
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_kanidm_ignores_room_messages() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let kanidm = make_kanidm(cmd_tx);
 
     let event = Event {
         service_id: ServiceId("test".to_string()),
         kind: EventKind::RoomMessage {
             room_id: "!room:example.com".to_string(),
-            body: "!invite".to_string(),
+            body: "!reset".to_string(),
             is_local_user: true,
             sender_id: "@user:example.com".to_string(),
             sender_display_name: Some("Test User".to_string()),
@@ -384,96 +360,33 @@ async fn test_invite_middleware_ignores_room_messages() {
         },
     };
 
-    let result = invite.on_event(&event);
-    assert_ok!(&result);
+    assert_ok!(&kanidm.on_event(&event));
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-    // Should NOT process invite commands in rooms
+    // Identity commands are DM-only.
     assert!(cmd_rx.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn test_invite_middleware_with_default_config() {
-    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    // Create invite with no explicit config (will use defaults)
-    let invite = Invite::new(make_ctx(cmd_tx), "!invite".to_string(), None, None);
-
-    let event = Event {
-        service_id: ServiceId("test".to_string()),
-        kind: EventKind::DirectMessage {
-            user_id: "@user:example.com".to_string(),
-            body: "!invite".to_string(),
-            is_local_user: true,
-            sender_id: "@user:example.com".to_string(),
-            sender_display_name: Some("Test User".to_string()),
-            is_self: false,
-        },
-    };
-
-    let result = invite.on_event(&event);
-    assert_ok!(&result);
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::GenerateInviteToken { uses_allowed, expiry, .. } => {
-            // Should pass None values, letting service apply defaults
-            assert_eq!(uses_allowed, None);
-            assert_eq!(expiry, None);
-        }
-        _ => panic!("Expected GenerateInviteToken command"),
-    }
-}
-
-#[tokio::test]
-async fn test_invite_middleware_with_custom_expiry() {
-    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
-    let custom_expiry = Duration::from_secs(3600); // 1 hour
-    let invite = Invite::new(make_ctx(cmd_tx), "!invite".to_string(), Some(5), Some(custom_expiry));
-
-    let event = Event {
-        service_id: ServiceId("test".to_string()),
-        kind: EventKind::DirectMessage {
-            user_id: "@user:example.com".to_string(),
-            body: "!invite".to_string(),
-            is_local_user: true,
-            sender_id: "@user:example.com".to_string(),
-            sender_display_name: Some("Test User".to_string()),
-            is_self: false,
-        },
-    };
-
-    let result = invite.on_event(&event);
-    assert_ok!(&result);
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::GenerateInviteToken { uses_allowed, expiry, .. } => {
-            assert_eq!(uses_allowed, Some(5));
-            assert_eq!(expiry, Some(custom_expiry));
-        }
-        _ => panic!("Expected GenerateInviteToken command"),
-    }
-}
-
-#[tokio::test]
-async fn test_invite_middleware_instantiation_from_config() {
+async fn test_kanidm_instantiation_from_config() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 
     let mut middlewares_map = HashMap::new();
     middlewares_map.insert(
-        "test_invite".to_string(),
+        "identity".to_string(),
         MiddlewareCfg {
-            kind: MiddlewareKind::Invite {
-                command_string: "!token".to_string(),
-                uses_allowed: Some(3),
-                expiry: Some(Duration::from_secs(86400)), // 1 day
+            kind: MiddlewareKind::Kanidm {
+                command_reset: "!reset".to_string(),
+                command_invite: "!invite".to_string(),
+                kanidm_url: "https://idm.example.com".to_string(),
+                kanidm_token: SecretString::from("kanidm-token"),
+                mas_url: "https://auth.example.com".to_string(),
+                mas_client_id: "client".to_string(),
+                mas_client_secret: SecretString::from("secret"),
+                mas_provider_id: "provider".to_string(),
+                reset_token_ttl: Duration::from_secs(600),
+                invite_token_ttl: Duration::from_secs(86400),
             },
         },
     );
@@ -490,7 +403,7 @@ async fn test_invite_middleware_instantiation_from_config() {
 
     let middlewares = result.unwrap();
     assert_eq!(middlewares.len(), 1);
-    assert!(middlewares.contains_key("test_invite"));
+    assert!(middlewares.contains_key("identity"));
 }
 
 // Chat Relay Middleware Tests

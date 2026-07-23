@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -38,13 +38,6 @@ pub enum Command {
         message_id: String,
         new_body: String,
         new_markdown_body: Option<String>,
-    },
-    GenerateInviteToken {
-        service_id: ServiceId,
-        user_id: String,
-        uses_allowed: Option<u32>,
-        expiry: Option<Duration>,
-        response_tx: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
     },
     AddReaction {
         service_id: ServiceId,
@@ -103,14 +96,6 @@ impl std::fmt::Debug for Command {
                 .field("message_id", message_id)
                 .field("new_body", new_body)
                 .field("new_markdown_body", new_markdown_body)
-                .finish(),
-            Command::GenerateInviteToken { service_id, user_id, uses_allowed, expiry, .. } => f
-                .debug_struct("GenerateInviteToken")
-                .field("service_id", service_id)
-                .field("user_id", user_id)
-                .field("uses_allowed", uses_allowed)
-                .field("expiry", expiry)
-                .field("response_tx", &"<oneshot::Sender>")
                 .finish(),
             Command::AddReaction { service_id, room_id, event_id, key } => f
                 .debug_struct("AddReaction")
@@ -327,7 +312,6 @@ impl Bus {
                         Command::SendRoomMessage { service_id, .. } => service_id.clone(),
                         Command::SendThreadReply { service_id, .. } => service_id.clone(),
                         Command::EditMessage { service_id, .. } => service_id.clone(),
-                        Command::GenerateInviteToken { service_id, .. } => service_id.clone(),
                         Command::AddReaction { service_id, .. } => service_id.clone(),
                         Command::SendRoomImage { service_id, .. } => service_id.clone(),
                     };

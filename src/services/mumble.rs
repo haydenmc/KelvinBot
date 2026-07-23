@@ -498,10 +498,6 @@ impl Service for MumbleService {
             Command::EditMessage { .. } => {
                 warn!("mumble does not support editing messages");
             }
-            Command::GenerateInviteToken { response_tx, .. } => {
-                warn!("mumble does not support invite token generation");
-                let _ = response_tx.send(Err(anyhow!("not supported by mumble")));
-            }
             Command::SendThreadReply { response_tx, .. } => {
                 warn!("mumble does not support thread replies");
                 if let Some(tx) = response_tx {
