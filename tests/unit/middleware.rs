@@ -313,6 +313,47 @@ async fn test_kanidm_invite_missing_username_replies_usage() {
         Ok(Command::SendDirectMessage { body, .. }) => {
             assert!(body.contains("Usage:"));
             assert!(body.contains("!invite"));
+            assert!(body.contains("<email>"));
+        }
+        other => panic!("Expected usage SendDirectMessage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_kanidm_invite_missing_email_replies_usage() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let kanidm = make_kanidm(cmd_tx);
+
+    // Username but no email should return the usage hint (no network).
+    let event = dm_event("!invite alice", true, false);
+    assert_ok!(&kanidm.on_event(&event));
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    match cmd_rx.try_recv() {
+        Ok(Command::SendDirectMessage { body, .. }) => {
+            assert!(body.contains("Usage:"));
+            assert!(body.contains("<email>"));
+        }
+        other => panic!("Expected usage SendDirectMessage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_kanidm_invite_invalid_email_replies_usage() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let kanidm = make_kanidm(cmd_tx);
+
+    // A malformed email should be rejected before any network call.
+    let event = dm_event("!invite alice not-an-email", true, false);
+    assert_ok!(&kanidm.on_event(&event));
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    match cmd_rx.try_recv() {
+        Ok(Command::SendDirectMessage { body, .. }) => {
+            assert!(body.contains("Usage:"));
+            assert!(body.contains("<email>"));
         }
         other => panic!("Expected usage SendDirectMessage, got {other:?}"),
     }
