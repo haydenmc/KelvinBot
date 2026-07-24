@@ -5,8 +5,9 @@
 //!   account. The caller's Matrix identity is resolved to a kanidm account
 //!   through the Matrix Authentication Service (MAS) admin API, since the
 //!   kanidm username may differ from the Matrix localpart.
-//! - `!invite <username> [display name]` — create a new kanidm person account
-//!   and return a credential reset link to hand to the new person.
+//! - `!invite <username> <email>` — create a new kanidm person account (email
+//!   is required, for account recovery) and return a credential reset link to
+//!   hand to the new person.
 //!
 //! All work is performed directly against the kanidm and MAS HTTP APIs (there
 //! is no dedicated backend service), following the `reqwest` patterns used by
@@ -211,10 +212,7 @@ fn parse_invite_args(args: &str) -> Option<ParsedCommand> {
     if !looks_like_email(email) {
         return None;
     }
-    Some(ParsedCommand::Invite {
-        username: username.to_string(),
-        email: email.to_string(),
-    })
+    Some(ParsedCommand::Invite { username: username.to_string(), email: email.to_string() })
 }
 
 /// Lightweight sanity check for an email address: exactly one `@`, a non-empty
