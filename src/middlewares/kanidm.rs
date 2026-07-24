@@ -86,7 +86,7 @@ impl KanidmIdentity {
 /// A command parsed out of a DM body.
 enum ParsedCommand {
     Reset,
-    Invite { username: String, display_name: String },
+    Invite { username: String, email: String },
 }
 
 #[async_trait]
@@ -119,11 +119,11 @@ impl Middleware for KanidmIdentity {
             match parse_invite_args(body.strip_prefix(&invite_prefix).unwrap_or("")) {
                 Some(cmd) => cmd,
                 None => {
-                    // Missing username — reply with usage and stop here.
+                    // Missing username / missing or invalid email — reply with usage.
                     self.reply(
                         evt.service_id.clone(),
                         user_id.clone(),
-                        format!("Usage: {} <username> [display name]", self.command_invite),
+                        format!("Usage: {} <username> <email>", self.command_invite),
                     );
                     return Ok(Verdict::Continue);
                 }
@@ -164,13 +164,14 @@ impl Middleware for KanidmIdentity {
                         format!("Sorry, I couldn't generate a reset link: {e}")
                     }
                 },
-                ParsedCommand::Invite { username, display_name } => {
-                    match api.invite_new_account(&username, &display_name).await {
+                ParsedCommand::Invite { username, email } => {
+                    match api.invite_new_account(&username, &email).await {
                         Ok(link) => {
                             let expiry = format_duration(api.config.invite_token_ttl);
                             format!(
-                                "Created account '{username}'. Send this single-use credential \
-                                 setup link to the new person — it expires in {expiry}:\n{link}"
+                                "Created account '{username}' ({email}). Send this single-use \
+                                 credential setup link to the new person — it expires in \
+                                 {expiry}:\n{link}"
                             )
                         }
                         Err(e) => {
@@ -197,19 +198,39 @@ impl Middleware for KanidmIdentity {
 }
 
 /// Parse the argument portion of an `!invite` command (everything after the
-/// command word). Returns `None` if no username was provided.
+/// command word). Both a username and a valid-looking email are required;
+/// returns `None` if either is missing or the email fails a basic sanity check.
 fn parse_invite_args(args: &str) -> Option<ParsedCommand> {
     let args = args.trim();
-    let mut parts = args.splitn(2, char::is_whitespace);
-    let username = parts.next().unwrap_or("").trim();
+    let mut parts = args.split_whitespace();
+    let username = parts.next()?.trim();
     if username.is_empty() {
         return None;
     }
-    let display_name = parts.next().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(username);
+    let email = parts.next()?.trim();
+    if !looks_like_email(email) {
+        return None;
+    }
     Some(ParsedCommand::Invite {
         username: username.to_string(),
-        display_name: display_name.to_string(),
+        email: email.to_string(),
     })
+}
+
+/// Lightweight sanity check for an email address: exactly one `@`, a non-empty
+/// local part, and a domain that contains a `.`. kanidm remains the authority
+/// for deeper validation and rejection.
+fn looks_like_email(s: &str) -> bool {
+    let mut halves = s.splitn(2, '@');
+    let (Some(local), Some(domain)) = (halves.next(), halves.next()) else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
 }
 
 /// Render a token TTL as a short human-friendly string for user messages,
@@ -242,8 +263,8 @@ struct IdentityApi {
 
 impl IdentityApi {
     /// `!invite` flow: create a kanidm person account, then mint a reset link.
-    async fn invite_new_account(&self, username: &str, display_name: &str) -> Result<String> {
-        self.create_person(username, display_name).await?;
+    async fn invite_new_account(&self, username: &str, email: &str) -> Result<String> {
+        self.create_person(username, email).await?;
         let token = self.create_reset_token(username, self.config.invite_token_ttl).await?;
         Ok(self.reset_link(&token))
     }
@@ -263,12 +284,15 @@ impl IdentityApi {
 
     // --- kanidm REST API ---------------------------------------------------
 
-    async fn create_person(&self, name: &str, displayname: &str) -> Result<()> {
+    async fn create_person(&self, name: &str, email: &str) -> Result<()> {
         let url = format!("{}/v1/person", self.config.kanidm_url.trim_end_matches('/'));
+        // kanidm requires a `displayname` at creation; default it to the
+        // username (the person can change it later during credential setup).
         let body = serde_json::json!({
             "attrs": {
                 "name": [name],
-                "displayname": [displayname],
+                "displayname": [name],
+                "mail": [email],
             }
         });
         let response = self
