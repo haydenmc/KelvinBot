@@ -2688,7 +2688,10 @@ async fn test_host_pick_edits_finalization_message() {
                 new_body.contains("IN-PERSON at ") && new_body.contains(" at 8:00pm"),
                 "got: {new_body}"
             );
-            assert!(new_body.contains("2\u{fe0f}\u{20e3} 8:00pm — 0 votes **← selected**"));
+            assert!(
+                new_body.contains("2\u{fe0f}\u{20e3} 8:00pm — 0 votes **← selected**"),
+                "got: {new_body}"
+            );
             assert!(!new_body.contains("Pick a time!"), "prompt should be gone: {new_body}");
         }
         _ => panic!("Expected EditMessage command"),

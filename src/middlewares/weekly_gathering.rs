@@ -334,8 +334,7 @@ impl WeeklyGathering {
                 let option = &self.config.event_time_options[index];
                 let count = time_votes.get(index).map_or(0, HashSet::len);
                 let plural = if count == 1 { "vote" } else { "votes" };
-                let marker =
-                    if selected_time == Some(index) { " **← selected by host**" } else { "" };
+                let marker = if selected_time == Some(index) { " **← selected**" } else { "" };
                 format!("- {} {} — {} {}{}", option.reaction, option.label, count, plural, marker)
             })
             .collect::<Vec<_>>()
