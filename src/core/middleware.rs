@@ -203,6 +203,7 @@ pub fn instantiate_middleware_from_config(
                 room_id,
                 event_day_of_week,
                 event_time,
+                event_times,
                 announce_minutes_before,
                 finalize_minutes_before,
                 reaction_virtual,
@@ -212,6 +213,7 @@ pub fn instantiate_middleware_from_config(
                 finalization_virtual_message,
                 finalization_in_person_message,
                 finalization_no_votes_message,
+                time_prompt_message,
                 households,
             } => {
                 // Parse day_of_week string to Weekday
@@ -227,6 +229,10 @@ pub fn instantiate_middleware_from_config(
                         "invalid event_time format '{}' for middleware '{}'. Expected format: HH:MM (e.g., 19:00)",
                         event_time, name
                     ))?;
+
+                let time_options =
+                    crate::middlewares::weekly_gathering::parse_event_times(event_times)
+                        .map_err(|e| anyhow::anyhow!("{} for middleware '{}'", e, name))?;
 
                 let runtime_households: Vec<Household> = households
                     .values()
@@ -248,6 +254,7 @@ pub fn instantiate_middleware_from_config(
                         room_id: room_id.clone(),
                         event_day_of_week: weekday,
                         event_time: naive_time,
+                        event_times: time_options,
                         announce_minutes_before: *announce_minutes_before,
                         finalize_minutes_before: *finalize_minutes_before,
                         reaction_virtual: reaction_virtual.clone(),
@@ -257,6 +264,7 @@ pub fn instantiate_middleware_from_config(
                         finalization_virtual_message: finalization_virtual_message.clone(),
                         finalization_in_person_message: finalization_in_person_message.clone(),
                         finalization_no_votes_message: finalization_no_votes_message.clone(),
+                        time_prompt_message: time_prompt_message.clone(),
                         households: runtime_households,
                     },
                 ))

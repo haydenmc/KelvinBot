@@ -14,10 +14,85 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 
+/// Keycap emoji assigned to event time options, by configured position.
+const TIME_REACTIONS: [&str; 10] = [
+    "1\u{fe0f}\u{20e3}",
+    "2\u{fe0f}\u{20e3}",
+    "3\u{fe0f}\u{20e3}",
+    "4\u{fe0f}\u{20e3}",
+    "5\u{fe0f}\u{20e3}",
+    "6\u{fe0f}\u{20e3}",
+    "7\u{fe0f}\u{20e3}",
+    "8\u{fe0f}\u{20e3}",
+    "9\u{fe0f}\u{20e3}",
+    "\u{1f51f}",
+];
+
 #[derive(Debug, Clone)]
 pub struct Household {
     pub name: String,
     pub members: Vec<String>,
+}
+
+/// A candidate start time participants can vote for.
+#[derive(Debug, Clone)]
+pub struct EventTimeOption {
+    pub time: NaiveTime,
+    /// Keycap emoji used to vote for this option.
+    pub reaction: String,
+    /// Human-friendly rendering, e.g. `4:30pm`.
+    pub label: String,
+}
+
+/// Parse a comma-separated list of `HH:MM` times into voteable options.
+///
+/// Each option is assigned a keycap emoji by position. Returns an error for
+/// unparseable entries, duplicate times, or more options than there are
+/// keycap emoji.
+pub fn parse_event_times(spec: &str) -> Result<Vec<EventTimeOption>> {
+    let entries: Vec<&str> =
+        spec.split(',').map(str::trim).filter(|entry| !entry.is_empty()).collect();
+
+    if entries.len() > TIME_REACTIONS.len() {
+        anyhow::bail!(
+            "too many event_times ({}); at most {} are supported",
+            entries.len(),
+            TIME_REACTIONS.len()
+        );
+    }
+
+    let mut options: Vec<EventTimeOption> = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let time = NaiveTime::parse_from_str(entry, "%H:%M").map_err(|_| {
+            anyhow::anyhow!(
+                "invalid event_times entry '{}'. Expected format: HH:MM (e.g., 16:30)",
+                entry
+            )
+        })?;
+
+        if options.iter().any(|existing| existing.time == time) {
+            anyhow::bail!("duplicate event_times entry '{}'", entry);
+        }
+
+        options.push(EventTimeOption {
+            time,
+            reaction: TIME_REACTIONS[index].to_string(),
+            label: format_time_label(time),
+        });
+    }
+
+    Ok(options)
+}
+
+/// Render a time as `4:30pm`.
+fn format_time_label(time: NaiveTime) -> String {
+    time.format("%-I:%M%P").to_string()
+}
+
+/// Strip variation selectors so keycap emoji compare equal regardless of
+/// whether the sending client included U+FE0F.
+fn normalize_reaction(key: &str) -> String {
+    key.chars().filter(|c| *c != '\u{fe0f}').collect()
 }
 
 pub struct WeeklyGatheringConfig {
@@ -25,6 +100,7 @@ pub struct WeeklyGatheringConfig {
     pub room_id: String,
     pub event_day_of_week: Weekday,
     pub event_time: NaiveTime,
+    pub event_times: Vec<EventTimeOption>,
     pub announce_minutes_before: u32,
     pub finalize_minutes_before: u32,
     pub reaction_virtual: String,
@@ -34,14 +110,31 @@ pub struct WeeklyGatheringConfig {
     pub finalization_virtual_message: String,
     pub finalization_in_person_message: String,
     pub finalization_no_votes_message: String,
+    pub time_prompt_message: String,
     pub households: Vec<Household>,
+}
+
+/// State of the finalization message, retained so the host's time pick can be
+/// applied and the message re-rendered in place.
+#[derive(Debug, Clone)]
+struct FinalizedState {
+    /// `None` if the finalization message failed to send.
+    message_id: Option<String>,
+    /// User IDs permitted to pick the time — the selected host and their
+    /// household. Empty when the time is not the host's to choose.
+    pickers: HashSet<String>,
+    /// Index into `config.event_times`.
+    selected_time: Option<usize>,
+    virtual_count: usize,
+    in_person_count: usize,
+    host_display: String,
 }
 
 #[derive(Debug, Clone)]
 enum GatheringPhase {
     Idle,
     Announced { message_id: String },
-    Finalized,
+    Finalized(FinalizedState),
 }
 
 struct GatheringState {
@@ -49,15 +142,18 @@ struct GatheringState {
     virtual_votes: HashSet<String>,
     in_person_votes: HashSet<String>,
     host_volunteers: HashSet<String>,
+    /// Votes per event time option, parallel to `config.event_times`.
+    time_votes: Vec<HashSet<String>>,
 }
 
-impl Default for GatheringState {
-    fn default() -> Self {
+impl GatheringState {
+    fn new(time_option_count: usize) -> Self {
         Self {
             phase: GatheringPhase::Idle,
             virtual_votes: HashSet::new(),
             in_person_votes: HashSet::new(),
             host_volunteers: HashSet::new(),
+            time_votes: vec![HashSet::new(); time_option_count],
         }
     }
 }
@@ -82,10 +178,12 @@ impl WeeklyGathering {
         let MiddlewareContext { cmd_tx, store } = ctx;
         let (reaction_tx, reaction_rx) = tokio::sync::mpsc::channel(100);
 
+        let state = GatheringState::new(config.event_times.len());
+
         Self {
             cmd_tx,
             config,
-            state: Arc::new(Mutex::new(GatheringState::default())),
+            state: Arc::new(Mutex::new(state)),
             store,
             reaction_tx,
             reaction_rx: Arc::new(Mutex::new(reaction_rx)),
@@ -122,23 +220,94 @@ impl WeeklyGathering {
         self.next_event_time() - Duration::minutes(self.config.announce_minutes_before as i64)
     }
 
-    /// Format event time in a friendly way (e.g., "Today at 7:00pm", "Tomorrow at 7:00pm", "Saturday at 7:00pm")
-    fn format_friendly_time(&self) -> String {
-        let event_datetime = self.next_event_time();
-        let now = Local::now();
-        let today = now.date_naive();
-        let event_date = event_datetime.date_naive();
+    /// Day the event falls on, phrased relative to today (e.g. "Today", "Tomorrow", "Saturday")
+    fn friendly_day(&self) -> String {
+        let event_date = self.next_event_time().date_naive();
+        let today = Local::now().date_naive();
 
-        let day_part = if event_date == today {
+        if event_date == today {
             "Today".to_string()
         } else if event_date == today + Duration::days(1) {
             "Tomorrow".to_string()
         } else {
             self.config.event_day_of_week.to_string()
+        }
+    }
+
+    /// Format event time in a friendly way (e.g., "Today at 7:00pm", "Tomorrow at 7:00pm", "Saturday at 7:00pm")
+    ///
+    /// When time voting is enabled, `selected_time` is the index of the chosen option; while no
+    /// time has been settled on the day is rendered with a "time TBD" marker instead.
+    fn format_friendly_time(&self, selected_time: Option<usize>) -> String {
+        let day_part = self.friendly_day();
+
+        let time = if self.config.event_times.is_empty() {
+            Some(self.config.event_time)
+        } else {
+            selected_time.and_then(|i| self.config.event_times.get(i)).map(|option| option.time)
         };
 
-        let time_part = self.config.event_time.format("%-I:%M%P").to_string();
-        format!("{} at {}", day_part, time_part)
+        match time {
+            Some(time) => format!("{} at {}", day_part, format_time_label(time)),
+            None => format!("{} (time TBD)", day_part),
+        }
+    }
+
+    /// Index of the event time option matching a reaction key, if any
+    fn time_option_index(&self, key: &str) -> Option<usize> {
+        let key = normalize_reaction(key);
+        self.config
+            .event_times
+            .iter()
+            .position(|option| normalize_reaction(&option.reaction) == key)
+    }
+
+    /// Event time option indices ordered by vote count descending, ties broken by earliest time
+    fn rank_time_options(&self, time_votes: &[HashSet<String>]) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.config.event_times.len()).collect();
+        indices.sort_by(|a, b| {
+            let votes_a = time_votes.get(*a).map_or(0, HashSet::len);
+            let votes_b = time_votes.get(*b).map_or(0, HashSet::len);
+            votes_b.cmp(&votes_a).then_with(|| {
+                self.config.event_times[*a].time.cmp(&self.config.event_times[*b].time)
+            })
+        });
+        indices
+    }
+
+    /// The most preferred time option, or `None` if nobody voted on a time
+    fn top_time_option(&self, time_votes: &[HashSet<String>]) -> Option<usize> {
+        let top = *self.rank_time_options(time_votes).first()?;
+        if time_votes.get(top).is_none_or(HashSet::is_empty) { None } else { Some(top) }
+    }
+
+    /// Render the configured time options as a list, one per line
+    fn render_time_options(&self) -> String {
+        self.config
+            .event_times
+            .iter()
+            .map(|option| format!("{} {}", option.reaction, option.label))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Render time vote results, most preferred first, marking the selected option
+    fn render_time_results(
+        &self,
+        time_votes: &[HashSet<String>],
+        selected_time: Option<usize>,
+    ) -> String {
+        self.rank_time_options(time_votes)
+            .into_iter()
+            .map(|index| {
+                let option = &self.config.event_times[index];
+                let count = time_votes.get(index).map_or(0, HashSet::len);
+                let plural = if count == 1 { "vote" } else { "votes" };
+                let marker = if selected_time == Some(index) { " **← selected**" } else { "" };
+                format!("{} {} — {} {}{}", option.reaction, option.label, count, plural, marker)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Calculate when to finalize and post results
@@ -233,13 +402,14 @@ impl WeeklyGathering {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         // Replace placeholders in announcement message
-        let event_time_friendly = self.format_friendly_time();
+        let event_time_friendly = self.format_friendly_time(None);
         let message = self
             .config
             .announcement_message
             .replace("{reaction_virtual}", &self.config.reaction_virtual)
             .replace("{reaction_in_person}", &self.config.reaction_in_person)
             .replace("{reaction_host}", &self.config.reaction_host)
+            .replace("{time_options}", &self.render_time_options())
             .replace("{event_time}", &event_time_friendly);
 
         let command = Command::SendRoomMessage {
@@ -257,21 +427,16 @@ impl WeeklyGathering {
                 tracing::info!(message_id=%message_id, "announcement posted successfully");
 
                 // Pre-populate reactions on the announcement
-                for reaction_key in [
+                let reaction_keys = [
                     &self.config.reaction_virtual,
                     &self.config.reaction_in_person,
                     &self.config.reaction_host,
-                ] {
-                    let command = Command::AddReaction {
-                        service_id: ServiceId(self.config.service_id.clone()),
-                        room_id: self.config.room_id.clone(),
-                        event_id: message_id.clone(),
-                        key: reaction_key.clone(),
-                    };
+                ]
+                .into_iter()
+                .chain(self.config.event_times.iter().map(|option| &option.reaction));
 
-                    if let Err(e) = self.cmd_tx.send(command).await {
-                        tracing::error!(error=%e, key=%reaction_key, "failed to send add reaction command");
-                    }
+                for reaction_key in reaction_keys {
+                    self.seed_reaction(&message_id, reaction_key).await;
                 }
 
                 Ok(Some(message_id))
@@ -285,6 +450,44 @@ impl WeeklyGathering {
                 Ok(None)
             }
         }
+    }
+
+    /// Render the finalization message for the current vote outcome.
+    ///
+    /// Called both when finalizing and again whenever the host picks a time, so the message can be
+    /// edited in place.
+    fn render_finalization(
+        &self,
+        virtual_count: usize,
+        in_person_count: usize,
+        host_display: &str,
+        time_votes: &[HashSet<String>],
+        selected_time: Option<usize>,
+        awaiting_pick: bool,
+    ) -> String {
+        // Choose message based on vote outcome
+        let template = if virtual_count == 0 && in_person_count == 0 {
+            // No votes
+            &self.config.finalization_no_votes_message
+        } else if in_person_count > virtual_count {
+            &self.config.finalization_in_person_message
+        } else {
+            // Virtual wins, or tie (prefer virtual)
+            &self.config.finalization_virtual_message
+        };
+
+        // The prompt is only shown while the host still has a time to pick. Substituted first so
+        // its own placeholders are resolved by the replacements below.
+        let time_prompt = if awaiting_pick { self.config.time_prompt_message.as_str() } else { "" };
+
+        let event_time_friendly = self.format_friendly_time(selected_time);
+        template
+            .replace("{time_prompt}", time_prompt)
+            .replace("{virtual_count}", &virtual_count.to_string())
+            .replace("{in_person_count}", &in_person_count.to_string())
+            .replace("{host}", host_display)
+            .replace("{time_results}", &self.render_time_results(time_votes, selected_time))
+            .replace("{event_time}", &event_time_friendly)
     }
 
     /// Post the finalization message with vote counts and host
@@ -303,55 +506,94 @@ impl WeeklyGathering {
             Self::select_host(&state.host_volunteers, &host_history, &self.config.households);
 
         let host_display = match &host {
-            Some((_, display)) => display.as_str(),
-            None => "No host volunteered",
+            Some((_, display)) => display.clone(),
+            None => "No host volunteered".to_string(),
         };
 
-        // Choose message based on vote outcome
-        let template = if virtual_count == 0 && in_person_count == 0 {
-            // No votes
-            &self.config.finalization_no_votes_message
-        } else if in_person_count > virtual_count {
-            &self.config.finalization_in_person_message
+        // The host only picks the time for in-person gatherings — a virtual gathering imposes no
+        // venue constraint, so the most preferred time simply wins.
+        let is_in_person = in_person_count > virtual_count;
+        let pickers: HashSet<String> = match (&host, is_in_person) {
+            (Some((user_id, _)), true) if !self.config.event_times.is_empty() => {
+                self.household_members(user_id).into_iter().collect()
+            }
+            _ => HashSet::new(),
+        };
+
+        let awaiting_pick = !pickers.is_empty();
+        let selected_time =
+            if awaiting_pick { None } else { self.top_time_option(&state.time_votes) };
+
+        let message = self.render_finalization(
+            virtual_count,
+            in_person_count,
+            &host_display,
+            &state.time_votes,
+            selected_time,
+            awaiting_pick,
+        );
+
+        // Order the pick reactions by preference so they read left-to-right most-wanted first.
+        let ranked_reactions: Vec<String> = if awaiting_pick {
+            self.rank_time_options(&state.time_votes)
+                .into_iter()
+                .map(|index| self.config.event_times[index].reaction.clone())
+                .collect()
         } else {
-            // Virtual wins, or tie (prefer virtual)
-            &self.config.finalization_virtual_message
+            Vec::new()
         };
-
-        // Replace placeholders
-        let event_time_friendly = self.format_friendly_time();
-        let message = template
-            .replace("{virtual_count}", &virtual_count.to_string())
-            .replace("{in_person_count}", &in_person_count.to_string())
-            .replace("{host}", host_display)
-            .replace("{event_time}", &event_time_friendly);
 
         drop(state); // Release lock before sending
 
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = Command::SendRoomMessage {
             service_id: ServiceId(self.config.service_id.clone()),
             room_id: self.config.room_id.clone(),
             body: message.clone(),
             markdown_body: Some(message),
-            response_tx: None,
+            response_tx: Some(response_tx),
         };
 
         if let Err(e) = self.cmd_tx.send(command).await {
             tracing::error!(error=%e, "failed to send finalization message");
         }
 
+        let message_id = match response_rx.await {
+            Ok(Ok(message_id)) => Some(message_id),
+            Ok(Err(e)) => {
+                tracing::error!(error=%e, "failed to post finalization");
+                None
+            }
+            Err(e) => {
+                tracing::error!(error=%e, "failed to receive finalization response");
+                None
+            }
+        };
+
+        // Offer every configured time so the host is never boxed out of an unvoted slot.
+        if let Some(message_id) = &message_id {
+            for reaction_key in &ranked_reactions {
+                self.seed_reaction(message_id, reaction_key).await;
+            }
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            state.phase = GatheringPhase::Finalized(FinalizedState {
+                message_id,
+                pickers,
+                selected_time,
+                virtual_count,
+                in_person_count,
+                host_display,
+            });
+        }
+
         // Persist the newly selected host so future weeks prefer someone else.
         // If the host is part of a household, update all members at the same timestamp.
         if let Some((ref selected_user_id, _)) = host {
             let now = Utc::now();
-            let members_to_update: Vec<String> = self
-                .config
-                .households
-                .iter()
-                .find(|h| h.members.contains(selected_user_id))
-                .map(|h| h.members.clone())
-                .unwrap_or_else(|| vec![selected_user_id.clone()]);
-            for member in &members_to_update {
+            for member in &self.household_members(selected_user_id) {
                 host_history.insert(member.clone(), now);
             }
             if let Err(e) = self.store.set("host_history", &host_history).await {
@@ -373,19 +615,75 @@ impl WeeklyGathering {
         state.virtual_votes.clear();
         state.in_person_votes.clear();
         state.host_volunteers.clear();
+        for votes in &mut state.time_votes {
+            votes.clear();
+        }
         tracing::info!("state reset for next week");
+    }
+
+    /// All members of the household `user_id` belongs to, or just `user_id` if they are solo
+    fn household_members(&self, user_id: &str) -> Vec<String> {
+        self.config
+            .households
+            .iter()
+            .find(|h| h.members.iter().any(|m| m == user_id))
+            .map(|h| h.members.clone())
+            .unwrap_or_else(|| vec![user_id.to_string()])
+    }
+
+    /// Add one of the bot's own reactions to a message, for others to click
+    async fn seed_reaction(&self, message_id: &str, key: &str) {
+        let command = Command::AddReaction {
+            service_id: ServiceId(self.config.service_id.clone()),
+            room_id: self.config.room_id.clone(),
+            event_id: message_id.to_string(),
+            key: key.to_string(),
+        };
+
+        if let Err(e) = self.cmd_tx.send(command).await {
+            tracing::error!(error=%e, key=%key, "failed to send add reaction command");
+        }
     }
 
     /// Process a reaction event
     async fn process_reaction(&self, reaction: ReactionEvent) {
-        let mut state = self.state.lock().await;
+        let edit = {
+            let mut state = self.state.lock().await;
 
-        // Only process reactions when in Announced phase
-        let announcement_message_id = match &state.phase {
-            GatheringPhase::Announced { message_id } => message_id.clone(),
-            _ => return,
+            match state.phase.clone() {
+                GatheringPhase::Announced { message_id } => {
+                    self.process_vote_reaction(&mut state, &message_id, reaction);
+                    None
+                }
+                GatheringPhase::Finalized(finalized) => {
+                    self.process_pick_reaction(&mut state, &finalized, reaction)
+                }
+                GatheringPhase::Idle => None,
+            }
         };
 
+        // Reflect a changed pick in the finalization message, outside the state lock.
+        if let Some((message_id, body)) = edit {
+            let command = Command::EditMessage {
+                service_id: ServiceId(self.config.service_id.clone()),
+                message_id,
+                new_body: body.clone(),
+                new_markdown_body: Some(body),
+            };
+
+            if let Err(e) = self.cmd_tx.send(command).await {
+                tracing::error!(error=%e, "failed to edit finalization message");
+            }
+        }
+    }
+
+    /// Record a vote from a reaction on the announcement message
+    fn process_vote_reaction(
+        &self,
+        state: &mut GatheringState,
+        announcement_message_id: &str,
+        reaction: ReactionEvent,
+    ) {
         match reaction {
             ReactionEvent::Added { target_event_id, key, sender_id } => {
                 // Check if reaction is on the announcement message
@@ -403,6 +701,9 @@ impl WeeklyGathering {
                 } else if key == self.config.reaction_host {
                     state.host_volunteers.insert(sender_id.clone());
                     tracing::debug!(sender_id=%sender_id, "host volunteer recorded");
+                } else if let Some(index) = self.time_option_index(&key) {
+                    state.time_votes[index].insert(sender_id.clone());
+                    tracing::debug!(sender_id=%sender_id, index=%index, "time vote recorded");
                 }
             }
             ReactionEvent::Removed { target_event_id, key, sender_id } => {
@@ -424,10 +725,74 @@ impl WeeklyGathering {
                     } else if key == self.config.reaction_host {
                         state.host_volunteers.remove(&sender_id);
                         tracing::debug!(sender_id=%sender_id, "host volunteer removed");
+                    } else if let Some(index) = self.time_option_index(&key) {
+                        state.time_votes[index].remove(&sender_id);
+                        tracing::debug!(sender_id=%sender_id, index=%index, "time vote removed");
                     }
                 }
             }
         }
+    }
+
+    /// Apply the host's time pick from a reaction on the finalization message.
+    ///
+    /// Returns the message ID and re-rendered body when the selection changed.
+    fn process_pick_reaction(
+        &self,
+        state: &mut GatheringState,
+        finalized: &FinalizedState,
+        reaction: ReactionEvent,
+    ) -> Option<(String, String)> {
+        let message_id = finalized.message_id.clone()?;
+
+        let (target_event_id, key, sender_id, added) = match reaction {
+            ReactionEvent::Added { target_event_id, key, sender_id } => {
+                (Some(target_event_id), Some(key), sender_id, true)
+            }
+            ReactionEvent::Removed { target_event_id, key, sender_id } => {
+                (target_event_id, key, sender_id, false)
+            }
+        };
+
+        // Only reactions on the finalization message, from the host or their household, count.
+        if target_event_id.is_some_and(|target| target != message_id) {
+            return None;
+        }
+        if !finalized.pickers.contains(&sender_id) {
+            return None;
+        }
+
+        let index = self.time_option_index(&key?)?;
+
+        // Adding picks a time; removing only clears the currently selected one.
+        let selected_time = if added {
+            Some(index)
+        } else if finalized.selected_time == Some(index) {
+            None
+        } else {
+            return None;
+        };
+
+        if selected_time == finalized.selected_time {
+            return None;
+        }
+
+        if let GatheringPhase::Finalized(current) = &mut state.phase {
+            current.selected_time = selected_time;
+        }
+
+        tracing::info!(sender_id=%sender_id, selected_time=?selected_time, "event time pick updated");
+
+        let body = self.render_finalization(
+            finalized.virtual_count,
+            finalized.in_person_count,
+            &finalized.host_display,
+            &state.time_votes,
+            selected_time,
+            selected_time.is_none(),
+        );
+
+        Some((message_id, body))
     }
 }
 
@@ -441,6 +806,41 @@ impl WeeklyGathering {
     pub async fn set_announced(&self, message_id: String) {
         let mut state = self.state.lock().await;
         state.phase = GatheringPhase::Announced { message_id };
+    }
+
+    /// Post the announcement directly (for testing)
+    pub async fn test_post_announcement(&self) {
+        if let Err(e) = self.post_announcement().await {
+            tracing::error!(error=%e, "failed to post announcement");
+        }
+    }
+
+    /// Set the phase to Finalized with a specific message ID and pickers (for testing)
+    pub async fn set_finalized(&self, message_id: Option<String>, pickers: HashSet<String>) {
+        let mut state = self.state.lock().await;
+        state.phase = GatheringPhase::Finalized(FinalizedState {
+            message_id,
+            pickers,
+            selected_time: None,
+            virtual_count: state.virtual_votes.len(),
+            in_person_count: state.in_person_votes.len(),
+            host_display: "test-host".to_string(),
+        });
+    }
+
+    /// Get the index of the selected event time, if any (for testing)
+    pub async fn get_selected_time(&self) -> Option<usize> {
+        let state = self.state.lock().await;
+        match &state.phase {
+            GatheringPhase::Finalized(finalized) => finalized.selected_time,
+            _ => None,
+        }
+    }
+
+    /// Get vote counts per event time option, in configured order (for testing)
+    pub async fn get_time_votes(&self) -> Vec<usize> {
+        let state = self.state.lock().await;
+        state.time_votes.iter().map(HashSet::len).collect()
     }
 
     /// Get current vote counts (for testing): (virtual, in_person, host_volunteers)
@@ -516,7 +916,7 @@ impl Middleware for WeeklyGathering {
                     let finalize_time = self.finalization_time();
                     (finalize_time, "finalize")
                 }
-                GatheringPhase::Finalized => {
+                GatheringPhase::Finalized(_) => {
                     // Wait until next event time, then reset
                     let next_event = self.next_event_time();
                     (next_event, "reset")
@@ -550,9 +950,9 @@ impl Middleware for WeeklyGathering {
                         }
                         "finalize" => {
                             tracing::info!("posting weekly gathering finalization");
+                            // post_finalization moves the phase to Finalized itself, since it
+                            // owns the message ID and host needed to accept a time pick.
                             self.post_finalization().await;
-                            let mut state = self.state.lock().await;
-                            state.phase = GatheringPhase::Finalized;
                         }
                         "reset" => {
                             self.reset_for_next_week().await;

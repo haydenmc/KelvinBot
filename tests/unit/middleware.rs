@@ -1557,8 +1557,43 @@ async fn test_attendance_relay_instantiation_from_config() {
 
 use chrono::{NaiveTime, Utc, Weekday};
 use kelvin_bot::middlewares::weekly_gathering::{
-    Household, WeeklyGathering, WeeklyGatheringConfig,
+    Household, WeeklyGathering, WeeklyGatheringConfig, parse_event_times,
 };
+
+/// Run `post_finalization` and return the body of the message it posts.
+///
+/// Finalization now waits for the send to report the new message's ID (so a time pick can be
+/// applied to it later), so the response channel has to be answered concurrently.
+async fn finalize_and_capture(
+    middleware: &WeeklyGathering,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>,
+    message_id: &str,
+) -> String {
+    let capture = async {
+        match cmd_rx.recv().await.expect("expected a finalization command") {
+            Command::SendRoomMessage { body, response_tx, .. } => {
+                response_tx
+                    .expect("finalization should request a message ID")
+                    .send(Ok(message_id.to_string()))
+                    .expect("failed to answer finalization response");
+                body
+            }
+            _ => panic!("Expected SendRoomMessage command"),
+        }
+    };
+
+    let (_, body) = tokio::join!(middleware.post_finalization(), capture);
+    body
+}
+
+/// Drain any `AddReaction` commands seeded on the finalization message, returning their keys.
+fn drain_reaction_keys(cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>) -> Vec<String> {
+    let mut keys = Vec::new();
+    while let Ok(Command::AddReaction { key, .. }) = cmd_rx.try_recv() {
+        keys.push(key);
+    }
+    keys
+}
 
 fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
     WeeklyGatheringConfig {
@@ -1566,6 +1601,7 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
         room_id: "!test:example.com".to_string(),
         event_day_of_week: Weekday::Sat,
         event_time: NaiveTime::from_hms_opt(19, 0, 0).unwrap(),
+        event_times: vec![],
         announce_minutes_before: 4320, // 72 hours
         finalize_minutes_before: 120,  // 2 hours
         reaction_virtual: "💻".to_string(),
@@ -1575,6 +1611,7 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
         finalization_virtual_message: "This week is VIRTUAL! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_in_person_message: "This week is IN-PERSON! Host: {host}. {virtual_count} virtual, {in_person_count} in-person votes.".to_string(),
         finalization_no_votes_message: "No votes received - gathering cancelled.".to_string(),
+        time_prompt_message: "Pick a time!".to_string(),
         households: vec![],
     }
 }
@@ -1841,21 +1878,12 @@ async fn test_weekly_gathering_finalization_virtual_wins() {
         .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "alice".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("VIRTUAL"));
-            assert!(body.contains("3 virtual"));
-            assert!(body.contains("1 in-person"));
-            assert!(body.contains("alice")); // Host
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("VIRTUAL"));
+    assert!(body.contains("3 virtual"));
+    assert!(body.contains("1 in-person"));
+    assert!(body.contains("alice")); // Host
 }
 
 #[tokio::test]
@@ -1882,21 +1910,12 @@ async fn test_weekly_gathering_finalization_in_person_wins() {
         .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "bob".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("IN-PERSON"));
-            assert!(body.contains("1 virtual"));
-            assert!(body.contains("3 in-person"));
-            assert!(body.contains("bob")); // Host
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("IN-PERSON"));
+    assert!(body.contains("1 virtual"));
+    assert!(body.contains("3 in-person"));
+    assert!(body.contains("bob")); // Host
 }
 
 #[tokio::test]
@@ -1920,20 +1939,11 @@ async fn test_weekly_gathering_finalization_tie_prefers_virtual() {
         .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), "dave".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("VIRTUAL"));
-            assert!(body.contains("2 virtual"));
-            assert!(body.contains("2 in-person"));
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("VIRTUAL"));
+    assert!(body.contains("2 virtual"));
+    assert!(body.contains("2 in-person"));
 }
 
 #[tokio::test]
@@ -1944,18 +1954,9 @@ async fn test_weekly_gathering_finalization_no_votes() {
     middleware.set_announced("msg123".to_string()).await;
 
     // No votes at all
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("No votes received"));
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("No votes received"));
 }
 
 #[tokio::test]
@@ -1970,18 +1971,9 @@ async fn test_weekly_gathering_finalization_no_host_volunteer() {
         .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("No host volunteered"));
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("No host volunteered"));
 }
 
 #[tokio::test]
@@ -2006,18 +1998,9 @@ async fn test_weekly_gathering_finalization_prefers_least_recently_hosted() {
         .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "bob".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("bob"));
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("bob"));
 }
 
 #[tokio::test]
@@ -2039,18 +2022,9 @@ async fn test_weekly_gathering_finalization_sole_volunteer_chosen_despite_histor
         .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "alice".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("alice"));
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("alice"));
 }
 
 #[tokio::test]
@@ -2067,6 +2041,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "Saturday".to_string(),
                 event_time: "19:00".to_string(),
+                event_times: "16:30,20:00".to_string(),
                 announce_minutes_before: 4320,
                 finalize_minutes_before: 120,
                 reaction_virtual: "💻".to_string(),
@@ -2076,6 +2051,7 @@ async fn test_weekly_gathering_instantiation_from_config() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                time_prompt_message: "Pick a time!".to_string(),
                 households: HashMap::new(),
             },
         },
@@ -2110,6 +2086,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "InvalidDay".to_string(),
                 event_time: "19:00".to_string(),
+                event_times: String::new(),
                 announce_minutes_before: 4320,
                 finalize_minutes_before: 120,
                 reaction_virtual: "💻".to_string(),
@@ -2119,6 +2096,7 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                time_prompt_message: "Pick a time!".to_string(),
                 households: HashMap::new(),
             },
         },
@@ -2151,6 +2129,7 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "Saturday".to_string(),
                 event_time: "7pm".to_string(),
+                event_times: String::new(),
                 announce_minutes_before: 4320,
                 finalize_minutes_before: 120,
                 reaction_virtual: "💻".to_string(),
@@ -2160,6 +2139,7 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                time_prompt_message: "Pick a time!".to_string(),
                 households: HashMap::new(),
             },
         },
@@ -2278,11 +2258,7 @@ async fn test_finalization_propagates_history_to_all_household_members() {
         .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "@hayden".to_string())
         .await;
 
-    middleware.post_finalization().await;
-
-    // Drain the SendRoomMessage command
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    let _ = cmd_rx.try_recv();
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
     // Both household members should have the same timestamp in host_history
     let host_history: HashMap<String, chrono::DateTime<Utc>> =
@@ -2317,21 +2293,12 @@ async fn test_finalization_household_display_name_in_message() {
         .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), "@hayden".to_string())
         .await;
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(
-                body.contains("Hayden and Gunnar"),
-                "message should use household display name, got: {body}"
-            );
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(
+        body.contains("Hayden and Gunnar"),
+        "message should use household display name, got: {body}"
+    );
 }
 
 #[tokio::test]
@@ -2360,18 +2327,9 @@ async fn test_weekly_gathering_finalization_virtual_wins_when_some_voted_both() 
     assert_eq!(virtual_count, 4);
     assert_eq!(in_person_count, 2);
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("VIRTUAL"), "virtual should win with 4 vs 2, got: {body}");
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("VIRTUAL"), "virtual should win with 4 vs 2, got: {body}");
 }
 
 #[tokio::test]
@@ -2398,18 +2356,9 @@ async fn test_weekly_gathering_finalization_in_person_wins_when_some_voted_both(
     assert_eq!(virtual_count, 2);
     assert_eq!(in_person_count, 4);
 
-    middleware.post_finalization().await;
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
-        Command::SendRoomMessage { body, .. } => {
-            assert!(body.contains("IN-PERSON"), "in-person should win with 4 vs 2, got: {body}");
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
+    assert!(body.contains("IN-PERSON"), "in-person should win with 4 vs 2, got: {body}");
 }
 
 #[tokio::test]
@@ -2428,6 +2377,7 @@ async fn test_weekly_gathering_instantiation_with_households() {
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "Saturday".to_string(),
                 event_time: "19:00".to_string(),
+                event_times: "16:30,20:00".to_string(),
                 announce_minutes_before: 4320,
                 finalize_minutes_before: 120,
                 reaction_virtual: "💻".to_string(),
@@ -2437,6 +2387,7 @@ async fn test_weekly_gathering_instantiation_with_households() {
                 finalization_virtual_message: "Virtual!".to_string(),
                 finalization_in_person_message: "In-person!".to_string(),
                 finalization_no_votes_message: "No votes!".to_string(),
+                time_prompt_message: "Pick a time!".to_string(),
                 households: {
                     let mut m = HashMap::new();
                     m.insert(
@@ -2462,4 +2413,464 @@ async fn test_weekly_gathering_instantiation_with_households() {
     let result = instantiate_middleware_from_config(&config, &cmd_tx);
     assert_ok!(&result);
     assert_eq!(result.unwrap().len(), 1);
+}
+
+// Event time voting
+
+/// Config with three voteable start times, wired into templates that surface the new placeholders.
+fn create_time_voting_config() -> WeeklyGatheringConfig {
+    let mut config = create_weekly_gathering_config();
+    config.event_times = parse_event_times("16:30,20:00,21:30").unwrap();
+    config.announcement_message = "Poll!\n{time_options}".to_string();
+    config.finalization_virtual_message =
+        "VIRTUAL at {event_time}. Host: {host}.\n{time_results}\n{time_prompt}".to_string();
+    config.finalization_in_person_message =
+        "IN-PERSON at {event_time}. Host: {host}.\n{time_results}\n{time_prompt}".to_string();
+    config
+}
+
+fn make_time_voting_gathering(cmd_tx: Sender<Command>) -> WeeklyGathering {
+    WeeklyGathering::new(make_ctx(cmd_tx), create_time_voting_config())
+}
+
+/// Cast in-person and host votes so finalization picks `host` and awaits their time pick.
+async fn vote_in_person_with_host(middleware: &WeeklyGathering, host: &str) {
+    middleware.set_announced("msg123".to_string()).await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🏠".to_string(), host.to_string())
+        .await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🙋".to_string(), host.to_string())
+        .await;
+}
+
+#[test]
+fn test_parse_event_times_assigns_keycaps_in_order() {
+    let options = parse_event_times("16:30, 20:00").unwrap();
+
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].reaction, "1\u{fe0f}\u{20e3}");
+    assert_eq!(options[0].label, "4:30pm");
+    assert_eq!(options[1].reaction, "2\u{fe0f}\u{20e3}");
+    assert_eq!(options[1].label, "8:00pm");
+}
+
+#[test]
+fn test_parse_event_times_empty_disables_voting() {
+    assert!(parse_event_times("").unwrap().is_empty());
+    assert!(parse_event_times("  ").unwrap().is_empty());
+}
+
+#[test]
+fn test_parse_event_times_rejects_bad_input() {
+    assert!(parse_event_times("7pm").is_err(), "unparseable time should be rejected");
+    assert!(parse_event_times("16:30,16:30").is_err(), "duplicate times should be rejected");
+
+    let eleven = (0..11).map(|h| format!("{h:02}:00")).collect::<Vec<_>>().join(",");
+    assert!(parse_event_times(&eleven).is_err(), "more than 10 options should be rejected");
+}
+
+#[tokio::test]
+async fn test_time_votes_recorded_and_removed() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // alice is free at two of the three times; bob only at the second
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "1\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "bob".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_time_votes().await, vec![1, 2, 0]);
+
+    middleware
+        .test_process_reaction_removed(
+            Some("msg123".to_string()),
+            Some("1\u{fe0f}\u{20e3}".to_string()),
+            "alice".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_time_votes().await, vec![0, 2, 0]);
+}
+
+#[tokio::test]
+async fn test_time_vote_matches_keycap_without_variation_selector() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+
+    // Some clients send keycaps without U+FE0F; both spellings are the same option
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "1\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_time_votes().await, vec![1, 0, 0]);
+}
+
+#[tokio::test]
+async fn test_unknown_reaction_records_no_vote() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "🎉".to_string(), "alice".to_string())
+        .await;
+
+    assert_eq!(middleware.get_time_votes().await, vec![0, 0, 0]);
+    assert_eq!(middleware.get_vote_counts().await, (0, 0, 0));
+}
+
+#[tokio::test]
+async fn test_virtual_finalization_auto_picks_most_voted_time() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+    for user in ["alice", "bob"] {
+        middleware
+            .test_process_reaction_added("msg123".to_string(), "💻".to_string(), user.to_string())
+            .await;
+        middleware
+            .test_process_reaction_added(
+                "msg123".to_string(),
+                "3\u{fe0f}\u{20e3}".to_string(),
+                user.to_string(),
+            )
+            .await;
+    }
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "1\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+
+    assert!(body.contains("VIRTUAL at ") && body.contains(" at 9:30pm"), "got: {body}");
+    assert!(body.contains("3\u{fe0f}\u{20e3} 9:30pm — 2 votes **← selected**"), "got: {body}");
+    assert!(!body.contains("Pick a time!"), "virtual needs no host pick, got: {body}");
+    assert_eq!(middleware.get_selected_time().await, Some(2));
+    assert!(drain_reaction_keys(&mut cmd_rx).is_empty(), "no pick reactions should be seeded");
+}
+
+#[tokio::test]
+async fn test_virtual_finalization_time_tie_prefers_earlier() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+    // 8:00pm and 9:30pm each get one vote — the earlier one wins
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "3\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "bob".to_string(),
+        )
+        .await;
+
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+
+    assert!(body.contains("VIRTUAL at ") && body.contains(" at 8:00pm"), "got: {body}");
+    assert_eq!(middleware.get_selected_time().await, Some(1));
+}
+
+#[tokio::test]
+async fn test_virtual_finalization_without_time_votes_is_tbd() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    middleware.set_announced("msg123".to_string()).await;
+    middleware
+        .test_process_reaction_added("msg123".to_string(), "💻".to_string(), "alice".to_string())
+        .await;
+
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+
+    assert!(body.contains("VIRTUAL at ") && body.contains(" (time TBD)"), "got: {body}");
+    assert_eq!(middleware.get_selected_time().await, None);
+}
+
+#[tokio::test]
+async fn test_in_person_finalization_awaits_host_pick() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+    // 9:30pm is the most popular, 8:00pm second, 4:30pm unvoted
+    for user in ["alice", "bob"] {
+        middleware
+            .test_process_reaction_added(
+                "msg123".to_string(),
+                "3\u{fe0f}\u{20e3}".to_string(),
+                user.to_string(),
+            )
+            .await;
+    }
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "bob".to_string(),
+        )
+        .await;
+
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+
+    assert!(body.contains("IN-PERSON at ") && body.contains(" (time TBD)"), "got: {body}");
+    assert!(body.contains("Pick a time!"), "host should be prompted, got: {body}");
+    assert!(!body.contains("← selected"), "nothing is selected yet, got: {body}");
+    assert_eq!(middleware.get_selected_time().await, None);
+
+    // Every configured time is offered, ordered most-preferred first
+    assert_eq!(
+        drain_reaction_keys(&mut cmd_rx),
+        vec!["3\u{fe0f}\u{20e3}", "2\u{fe0f}\u{20e3}", "1\u{fe0f}\u{20e3}"]
+    );
+}
+
+#[tokio::test]
+async fn test_host_pick_edits_finalization_message() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+    drain_reaction_keys(&mut cmd_rx);
+
+    middleware
+        .test_process_reaction_added(
+            "final1".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_selected_time().await, Some(1));
+    match cmd_rx.try_recv().expect("expected an edit command") {
+        Command::EditMessage { message_id, new_body, .. } => {
+            assert_eq!(message_id, "final1");
+            assert!(
+                new_body.contains("IN-PERSON at ") && new_body.contains(" at 8:00pm"),
+                "got: {new_body}"
+            );
+            assert!(new_body.contains("2\u{fe0f}\u{20e3} 8:00pm — 0 votes **← selected**"));
+            assert!(!new_body.contains("Pick a time!"), "prompt should be gone: {new_body}");
+        }
+        _ => panic!("Expected EditMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_host_can_change_pick() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+    drain_reaction_keys(&mut cmd_rx);
+
+    for key in ["2\u{fe0f}\u{20e3}", "1\u{fe0f}\u{20e3}"] {
+        middleware
+            .test_process_reaction_added("final1".to_string(), key.to_string(), "alice".to_string())
+            .await;
+    }
+
+    assert_eq!(middleware.get_selected_time().await, Some(0), "the later pick wins");
+}
+
+#[tokio::test]
+async fn test_host_removing_pick_reverts_to_pending() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+    drain_reaction_keys(&mut cmd_rx);
+
+    middleware
+        .test_process_reaction_added(
+            "final1".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+    let _ = cmd_rx.try_recv();
+
+    middleware
+        .test_process_reaction_removed(
+            Some("final1".to_string()),
+            Some("2\u{fe0f}\u{20e3}".to_string()),
+            "alice".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_selected_time().await, None);
+    match cmd_rx.try_recv().expect("expected an edit command") {
+        Command::EditMessage { new_body, .. } => {
+            assert!(
+                new_body.contains("IN-PERSON at ") && new_body.contains(" (time TBD)"),
+                "got: {new_body}"
+            );
+            assert!(new_body.contains("Pick a time!"), "prompt should return: {new_body}");
+        }
+        _ => panic!("Expected EditMessage command"),
+    }
+}
+
+#[tokio::test]
+async fn test_non_host_pick_is_ignored() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+    drain_reaction_keys(&mut cmd_rx);
+
+    middleware
+        .test_process_reaction_added(
+            "final1".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "mallory".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_selected_time().await, None);
+    assert!(cmd_rx.try_recv().is_err(), "no edit should be issued");
+}
+
+#[tokio::test]
+async fn test_household_member_can_pick_for_host() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let mut config = create_time_voting_config();
+    config.households = vec![Household {
+        name: "Hayden and Gunnar".to_string(),
+        members: vec!["@hayden".to_string(), "@gun".to_string()],
+    }];
+    let middleware = WeeklyGathering::new(make_ctx(cmd_tx), config);
+
+    vote_in_person_with_host(&middleware, "@hayden").await;
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+    drain_reaction_keys(&mut cmd_rx);
+
+    // @gun didn't volunteer, but shares a household with the selected host
+    middleware
+        .test_process_reaction_added(
+            "final1".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "@gun".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_selected_time().await, Some(1));
+}
+
+#[tokio::test]
+async fn test_pick_on_other_message_is_ignored() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+    finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+    drain_reaction_keys(&mut cmd_rx);
+
+    middleware
+        .test_process_reaction_added(
+            "msg123".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+
+    assert_eq!(middleware.get_selected_time().await, None);
+    assert!(cmd_rx.try_recv().is_err(), "no edit should be issued");
+}
+
+#[tokio::test]
+async fn test_announcement_seeds_time_reactions_and_renders_options() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_time_voting_gathering(cmd_tx);
+
+    let announce = async {
+        match cmd_rx.recv().await.expect("expected an announcement command") {
+            Command::SendRoomMessage { body, response_tx, .. } => {
+                response_tx.unwrap().send(Ok("msg123".to_string())).unwrap();
+                body
+            }
+            _ => panic!("Expected SendRoomMessage command"),
+        }
+    };
+    let (_, body) = tokio::join!(middleware.test_post_announcement(), announce);
+
+    assert!(body.contains("1\u{fe0f}\u{20e3} 4:30pm"), "got: {body}");
+    assert!(body.contains("3\u{fe0f}\u{20e3} 9:30pm"), "got: {body}");
+
+    assert_eq!(
+        drain_reaction_keys(&mut cmd_rx),
+        vec!["💻", "🏠", "🙋", "1\u{fe0f}\u{20e3}", "2\u{fe0f}\u{20e3}", "3\u{fe0f}\u{20e3}"]
+    );
+}
+
+#[tokio::test]
+async fn test_finalization_unchanged_without_configured_times() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let middleware = make_weekly_gathering(cmd_tx);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+
+    // Templates without time placeholders render exactly as before, with the configured event time
+    assert_eq!(
+        body,
+        "This week is IN-PERSON! Host: alice. 0 virtual, 1 in-person votes.".to_string()
+    );
+    assert!(drain_reaction_keys(&mut cmd_rx).is_empty(), "no pick reactions without times");
+
+    // ...and a reaction on the finalization message changes nothing
+    middleware
+        .test_process_reaction_added(
+            "final1".to_string(),
+            "2\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+    assert!(cmd_rx.try_recv().is_err(), "no edit should be issued");
 }

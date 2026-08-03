@@ -144,6 +144,11 @@ pub enum MiddlewareKind {
         room_id: String,
         event_day_of_week: String,
         event_time: String,
+        /// Comma-separated list of candidate start times in 24h `HH:MM` form
+        /// (e.g. `16:30,20:00`). Stored as a string for env-var config
+        /// compatibility. Empty disables event-time voting.
+        #[serde(default)]
+        event_times: String,
         #[serde_as(as = "DisplayFromStr")]
         announce_minutes_before: u32,
         #[serde_as(as = "DisplayFromStr")]
@@ -155,6 +160,10 @@ pub enum MiddlewareKind {
         finalization_virtual_message: String,
         finalization_in_person_message: String,
         finalization_no_votes_message: String,
+        /// Call to action rendered into `{time_prompt}` while the host still
+        /// has an event time to pick.
+        #[serde(default = "default_time_prompt_message")]
+        time_prompt_message: String,
         #[serde(default)]
         households: HashMap<String, HouseholdCfg>,
     },
@@ -183,6 +192,10 @@ fn default_reset_command() -> String {
 
 fn default_invite_command() -> String {
     "!invite".to_string()
+}
+
+fn default_time_prompt_message() -> String {
+    "React with the time that works best to lock it in.".to_string()
 }
 
 fn default_reset_ttl() -> Duration {
