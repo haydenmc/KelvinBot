@@ -202,9 +202,9 @@ pub fn instantiate_middleware_from_config(
                 service_id,
                 room_id,
                 event_day_of_week,
-                event_time,
-                announce_minutes_before,
-                finalize_minutes_before,
+                event_time_options,
+                finalize_time,
+                poll_open_minutes,
                 reaction_virtual,
                 reaction_in_person,
                 reaction_host,
@@ -212,6 +212,7 @@ pub fn instantiate_middleware_from_config(
                 finalization_virtual_message,
                 finalization_in_person_message,
                 finalization_no_votes_message,
+                time_prompt_message,
                 households,
             } => {
                 // Parse day_of_week string to Weekday
@@ -221,12 +222,23 @@ pub fn instantiate_middleware_from_config(
                         event_day_of_week, name
                     ))?;
 
-                // Parse time string (HH:MM format)
-                let naive_time = chrono::NaiveTime::parse_from_str(event_time, "%H:%M")
+                // Parse the poll close time (HH:MM format), which lands on the event day
+                let finalize_naive_time = chrono::NaiveTime::parse_from_str(finalize_time, "%H:%M")
                     .map_err(|_| anyhow::anyhow!(
-                        "invalid event_time format '{}' for middleware '{}'. Expected format: HH:MM (e.g., 19:00)",
-                        event_time, name
+                        "invalid finalize_time format '{}' for middleware '{}'. Expected format: HH:MM (e.g., 14:00)",
+                        finalize_time, name
                     ))?;
+
+                let time_options =
+                    crate::middlewares::weekly_gathering::parse_event_times(event_time_options)
+                        .map_err(|e| anyhow::anyhow!("{} for middleware '{}'", e, name))?;
+
+                if time_options.is_empty() {
+                    bail!(
+                        "event_time_options is required for middleware '{}'. Provide at least one HH:MM start time (a single time means a fixed start, with no vote)",
+                        name
+                    );
+                }
 
                 let runtime_households: Vec<Household> = households
                     .values()
@@ -247,9 +259,9 @@ pub fn instantiate_middleware_from_config(
                         service_id: service_id.clone(),
                         room_id: room_id.clone(),
                         event_day_of_week: weekday,
-                        event_time: naive_time,
-                        announce_minutes_before: *announce_minutes_before,
-                        finalize_minutes_before: *finalize_minutes_before,
+                        event_time_options: time_options,
+                        finalize_time: finalize_naive_time,
+                        poll_open_minutes: *poll_open_minutes,
                         reaction_virtual: reaction_virtual.clone(),
                         reaction_in_person: reaction_in_person.clone(),
                         reaction_host: reaction_host.clone(),
@@ -257,6 +269,7 @@ pub fn instantiate_middleware_from_config(
                         finalization_virtual_message: finalization_virtual_message.clone(),
                         finalization_in_person_message: finalization_in_person_message.clone(),
                         finalization_no_votes_message: finalization_no_votes_message.clone(),
+                        time_prompt_message: time_prompt_message.clone(),
                         households: runtime_households,
                     },
                 ))

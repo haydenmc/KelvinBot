@@ -143,11 +143,15 @@ pub enum MiddlewareKind {
         service_id: String,
         room_id: String,
         event_day_of_week: String,
-        event_time: String,
+        /// Comma-separated list of candidate start times in 24h `HH:MM` form
+        /// (e.g. `16:30,20:00`). Stored as a string for env-var config
+        /// compatibility. A single time means a fixed start with no vote.
+        event_time_options: String,
+        /// When the poll closes, as 24h `HH:MM` on the event day itself.
+        finalize_time: String,
+        /// How long the poll stays open before `finalize_time`.
         #[serde_as(as = "DisplayFromStr")]
-        announce_minutes_before: u32,
-        #[serde_as(as = "DisplayFromStr")]
-        finalize_minutes_before: u32,
+        poll_open_minutes: u32,
         reaction_virtual: String,
         reaction_in_person: String,
         reaction_host: String,
@@ -155,6 +159,10 @@ pub enum MiddlewareKind {
         finalization_virtual_message: String,
         finalization_in_person_message: String,
         finalization_no_votes_message: String,
+        /// Call to action rendered into `{time_prompt}` while the host still
+        /// has an event time to pick.
+        #[serde(default = "default_time_prompt_message")]
+        time_prompt_message: String,
         #[serde(default)]
         households: HashMap<String, HouseholdCfg>,
     },
@@ -183,6 +191,10 @@ fn default_reset_command() -> String {
 
 fn default_invite_command() -> String {
     "!invite".to_string()
+}
+
+fn default_time_prompt_message() -> String {
+    "React with the time that works best to lock it in.".to_string()
 }
 
 fn default_reset_ttl() -> Duration {

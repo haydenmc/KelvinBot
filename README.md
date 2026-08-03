@@ -303,6 +303,103 @@ If a user doesn't have a display name, their user ID is used as fallback.
 - The middleware does not prevent relay loops - configure carefully
 - Messages are relayed as plain text; formatting may not be preserved across different platforms
 
+#### Weekly Gathering Middleware
+
+Runs a weekly poll in a room. Ahead of a recurring event it posts an announcement with reactions
+for virtual vs in-person, volunteering to host, and (optionally) candidate start times. Later it
+posts a finalization message with the results and the selected host.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=weeklygathering
+KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
+KELVIN__MIDDLEWARES__<name>__ROOM_ID=<room_id>
+KELVIN__MIDDLEWARES__<name>__EVENT_DAY_OF_WEEK=<Monday..Sunday>
+KELVIN__MIDDLEWARES__<name>__EVENT_TIME_OPTIONS=<HH:MM,HH:MM,...>
+KELVIN__MIDDLEWARES__<name>__FINALIZE_TIME=<HH:MM>           # Poll closes, on the event day
+KELVIN__MIDDLEWARES__<name>__POLL_OPEN_MINUTES=<minutes>     # Poll opens this long before
+KELVIN__MIDDLEWARES__<name>__REACTION_VIRTUAL=<emoji>
+KELVIN__MIDDLEWARES__<name>__REACTION_IN_PERSON=<emoji>
+KELVIN__MIDDLEWARES__<name>__REACTION_HOST=<emoji>
+KELVIN__MIDDLEWARES__<name>__ANNOUNCEMENT_MESSAGE=<template>
+KELVIN__MIDDLEWARES__<name>__FINALIZATION_VIRTUAL_MESSAGE=<template>
+KELVIN__MIDDLEWARES__<name>__FINALIZATION_IN_PERSON_MESSAGE=<template>
+KELVIN__MIDDLEWARES__<name>__FINALIZATION_NO_VOTES_MESSAGE=<template>
+KELVIN__MIDDLEWARES__<name>__TIME_PROMPT_MESSAGE=<text>      # Optional
+KELVIN__MIDDLEWARES__<name>__HOUSEHOLDS__<key>__NAME=<display_name>
+KELVIN__MIDDLEWARES__<name>__HOUSEHOLDS__<key>__MEMBERS=<user_id,user_id,...>
+```
+
+**Host Selection:**
+Hosts are chosen from the volunteers, preferring whoever hosted least recently. Members of the same
+household count as a single candidate and have their host history updated together, so a household
+isn't picked two weeks running just because a different member volunteered.
+
+**Scheduling:**
+The gathering recurs on `EVENT_DAY_OF_WEEK`. `FINALIZE_TIME` is when the poll closes, on the event
+day itself, and the poll opens `POLL_OPEN_MINUTES` earlier — so the announcement can land days
+ahead (4200 minutes ≈ 2.9 days) while the decision is always made the morning of. There is no
+separate event-time setting: the start time comes from `EVENT_TIME_OPTIONS`.
+
+Because finalization always lands on the event day, this middleware only organizes same-day plans.
+Once `FINALIZE_TIME` passes, the cycle is considered done and the next gathering is a week out.
+
+> **Migrating from `EVENT_TIME`:** earlier versions took `EVENT_TIME`, `ANNOUNCE_MINUTES_BEFORE` and
+> `FINALIZE_MINUTES_BEFORE`, all relative to a fixed event instant. To convert:
+> `FINALIZE_TIME` = `EVENT_TIME` − `FINALIZE_MINUTES_BEFORE`,
+> `POLL_OPEN_MINUTES` = `ANNOUNCE_MINUTES_BEFORE` − `FINALIZE_MINUTES_BEFORE`, and
+> `EVENT_TIME_OPTIONS` = the old `EVENT_TIME` if you don't want a vote. The removed keys are not
+> accepted, so a stale config fails at startup rather than silently rescheduling itself.
+
+**Event Time Voting:**
+`EVENT_TIME_OPTIONS` is a required comma-separated list of 24-hour `HH:MM` start times (up to 10).
+Each is assigned a keycap reaction — 1️⃣ 2️⃣ 3️⃣ … — by position, and participants may approve as many
+as suit them. A **single** time means a fixed start with no vote: no keycap reactions are seeded and
+no host prompt is shown. With two or more, at finalization:
+
+- **Virtual gatherings** get the most-voted time automatically (ties go to the earlier time).
+- **In-person gatherings** leave the choice to the host, since the venue is theirs. Every configured
+  time is offered as a reaction on the finalization message, ordered most-preferred first. When the
+  host — or anyone in their household — reacts with a time, the message is edited in place to state
+  the scheduled time. If nobody picks, the message keeps showing the options.
+
+**Message Placeholders:**
+
+| Placeholder | Available in | Renders |
+|---|---|---|
+| `{event_time}` | both | `Saturday at 8:00pm`, or `Saturday (time TBD)` while unresolved |
+| `{reaction_virtual}`, `{reaction_in_person}`, `{reaction_host}` | announcement | The configured emoji |
+| `{time_options}` | announcement | One `1️⃣ 4:30pm` line per configured time |
+| `{virtual_count}`, `{in_person_count}` | finalization | Vote counts |
+| `{host}` | finalization | Host or household display name |
+| `{time_results}` | finalization | Times ranked by votes, marking the selected one |
+| `{time_prompt}` | finalization | `TIME_PROMPT_MESSAGE`, only while the host has yet to pick |
+
+**Example:**
+```bash
+KELVIN__MIDDLEWARES__gathering__KIND=weeklygathering
+KELVIN__MIDDLEWARES__gathering__SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__gathering__ROOM_ID=!yourroom:matrix.org
+KELVIN__MIDDLEWARES__gathering__EVENT_DAY_OF_WEEK=Saturday
+KELVIN__MIDDLEWARES__gathering__EVENT_TIME_OPTIONS=16:30,20:00,21:30
+KELVIN__MIDDLEWARES__gathering__FINALIZE_TIME=14:00            # Poll closes Saturday 2pm
+KELVIN__MIDDLEWARES__gathering__POLL_OPEN_MINUTES=4200         # Opens ~2.9 days earlier
+KELVIN__MIDDLEWARES__gathering__REACTION_VIRTUAL=💻
+KELVIN__MIDDLEWARES__gathering__REACTION_IN_PERSON=🏠
+KELVIN__MIDDLEWARES__gathering__REACTION_HOST=🙋
+KELVIN__MIDDLEWARES__gathering__ANNOUNCEMENT_MESSAGE="# Gathering Time!\n\nComing up **{event_time}**! Vote for your preference:\n\n - {reaction_virtual} Virtual\n - {reaction_in_person} In-Person\n - {reaction_host} Volunteer to Host\n\nWhich times work for you?\n\n{time_options}"
+KELVIN__MIDDLEWARES__gathering__FINALIZATION_VIRTUAL_MESSAGE="# It's Virtual!\n\nMeet **{event_time}**.\n\n{time_results}"
+KELVIN__MIDDLEWARES__gathering__FINALIZATION_IN_PERSON_MESSAGE="# It's In-Person!\n\n{host} is hosting, **{event_time}**.\n\n{time_results}\n\n{time_prompt}"
+KELVIN__MIDDLEWARES__gathering__FINALIZATION_NO_VOTES_MESSAGE="No votes this week — consider it canceled."
+KELVIN__MIDDLEWARES__gathering__TIME_PROMPT_MESSAGE="{host}: react with the time that works for you to lock it in."
+
+# Treat two users as one household for host rotation
+KELVIN__MIDDLEWARES__gathering__HOUSEHOLDS__h1__NAME="Alice and Bob"
+KELVIN__MIDDLEWARES__gathering__HOUSEHOLDS__h1__MEMBERS=@alice:matrix.org,@bob:matrix.org
+
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=gathering,logger
+```
+
 ### Middleware Pipelines
 
 Services can have multiple middlewares that process events sequentially:
