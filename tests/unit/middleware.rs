@@ -1555,9 +1555,9 @@ async fn test_attendance_relay_instantiation_from_config() {
 
 // Weekly Gathering Middleware Tests
 
-use chrono::{NaiveTime, Utc, Weekday};
+use chrono::{Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use kelvin_bot::middlewares::weekly_gathering::{
-    Household, WeeklyGathering, WeeklyGatheringConfig, parse_event_times,
+    Household, WeeklyGathering, WeeklyGatheringConfig, next_event_date_from, parse_event_times,
 };
 
 /// Run `post_finalization` and return the body of the message it posts.
@@ -1582,7 +1582,8 @@ async fn finalize_and_capture(
         }
     };
 
-    let (_, body) = tokio::join!(middleware.post_finalization(), capture);
+    let (_, body) =
+        tokio::join!(middleware.post_finalization(middleware.test_event_date()), capture);
     body
 }
 
@@ -1600,10 +1601,9 @@ fn create_weekly_gathering_config() -> WeeklyGatheringConfig {
         service_id: "matrix".to_string(),
         room_id: "!test:example.com".to_string(),
         event_day_of_week: Weekday::Sat,
-        event_time: NaiveTime::from_hms_opt(19, 0, 0).unwrap(),
-        event_times: vec![],
-        announce_minutes_before: 4320, // 72 hours
-        finalize_minutes_before: 120,  // 2 hours
+        event_time_options: parse_event_times("19:00").unwrap(),
+        finalize_time: NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+        poll_open_minutes: 4200, // ~2.9 days
         reaction_virtual: "💻".to_string(),
         reaction_in_person: "🏠".to_string(),
         reaction_host: "🙋".to_string(),
@@ -2040,10 +2040,9 @@ async fn test_weekly_gathering_instantiation_from_config() {
                 service_id: "matrix".to_string(),
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "Saturday".to_string(),
-                event_time: "19:00".to_string(),
-                event_times: "16:30,20:00".to_string(),
-                announce_minutes_before: 4320,
-                finalize_minutes_before: 120,
+                event_time_options: "16:30,20:00".to_string(),
+                finalize_time: "14:00".to_string(),
+                poll_open_minutes: 4200,
                 reaction_virtual: "💻".to_string(),
                 reaction_in_person: "🏠".to_string(),
                 reaction_host: "🙋".to_string(),
@@ -2085,10 +2084,9 @@ async fn test_weekly_gathering_instantiation_invalid_day_of_week() {
                 service_id: "matrix".to_string(),
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "InvalidDay".to_string(),
-                event_time: "19:00".to_string(),
-                event_times: String::new(),
-                announce_minutes_before: 4320,
-                finalize_minutes_before: 120,
+                event_time_options: "19:00".to_string(),
+                finalize_time: "14:00".to_string(),
+                poll_open_minutes: 4200,
                 reaction_virtual: "💻".to_string(),
                 reaction_in_person: "🏠".to_string(),
                 reaction_host: "🙋".to_string(),
@@ -2128,10 +2126,9 @@ async fn test_weekly_gathering_instantiation_invalid_time_format() {
                 service_id: "matrix".to_string(),
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "Saturday".to_string(),
-                event_time: "7pm".to_string(),
-                event_times: String::new(),
-                announce_minutes_before: 4320,
-                finalize_minutes_before: 120,
+                event_time_options: "19:00".to_string(),
+                finalize_time: "2pm".to_string(),
+                poll_open_minutes: 4200,
                 reaction_virtual: "💻".to_string(),
                 reaction_in_person: "🏠".to_string(),
                 reaction_host: "🙋".to_string(),
@@ -2376,10 +2373,9 @@ async fn test_weekly_gathering_instantiation_with_households() {
                 service_id: "matrix".to_string(),
                 room_id: "!gathering:matrix.org".to_string(),
                 event_day_of_week: "Saturday".to_string(),
-                event_time: "19:00".to_string(),
-                event_times: "16:30,20:00".to_string(),
-                announce_minutes_before: 4320,
-                finalize_minutes_before: 120,
+                event_time_options: "16:30,20:00".to_string(),
+                finalize_time: "14:00".to_string(),
+                poll_open_minutes: 4200,
                 reaction_virtual: "💻".to_string(),
                 reaction_in_person: "🏠".to_string(),
                 reaction_host: "🙋".to_string(),
@@ -2420,7 +2416,7 @@ async fn test_weekly_gathering_instantiation_with_households() {
 /// Config with three voteable start times, wired into templates that surface the new placeholders.
 fn create_time_voting_config() -> WeeklyGatheringConfig {
     let mut config = create_weekly_gathering_config();
-    config.event_times = parse_event_times("16:30,20:00,21:30").unwrap();
+    config.event_time_options = parse_event_times("16:30,20:00,21:30").unwrap();
     config.announcement_message = "Poll!\n{time_options}".to_string();
     config.finalization_virtual_message =
         "VIRTUAL at {event_time}. Host: {host}.\n{time_results}\n{time_prompt}".to_string();
@@ -2456,7 +2452,8 @@ fn test_parse_event_times_assigns_keycaps_in_order() {
 }
 
 #[test]
-fn test_parse_event_times_empty_disables_voting() {
+fn test_parse_event_times_empty_yields_no_options() {
+    // Rejected at the config layer; see test_weekly_gathering_instantiation_requires_time_options
     assert!(parse_event_times("").unwrap().is_empty());
     assert!(parse_event_times("  ").unwrap().is_empty());
 }
@@ -2849,7 +2846,7 @@ async fn test_announcement_seeds_time_reactions_and_renders_options() {
 }
 
 #[tokio::test]
-async fn test_finalization_unchanged_without_configured_times() {
+async fn test_finalization_with_single_fixed_time() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(20);
     let middleware = make_weekly_gathering(cmd_tx);
 
@@ -2857,12 +2854,13 @@ async fn test_finalization_unchanged_without_configured_times() {
 
     let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
 
-    // Templates without time placeholders render exactly as before, with the configured event time
+    // A single option is a fixed time, not a poll: templates render exactly as before
     assert_eq!(
         body,
         "This week is IN-PERSON! Host: alice. 0 virtual, 1 in-person votes.".to_string()
     );
-    assert!(drain_reaction_keys(&mut cmd_rx).is_empty(), "no pick reactions without times");
+    assert!(drain_reaction_keys(&mut cmd_rx).is_empty(), "no pick reactions for a fixed time");
+    assert_eq!(middleware.get_selected_time().await, Some(0), "the sole option is the time");
 
     // ...and a reaction on the finalization message changes nothing
     middleware
@@ -2873,4 +2871,139 @@ async fn test_finalization_unchanged_without_configured_times() {
         )
         .await;
     assert!(cmd_rx.try_recv().is_err(), "no edit should be issued");
+}
+
+#[test]
+fn test_next_event_date_before_poll_closes_is_today() {
+    // Saturday 09:00, poll closes 14:00 — the gathering is still today
+    let now = Local.with_ymd_and_hms(2026, 8, 1, 9, 0, 0).unwrap();
+    let finalize = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+
+    let date = next_event_date_from(now, Weekday::Sat, finalize);
+
+    assert_eq!(date, now.date_naive(), "before the poll closes, today is still the event day");
+}
+
+#[test]
+fn test_next_event_date_after_poll_closes_rolls_to_next_week() {
+    // Saturday 15:00, poll closed at 14:00 — this cycle is done
+    let now = Local.with_ymd_and_hms(2026, 8, 1, 15, 0, 0).unwrap();
+    let finalize = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+
+    let date = next_event_date_from(now, Weekday::Sat, finalize);
+
+    assert_eq!(date, now.date_naive() + chrono::Duration::days(7));
+}
+
+#[test]
+fn test_next_event_date_from_other_days() {
+    let finalize = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+
+    // Wednesday → the coming Saturday
+    let wednesday = Local.with_ymd_and_hms(2026, 7, 29, 18, 0, 0).unwrap();
+    assert_eq!(
+        next_event_date_from(wednesday, Weekday::Sat, finalize),
+        NaiveDate::from_ymd_opt(2026, 8, 1).unwrap()
+    );
+
+    // Sunday, the day after → nearly a full week out
+    let sunday = Local.with_ymd_and_hms(2026, 8, 2, 10, 0, 0).unwrap();
+    assert_eq!(
+        next_event_date_from(sunday, Weekday::Sat, finalize),
+        NaiveDate::from_ymd_opt(2026, 8, 8).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_single_time_option_seeds_no_time_reactions() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let mut config = create_weekly_gathering_config();
+    config.announcement_message = "Poll at {event_time}!".to_string();
+    let middleware = WeeklyGathering::new(make_ctx(cmd_tx), config);
+
+    let announce = async {
+        match cmd_rx.recv().await.expect("expected an announcement command") {
+            Command::SendRoomMessage { body, response_tx, .. } => {
+                response_tx.unwrap().send(Ok("msg123".to_string())).unwrap();
+                body
+            }
+            _ => panic!("Expected SendRoomMessage command"),
+        }
+    };
+    let (_, body) = tokio::join!(middleware.test_post_announcement(), announce);
+
+    // A fixed time is stated up front rather than put to a vote
+    assert!(body.contains("at 7:00pm"), "got: {body}");
+    assert_eq!(drain_reaction_keys(&mut cmd_rx), vec!["💻", "🏠", "🙋"]);
+}
+
+#[tokio::test]
+async fn test_single_time_option_needs_no_host_pick() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(20);
+    let mut config = create_weekly_gathering_config();
+    config.finalization_in_person_message =
+        "IN-PERSON at {event_time}. Host: {host}.{time_prompt}".to_string();
+    let middleware = WeeklyGathering::new(make_ctx(cmd_tx), config);
+
+    vote_in_person_with_host(&middleware, "alice").await;
+
+    let body = finalize_and_capture(&middleware, &mut cmd_rx, "final1").await;
+
+    assert!(body.contains("at 7:00pm"), "got: {body}");
+    assert!(!body.contains("Pick a time!"), "nothing to pick, got: {body}");
+    assert!(drain_reaction_keys(&mut cmd_rx).is_empty());
+
+    // Even the host reacting with a keycap changes nothing
+    middleware
+        .test_process_reaction_added(
+            "final1".to_string(),
+            "1\u{fe0f}\u{20e3}".to_string(),
+            "alice".to_string(),
+        )
+        .await;
+    assert!(cmd_rx.try_recv().is_err(), "no edit should be issued");
+}
+
+#[tokio::test]
+async fn test_weekly_gathering_instantiation_requires_time_options() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "gathering".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::WeeklyGathering {
+                service_id: "matrix".to_string(),
+                room_id: "!gathering:matrix.org".to_string(),
+                event_day_of_week: "Saturday".to_string(),
+                event_time_options: String::new(),
+                finalize_time: "14:00".to_string(),
+                poll_open_minutes: 4200,
+                reaction_virtual: "💻".to_string(),
+                reaction_in_person: "🏠".to_string(),
+                reaction_host: "🙋".to_string(),
+                announcement_message: "Weekly poll!".to_string(),
+                finalization_virtual_message: "Virtual!".to_string(),
+                finalization_in_person_message: "In-person!".to_string(),
+                finalization_no_votes_message: "No votes!".to_string(),
+                time_prompt_message: "Pick a time!".to_string(),
+                households: HashMap::new(),
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: Default::default(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    let err = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an empty event_time_options should be rejected"),
+    };
+    assert!(err.contains("event_time_options is required"), "got: {err}");
 }

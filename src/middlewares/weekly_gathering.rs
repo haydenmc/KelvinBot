@@ -7,7 +7,7 @@ use crate::core::{
 use crate::store::PersistentStore;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -84,6 +84,29 @@ pub fn parse_event_times(spec: &str) -> Result<Vec<EventTimeOption>> {
     Ok(options)
 }
 
+/// The date of the gathering upcoming as of `now`.
+///
+/// Rolls to next week once the current cycle's poll has closed — past `finalize_time` on the day
+/// itself there is nothing left to organize, so the next gathering is a week out.
+pub fn next_event_date_from(
+    now: DateTime<Local>,
+    event_day_of_week: Weekday,
+    finalize_time: NaiveTime,
+) -> NaiveDate {
+    let current_num = now.weekday().number_from_monday();
+    let target_num = event_day_of_week.number_from_monday();
+
+    let days_until_target = if now.weekday() == event_day_of_week {
+        if now.time() < finalize_time { 0 } else { 7 }
+    } else if target_num > current_num {
+        target_num - current_num
+    } else {
+        7 - (current_num - target_num)
+    };
+
+    now.date_naive() + Duration::days(days_until_target as i64)
+}
+
 /// Render a time as `4:30pm`.
 fn format_time_label(time: NaiveTime) -> String {
     time.format("%-I:%M%P").to_string()
@@ -99,10 +122,12 @@ pub struct WeeklyGatheringConfig {
     pub service_id: String,
     pub room_id: String,
     pub event_day_of_week: Weekday,
-    pub event_time: NaiveTime,
-    pub event_times: Vec<EventTimeOption>,
-    pub announce_minutes_before: u32,
-    pub finalize_minutes_before: u32,
+    /// Candidate start times. A single option is a fixed time rather than a poll.
+    pub event_time_options: Vec<EventTimeOption>,
+    /// When the poll closes, on the event day itself.
+    pub finalize_time: NaiveTime,
+    /// How long the poll stays open before `finalize_time`.
+    pub poll_open_minutes: u32,
     pub reaction_virtual: String,
     pub reaction_in_person: String,
     pub reaction_host: String,
@@ -118,12 +143,14 @@ pub struct WeeklyGatheringConfig {
 /// applied and the message re-rendered in place.
 #[derive(Debug, Clone)]
 struct FinalizedState {
+    /// Date of the gathering this finalization is for.
+    event_date: NaiveDate,
     /// `None` if the finalization message failed to send.
     message_id: Option<String>,
     /// User IDs permitted to pick the time — the selected host and their
     /// household. Empty when the time is not the host's to choose.
     pickers: HashSet<String>,
-    /// Index into `config.event_times`.
+    /// Index into `config.event_time_options`.
     selected_time: Option<usize>,
     virtual_count: usize,
     in_person_count: usize,
@@ -133,7 +160,7 @@ struct FinalizedState {
 #[derive(Debug, Clone)]
 enum GatheringPhase {
     Idle,
-    Announced { message_id: String },
+    Announced { event_date: NaiveDate, message_id: String },
     Finalized(FinalizedState),
 }
 
@@ -142,7 +169,7 @@ struct GatheringState {
     virtual_votes: HashSet<String>,
     in_person_votes: HashSet<String>,
     host_volunteers: HashSet<String>,
-    /// Votes per event time option, parallel to `config.event_times`.
+    /// Votes per event time option, parallel to `config.event_time_options`.
     time_votes: Vec<HashSet<String>>,
 }
 
@@ -178,7 +205,7 @@ impl WeeklyGathering {
         let MiddlewareContext { cmd_tx, store } = ctx;
         let (reaction_tx, reaction_rx) = tokio::sync::mpsc::channel(100);
 
-        let state = GatheringState::new(config.event_times.len());
+        let state = GatheringState::new(config.event_time_options.len());
 
         Self {
             cmd_tx,
@@ -190,39 +217,26 @@ impl WeeklyGathering {
         }
     }
 
-    /// Calculate the next occurrence of the event day/time
-    fn next_event_time(&self) -> DateTime<Local> {
-        let now = Local::now();
-        let target_time = self.config.event_time;
-        let target_weekday = self.config.event_day_of_week;
-
-        let current_weekday = now.weekday();
-        let current_num = current_weekday.number_from_monday();
-        let target_num = target_weekday.number_from_monday();
-
-        let days_until_target = if current_weekday == target_weekday {
-            let now_time = now.time();
-            if now_time < target_time { 0 } else { 7 }
-        } else if target_num > current_num {
-            target_num - current_num
-        } else {
-            7 - (current_num - target_num)
-        };
-
-        let target_date = now.date_naive() + Duration::days(days_until_target as i64);
-        let target_datetime = target_date.and_time(target_time);
-
-        Local.from_local_datetime(&target_datetime).unwrap()
+    /// The date of the upcoming gathering.
+    fn next_event_date(&self) -> NaiveDate {
+        next_event_date_from(Local::now(), self.config.event_day_of_week, self.config.finalize_time)
     }
 
-    /// Calculate when to post the announcement
-    fn announcement_time(&self) -> DateTime<Local> {
-        self.next_event_time() - Duration::minutes(self.config.announce_minutes_before as i64)
+    /// When the poll for `event_date` closes — `finalize_time` on the day itself
+    fn finalization_time(&self, event_date: NaiveDate) -> DateTime<Local> {
+        Local
+            .from_local_datetime(&event_date.and_time(self.config.finalize_time))
+            .single()
+            .unwrap_or_else(Local::now)
+    }
+
+    /// When the poll for `event_date` opens
+    fn announcement_time(&self, event_date: NaiveDate) -> DateTime<Local> {
+        self.finalization_time(event_date) - Duration::minutes(self.config.poll_open_minutes as i64)
     }
 
     /// Day the event falls on, phrased relative to today (e.g. "Today", "Tomorrow", "Saturday")
-    fn friendly_day(&self) -> String {
-        let event_date = self.next_event_time().date_naive();
+    fn friendly_day(&self, event_date: NaiveDate) -> String {
         let today = Local::now().date_naive();
 
         if event_date == today {
@@ -236,16 +250,14 @@ impl WeeklyGathering {
 
     /// Format event time in a friendly way (e.g., "Today at 7:00pm", "Tomorrow at 7:00pm", "Saturday at 7:00pm")
     ///
-    /// When time voting is enabled, `selected_time` is the index of the chosen option; while no
-    /// time has been settled on the day is rendered with a "time TBD" marker instead.
-    fn format_friendly_time(&self, selected_time: Option<usize>) -> String {
-        let day_part = self.friendly_day();
+    /// `selected_time` is the index of the chosen option; while no time has been settled on, the
+    /// day is rendered with a "time TBD" marker instead.
+    fn format_friendly_time(&self, event_date: NaiveDate, selected_time: Option<usize>) -> String {
+        let day_part = self.friendly_day(event_date);
 
-        let time = if self.config.event_times.is_empty() {
-            Some(self.config.event_time)
-        } else {
-            selected_time.and_then(|i| self.config.event_times.get(i)).map(|option| option.time)
-        };
+        let time = selected_time
+            .and_then(|i| self.config.event_time_options.get(i))
+            .map(|option| option.time);
 
         match time {
             Some(time) => format!("{} at {}", day_part, format_time_label(time)),
@@ -253,23 +265,42 @@ impl WeeklyGathering {
         }
     }
 
+    /// Whether participants get a say in the start time.
+    ///
+    /// A lone configured option is a fixed time, not a poll.
+    fn time_voting_enabled(&self) -> bool {
+        self.config.event_time_options.len() > 1
+    }
+
+    /// The option index settled on without anyone picking: the sole option when the time is
+    /// fixed, otherwise the most preferred voted time.
+    fn default_time(&self, time_votes: &[HashSet<String>]) -> Option<usize> {
+        if self.time_voting_enabled() {
+            self.top_time_option(time_votes)
+        } else {
+            self.config.event_time_options.first().map(|_| 0)
+        }
+    }
+
     /// Index of the event time option matching a reaction key, if any
     fn time_option_index(&self, key: &str) -> Option<usize> {
         let key = normalize_reaction(key);
         self.config
-            .event_times
+            .event_time_options
             .iter()
             .position(|option| normalize_reaction(&option.reaction) == key)
     }
 
     /// Event time option indices ordered by vote count descending, ties broken by earliest time
     fn rank_time_options(&self, time_votes: &[HashSet<String>]) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..self.config.event_times.len()).collect();
+        let mut indices: Vec<usize> = (0..self.config.event_time_options.len()).collect();
         indices.sort_by(|a, b| {
             let votes_a = time_votes.get(*a).map_or(0, HashSet::len);
             let votes_b = time_votes.get(*b).map_or(0, HashSet::len);
             votes_b.cmp(&votes_a).then_with(|| {
-                self.config.event_times[*a].time.cmp(&self.config.event_times[*b].time)
+                self.config.event_time_options[*a]
+                    .time
+                    .cmp(&self.config.event_time_options[*b].time)
             })
         });
         indices
@@ -284,7 +315,7 @@ impl WeeklyGathering {
     /// Render the configured time options as a list, one per line
     fn render_time_options(&self) -> String {
         self.config
-            .event_times
+            .event_time_options
             .iter()
             .map(|option| format!("{} {}", option.reaction, option.label))
             .collect::<Vec<_>>()
@@ -300,7 +331,7 @@ impl WeeklyGathering {
         self.rank_time_options(time_votes)
             .into_iter()
             .map(|index| {
-                let option = &self.config.event_times[index];
+                let option = &self.config.event_time_options[index];
                 let count = time_votes.get(index).map_or(0, HashSet::len);
                 let plural = if count == 1 { "vote" } else { "votes" };
                 let marker = if selected_time == Some(index) { " **← selected**" } else { "" };
@@ -308,11 +339,6 @@ impl WeeklyGathering {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// Calculate when to finalize and post results
-    fn finalization_time(&self) -> DateTime<Local> {
-        self.next_event_time() - Duration::minutes(self.config.finalize_minutes_before as i64)
     }
 
     /// Select a host from volunteers, preferring those who have hosted least recently.
@@ -398,11 +424,12 @@ impl WeeklyGathering {
     }
 
     /// Post the announcement message and capture the message ID
-    async fn post_announcement(&self) -> Result<Option<String>> {
+    async fn post_announcement(&self, event_date: NaiveDate) -> Result<Option<String>> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-        // Replace placeholders in announcement message
-        let event_time_friendly = self.format_friendly_time(None);
+        // Replace placeholders in announcement message. The start time is not settled at
+        // announcement, unless there is only one option to begin with.
+        let event_time_friendly = self.format_friendly_time(event_date, self.default_time(&[]));
         let message = self
             .config
             .announcement_message
@@ -426,14 +453,22 @@ impl WeeklyGathering {
             Ok(Ok(message_id)) => {
                 tracing::info!(message_id=%message_id, "announcement posted successfully");
 
-                // Pre-populate reactions on the announcement
+                // Pre-populate reactions on the announcement. Time options are only worth
+                // offering when there is a genuine choice between them.
+                let time_reactions = self
+                    .config
+                    .event_time_options
+                    .iter()
+                    .filter(|_| self.time_voting_enabled())
+                    .map(|option| &option.reaction);
+
                 let reaction_keys = [
                     &self.config.reaction_virtual,
                     &self.config.reaction_in_person,
                     &self.config.reaction_host,
                 ]
                 .into_iter()
-                .chain(self.config.event_times.iter().map(|option| &option.reaction));
+                .chain(time_reactions);
 
                 for reaction_key in reaction_keys {
                     self.seed_reaction(&message_id, reaction_key).await;
@@ -458,13 +493,11 @@ impl WeeklyGathering {
     /// edited in place.
     fn render_finalization(
         &self,
-        virtual_count: usize,
-        in_person_count: usize,
-        host_display: &str,
+        finalized: &FinalizedState,
         time_votes: &[HashSet<String>],
-        selected_time: Option<usize>,
-        awaiting_pick: bool,
     ) -> String {
+        let FinalizedState { virtual_count, in_person_count, selected_time, .. } = *finalized;
+
         // Choose message based on vote outcome
         let template = if virtual_count == 0 && in_person_count == 0 {
             // No votes
@@ -476,22 +509,23 @@ impl WeeklyGathering {
             &self.config.finalization_virtual_message
         };
 
-        // The prompt is only shown while the host still has a time to pick. Substituted first so
-        // its own placeholders are resolved by the replacements below.
+        // The prompt is only shown while a host who has yet to choose still could. Substituted
+        // first so its own placeholders are resolved by the replacements below.
+        let awaiting_pick = !finalized.pickers.is_empty() && selected_time.is_none();
         let time_prompt = if awaiting_pick { self.config.time_prompt_message.as_str() } else { "" };
 
-        let event_time_friendly = self.format_friendly_time(selected_time);
+        let event_time_friendly = self.format_friendly_time(finalized.event_date, selected_time);
         template
             .replace("{time_prompt}", time_prompt)
             .replace("{virtual_count}", &virtual_count.to_string())
             .replace("{in_person_count}", &in_person_count.to_string())
-            .replace("{host}", host_display)
+            .replace("{host}", &finalized.host_display)
             .replace("{time_results}", &self.render_time_results(time_votes, selected_time))
             .replace("{event_time}", &event_time_friendly)
     }
 
     /// Post the finalization message with vote counts and host
-    pub async fn post_finalization(&self) {
+    pub async fn post_finalization(&self, event_date: NaiveDate) {
         // Load host history before acquiring the state lock.
         let mut host_history: HashMap<String, DateTime<Utc>> =
             self.store.get("host_history").await.unwrap_or_default();
@@ -514,30 +548,32 @@ impl WeeklyGathering {
         // venue constraint, so the most preferred time simply wins.
         let is_in_person = in_person_count > virtual_count;
         let pickers: HashSet<String> = match (&host, is_in_person) {
-            (Some((user_id, _)), true) if !self.config.event_times.is_empty() => {
+            (Some((user_id, _)), true) if self.time_voting_enabled() => {
                 self.household_members(user_id).into_iter().collect()
             }
             _ => HashSet::new(),
         };
 
         let awaiting_pick = !pickers.is_empty();
-        let selected_time =
-            if awaiting_pick { None } else { self.top_time_option(&state.time_votes) };
+        let selected_time = if awaiting_pick { None } else { self.default_time(&state.time_votes) };
 
-        let message = self.render_finalization(
+        let mut finalized = FinalizedState {
+            event_date,
+            message_id: None,
+            pickers,
+            selected_time,
             virtual_count,
             in_person_count,
-            &host_display,
-            &state.time_votes,
-            selected_time,
-            awaiting_pick,
-        );
+            host_display,
+        };
+
+        let message = self.render_finalization(&finalized, &state.time_votes);
 
         // Order the pick reactions by preference so they read left-to-right most-wanted first.
         let ranked_reactions: Vec<String> = if awaiting_pick {
             self.rank_time_options(&state.time_votes)
                 .into_iter()
-                .map(|index| self.config.event_times[index].reaction.clone())
+                .map(|index| self.config.event_time_options[index].reaction.clone())
                 .collect()
         } else {
             Vec::new()
@@ -578,15 +614,9 @@ impl WeeklyGathering {
         }
 
         {
+            finalized.message_id = message_id;
             let mut state = self.state.lock().await;
-            state.phase = GatheringPhase::Finalized(FinalizedState {
-                message_id,
-                pickers,
-                selected_time,
-                virtual_count,
-                in_person_count,
-                host_display,
-            });
+            state.phase = GatheringPhase::Finalized(finalized);
         }
 
         // Persist the newly selected host so future weeks prefer someone else.
@@ -651,7 +681,7 @@ impl WeeklyGathering {
             let mut state = self.state.lock().await;
 
             match state.phase.clone() {
-                GatheringPhase::Announced { message_id } => {
+                GatheringPhase::Announced { message_id, .. } => {
                     self.process_vote_reaction(&mut state, &message_id, reaction);
                     None
                 }
@@ -777,20 +807,15 @@ impl WeeklyGathering {
             return None;
         }
 
+        let mut updated = finalized.clone();
+        updated.selected_time = selected_time;
         if let GatheringPhase::Finalized(current) = &mut state.phase {
             current.selected_time = selected_time;
         }
 
         tracing::info!(sender_id=%sender_id, selected_time=?selected_time, "event time pick updated");
 
-        let body = self.render_finalization(
-            finalized.virtual_count,
-            finalized.in_person_count,
-            &finalized.host_display,
-            &state.time_votes,
-            selected_time,
-            selected_time.is_none(),
-        );
+        let body = self.render_finalization(&updated, &state.time_votes);
 
         Some((message_id, body))
     }
@@ -802,15 +827,21 @@ impl WeeklyGathering {
 // public API.
 #[doc(hidden)]
 impl WeeklyGathering {
+    /// The upcoming event date (for testing)
+    pub fn test_event_date(&self) -> NaiveDate {
+        self.next_event_date()
+    }
+
     /// Set the phase to Announced with a specific message ID (for testing)
     pub async fn set_announced(&self, message_id: String) {
         let mut state = self.state.lock().await;
-        state.phase = GatheringPhase::Announced { message_id };
+        let event_date = self.next_event_date();
+        state.phase = GatheringPhase::Announced { event_date, message_id };
     }
 
     /// Post the announcement directly (for testing)
     pub async fn test_post_announcement(&self) {
-        if let Err(e) = self.post_announcement().await {
+        if let Err(e) = self.post_announcement(self.next_event_date()).await {
             tracing::error!(error=%e, "failed to post announcement");
         }
     }
@@ -819,6 +850,7 @@ impl WeeklyGathering {
     pub async fn set_finalized(&self, message_id: Option<String>, pickers: HashSet<String>) {
         let mut state = self.state.lock().await;
         state.phase = GatheringPhase::Finalized(FinalizedState {
+            event_date: self.next_event_date(),
             message_id,
             pickers,
             selected_time: None,
@@ -893,9 +925,9 @@ impl Middleware for WeeklyGathering {
             service_id=%self.config.service_id,
             room_id=%self.config.room_id,
             event_day_of_week=?self.config.event_day_of_week,
-            event_time=%self.config.event_time,
-            announce_minutes_before=%self.config.announce_minutes_before,
-            finalize_minutes_before=%self.config.finalize_minutes_before,
+            event_time_options=%self.config.event_time_options.len(),
+            finalize_time=%self.config.finalize_time,
+            poll_open_minutes=%self.config.poll_open_minutes,
             "weekly_gathering middleware running"
         );
 
@@ -906,20 +938,21 @@ impl Middleware for WeeklyGathering {
                 state.phase.clone()
             };
 
-            // Calculate next action time based on current phase
-            let (next_action_time, action_name) = match &phase {
+            // Each phase waits for its own schedule point, for a known cycle. Announced and
+            // Finalized carry their cycle's date so a poll that closes in the morning doesn't
+            // get re-derived onto the same day it just finished.
+            let (next_action_time, action_name, event_date) = match &phase {
                 GatheringPhase::Idle => {
-                    let announce_time = self.announcement_time();
-                    (announce_time, "announce")
+                    let event_date = self.next_event_date();
+                    (self.announcement_time(event_date), "announce", event_date)
                 }
-                GatheringPhase::Announced { .. } => {
-                    let finalize_time = self.finalization_time();
-                    (finalize_time, "finalize")
+                GatheringPhase::Announced { event_date, .. } => {
+                    (self.finalization_time(*event_date), "finalize", *event_date)
                 }
-                GatheringPhase::Finalized(_) => {
-                    // Wait until next event time, then reset
-                    let next_event = self.next_event_time();
-                    (next_event, "reset")
+                GatheringPhase::Finalized(finalized) => {
+                    // This cycle is done; wait for the next one to open.
+                    let event_date = finalized.event_date + Duration::days(7);
+                    (self.announcement_time(event_date), "announce", event_date)
                 }
             };
 
@@ -942,20 +975,20 @@ impl Middleware for WeeklyGathering {
                 _ = tokio::time::sleep(duration_until) => {
                     match action_name {
                         "announce" => {
-                            tracing::info!("posting weekly gathering announcement");
-                            if let Ok(Some(message_id)) = self.post_announcement().await {
+                            // Clear last cycle's votes before opening the new poll.
+                            self.reset_for_next_week().await;
+
+                            tracing::info!(event_date=%event_date, "posting weekly gathering announcement");
+                            if let Ok(Some(message_id)) = self.post_announcement(event_date).await {
                                 let mut state = self.state.lock().await;
-                                state.phase = GatheringPhase::Announced { message_id };
+                                state.phase = GatheringPhase::Announced { event_date, message_id };
                             }
                         }
                         "finalize" => {
-                            tracing::info!("posting weekly gathering finalization");
+                            tracing::info!(event_date=%event_date, "posting weekly gathering finalization");
                             // post_finalization moves the phase to Finalized itself, since it
                             // owns the message ID and host needed to accept a time pick.
-                            self.post_finalization().await;
-                        }
-                        "reset" => {
-                            self.reset_for_next_week().await;
+                            self.post_finalization(event_date).await;
                         }
                         _ => {}
                     }

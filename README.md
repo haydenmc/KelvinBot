@@ -315,10 +315,9 @@ KELVIN__MIDDLEWARES__<name>__KIND=weeklygathering
 KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
 KELVIN__MIDDLEWARES__<name>__ROOM_ID=<room_id>
 KELVIN__MIDDLEWARES__<name>__EVENT_DAY_OF_WEEK=<Monday..Sunday>
-KELVIN__MIDDLEWARES__<name>__EVENT_TIME=<HH:MM>              # Scheduling anchor
-KELVIN__MIDDLEWARES__<name>__EVENT_TIMES=<HH:MM,HH:MM,...>   # Optional, voteable start times
-KELVIN__MIDDLEWARES__<name>__ANNOUNCE_MINUTES_BEFORE=<minutes>
-KELVIN__MIDDLEWARES__<name>__FINALIZE_MINUTES_BEFORE=<minutes>
+KELVIN__MIDDLEWARES__<name>__EVENT_TIME_OPTIONS=<HH:MM,HH:MM,...>
+KELVIN__MIDDLEWARES__<name>__FINALIZE_TIME=<HH:MM>           # Poll closes, on the event day
+KELVIN__MIDDLEWARES__<name>__POLL_OPEN_MINUTES=<minutes>     # Poll opens this long before
 KELVIN__MIDDLEWARES__<name>__REACTION_VIRTUAL=<emoji>
 KELVIN__MIDDLEWARES__<name>__REACTION_IN_PERSON=<emoji>
 KELVIN__MIDDLEWARES__<name>__REACTION_HOST=<emoji>
@@ -336,20 +335,33 @@ Hosts are chosen from the volunteers, preferring whoever hosted least recently. 
 household count as a single candidate and have their host history updated together, so a household
 isn't picked two weeks running just because a different member volunteered.
 
+**Scheduling:**
+The gathering recurs on `EVENT_DAY_OF_WEEK`. `FINALIZE_TIME` is when the poll closes, on the event
+day itself, and the poll opens `POLL_OPEN_MINUTES` earlier — so the announcement can land days
+ahead (4200 minutes ≈ 2.9 days) while the decision is always made the morning of. There is no
+separate event-time setting: the start time comes from `EVENT_TIME_OPTIONS`.
+
+Because finalization always lands on the event day, this middleware only organizes same-day plans.
+Once `FINALIZE_TIME` passes, the cycle is considered done and the next gathering is a week out.
+
+> **Migrating from `EVENT_TIME`:** earlier versions took `EVENT_TIME`, `ANNOUNCE_MINUTES_BEFORE` and
+> `FINALIZE_MINUTES_BEFORE`, all relative to a fixed event instant. To convert:
+> `FINALIZE_TIME` = `EVENT_TIME` − `FINALIZE_MINUTES_BEFORE`,
+> `POLL_OPEN_MINUTES` = `ANNOUNCE_MINUTES_BEFORE` − `FINALIZE_MINUTES_BEFORE`, and
+> `EVENT_TIME_OPTIONS` = the old `EVENT_TIME` if you don't want a vote. The removed keys are not
+> accepted, so a stale config fails at startup rather than silently rescheduling itself.
+
 **Event Time Voting:**
-`EVENT_TIMES` is an optional comma-separated list of 24-hour `HH:MM` start times (up to 10). Each is
-assigned a keycap reaction — 1️⃣ 2️⃣ 3️⃣ … — by position, and participants may approve as many as suit
-them. At finalization:
+`EVENT_TIME_OPTIONS` is a required comma-separated list of 24-hour `HH:MM` start times (up to 10).
+Each is assigned a keycap reaction — 1️⃣ 2️⃣ 3️⃣ … — by position, and participants may approve as many
+as suit them. A **single** time means a fixed start with no vote: no keycap reactions are seeded and
+no host prompt is shown. With two or more, at finalization:
 
 - **Virtual gatherings** get the most-voted time automatically (ties go to the earlier time).
 - **In-person gatherings** leave the choice to the host, since the venue is theirs. Every configured
   time is offered as a reaction on the finalization message, ordered most-preferred first. When the
   host — or anyone in their household — reacts with a time, the message is edited in place to state
   the scheduled time. If nobody picks, the message keeps showing the options.
-
-`EVENT_TIME` remains the scheduling anchor that drives when the announcement and finalization are
-posted; set it to your earliest candidate time. Leave `EVENT_TIMES` unset to disable time voting
-entirely.
 
 **Message Placeholders:**
 
@@ -369,10 +381,9 @@ KELVIN__MIDDLEWARES__gathering__KIND=weeklygathering
 KELVIN__MIDDLEWARES__gathering__SERVICE_ID=matrix_main
 KELVIN__MIDDLEWARES__gathering__ROOM_ID=!yourroom:matrix.org
 KELVIN__MIDDLEWARES__gathering__EVENT_DAY_OF_WEEK=Saturday
-KELVIN__MIDDLEWARES__gathering__EVENT_TIME=16:30
-KELVIN__MIDDLEWARES__gathering__EVENT_TIMES=16:30,20:00,21:30
-KELVIN__MIDDLEWARES__gathering__ANNOUNCE_MINUTES_BEFORE=4320   # 3 days
-KELVIN__MIDDLEWARES__gathering__FINALIZE_MINUTES_BEFORE=120    # 2 hours
+KELVIN__MIDDLEWARES__gathering__EVENT_TIME_OPTIONS=16:30,20:00,21:30
+KELVIN__MIDDLEWARES__gathering__FINALIZE_TIME=14:00            # Poll closes Saturday 2pm
+KELVIN__MIDDLEWARES__gathering__POLL_OPEN_MINUTES=4200         # Opens ~2.9 days earlier
 KELVIN__MIDDLEWARES__gathering__REACTION_VIRTUAL=💻
 KELVIN__MIDDLEWARES__gathering__REACTION_IN_PERSON=🏠
 KELVIN__MIDDLEWARES__gathering__REACTION_HOST=🙋

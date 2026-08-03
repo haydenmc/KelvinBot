@@ -143,16 +143,15 @@ pub enum MiddlewareKind {
         service_id: String,
         room_id: String,
         event_day_of_week: String,
-        event_time: String,
         /// Comma-separated list of candidate start times in 24h `HH:MM` form
         /// (e.g. `16:30,20:00`). Stored as a string for env-var config
-        /// compatibility. Empty disables event-time voting.
-        #[serde(default)]
-        event_times: String,
+        /// compatibility. A single time means a fixed start with no vote.
+        event_time_options: String,
+        /// When the poll closes, as 24h `HH:MM` on the event day itself.
+        finalize_time: String,
+        /// How long the poll stays open before `finalize_time`.
         #[serde_as(as = "DisplayFromStr")]
-        announce_minutes_before: u32,
-        #[serde_as(as = "DisplayFromStr")]
-        finalize_minutes_before: u32,
+        poll_open_minutes: u32,
         reaction_virtual: String,
         reaction_in_person: String,
         reaction_host: String,
