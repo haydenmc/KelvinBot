@@ -237,6 +237,72 @@ KELVIN__MIDDLEWARES__movies__THEATER_ID_FILTER=1234,5678,9012
 - Posts markdown-formatted message with movie metadata (title, year, rating, runtime)
 - Runs independently as background task
 
+#### Calendar Agenda Middleware
+Posts a daily agenda to a room from a shared `webcal`/`ics` calendar feed, including countdowns to upcoming multi-day events and reminders for upcoming one-off events. Nothing is posted on days where none of those sections have content.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=calendaragenda
+KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
+KELVIN__MIDDLEWARES__<name>__ROOM_ID=<room_id>
+KELVIN__MIDDLEWARES__<name>__CALENDAR_URL=<webcal_or_https_ics_url>
+KELVIN__MIDDLEWARES__<name>__CALENDAR_LINK=<public_calendar_url>   # Optional
+KELVIN__MIDDLEWARES__<name>__CALENDAR_LINK_TEXT=<link_text>        # Optional
+KELVIN__MIDDLEWARES__<name>__POST_AT_TIME=<HH:MM>
+KELVIN__MIDDLEWARES__<name>__COUNTDOWN_DAYS=90,60,30,14,7          # Optional
+KELVIN__MIDDLEWARES__<name>__REMINDER_DAYS=7,1                     # Optional
+KELVIN__MIDDLEWARES__<name>__MULTI_DAY_MIN_DAYS=2                  # Optional
+KELVIN__MIDDLEWARES__<name>__HEADING_TODAY=Today                   # Optional
+KELVIN__MIDDLEWARES__<name>__HEADING_REMINDERS=Coming up           # Optional
+KELVIN__MIDDLEWARES__<name>__HEADING_COUNTDOWNS=Countdowns         # Optional
+KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=!events                # Optional
+```
+
+**Parameters:**
+- `CALENDAR_URL`: The ICS feed the bot reads. `webcal://` and `webcals://` are rewritten to `https://`. Treated as a secret — it is never rendered into a message or logged
+- `CALENDAR_LINK`: Optional human-facing calendar link, rendered as a footer on the agenda. Kept separate from `CALENDAR_URL` so the private feed is never shared in chat. Omit for no footer
+- `POST_AT_TIME`: Local time of day to post the daily agenda, 24-hour format (e.g., `08:00`)
+- `COUNTDOWN_DAYS`: Days-before intervals at which multi-day events get a countdown line (default `90,60,30,14,7`)
+- `REMINDER_DAYS`: Days-before intervals at which single-day, non-recurring events get a reminder line (default `7,1`)
+- `MULTI_DAY_MIN_DAYS`: Minimum length in days for an event to count as "multi-day" (default `2`)
+- `COMMAND_STRING`: Chat command that posts the agenda on demand (default `!events`). Set to an empty string to disable it
+
+**Example:**
+```bash
+KELVIN__MIDDLEWARES__calendar__KIND=calendaragenda
+KELVIN__MIDDLEWARES__calendar__SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__calendar__ROOM_ID=!abcdef123456:matrix.org
+KELVIN__MIDDLEWARES__calendar__CALENDAR_URL=webcal://calendar.example.com/private/feed.ics
+KELVIN__MIDDLEWARES__calendar__CALENDAR_LINK=https://calendar.example.com/shared/abc
+KELVIN__MIDDLEWARES__calendar__POST_AT_TIME=08:00
+```
+
+**Behavior:**
+- Fetches and parses the feed at `POST_AT_TIME` each day, expanding recurring events (`RRULE`/`RDATE`/`EXDATE`)
+- **Today**: every event *starting* today. Multi-day events are listed once, on their first day, annotated with the day they run through
+- **Coming up**: single-day, non-recurring events whose start is exactly one of `REMINDER_DAYS` away. Recurring events are excluded so weekly meetings don't nag
+- **Countdowns**: events spanning at least `MULTI_DAY_MIN_DAYS` whose start is exactly one of `COUNTDOWN_DAYS` away
+- Posts nothing when all three sections are empty
+- Records the last-posted date in its store, so a restart doesn't repost the same day. If the bot is down past `POST_AT_TIME`, it posts on startup instead
+- All date and time handling uses the bot's local timezone
+
+Example output:
+```
+### 📅 Tuesday, August 4
+
+**Today**
+- 8 PM – 10 PM — Game night _(Living room)_
+- All day — Camping trip (through Sat, Aug 8)
+
+**Coming up**
+- Alice's birthday party — in 7 days (Tue, Aug 11)
+
+**Countdowns**
+- Beach week — in 30 days (Sep 3 – Sep 7)
+
+[View the full calendar](https://calendar.example.com/shared/abc)
+```
+
 #### Chat Relay Middleware
 Relays messages from one service/room to another service/room with a prefix tag indicating the source and sender.
 
@@ -694,6 +760,7 @@ src/
 │   └── mumble.rs         # Mumble voice chat integration
 └── middlewares/          # Event processors
     ├── attendance_relay.rs  # User presence tracking and announcements
+    ├── calendar_agenda.rs   # Daily agenda from a webcal/ics feed
     ├── chat_relay.rs        # Cross-platform message relaying
     ├── echo.rs              # Command echo middleware
     ├── invite.rs            # Registration token generation

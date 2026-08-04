@@ -11,6 +11,10 @@ use kelvin_bot::core::{
 };
 use kelvin_bot::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
+    calendar_agenda::{
+        CalendarAgenda, CalendarAgendaConfig, EventTime, Occurrence, build_agenda, expand,
+        normalize_calendar_url, parse_calendar,
+    },
     chat_relay::{ChatRelay, ChatRelayConfig},
     echo::Echo,
     kanidm::{KanidmConfig, KanidmIdentity},
@@ -1555,7 +1559,7 @@ async fn test_attendance_relay_instantiation_from_config() {
 
 // Weekly Gathering Middleware Tests
 
-use chrono::{Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use kelvin_bot::middlewares::weekly_gathering::{
     Household, WeeklyGathering, WeeklyGatheringConfig, next_event_date_from, parse_event_times,
 };
@@ -3009,4 +3013,557 @@ async fn test_weekly_gathering_instantiation_requires_time_options() {
         Ok(_) => panic!("an empty event_time_options should be rejected"),
     };
     assert!(err.contains("event_time_options is required"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// calendar_agenda
+// ---------------------------------------------------------------------------
+
+fn calendar_config() -> CalendarAgendaConfig {
+    CalendarAgendaConfig {
+        service_id: "matrix".to_string(),
+        room_id: "!room:example.com".to_string(),
+        calendar_url: "https://calendar.example.com/private/feed.ics".to_string(),
+        calendar_link: None,
+        calendar_link_text: "View the full calendar".to_string(),
+        post_at_time: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
+        countdown_days: vec![90, 60, 30, 14],
+        reminder_days: vec![7, 1],
+        multi_day_min_days: 2,
+        heading_today: "Today".to_string(),
+        heading_reminders: "Coming up".to_string(),
+        heading_countdowns: "Countdowns".to_string(),
+        command_string: Some("!events".to_string()),
+    }
+}
+
+fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+/// Wrap `VEVENT` bodies in the minimal `VCALENDAR` envelope the parser expects.
+fn ics(events: &str) -> String {
+    format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n{events}END:VCALENDAR\r\n")
+}
+
+fn vevent(uid: &str, lines: &str) -> String {
+    format!("BEGIN:VEVENT\r\nUID:{uid}\r\n{lines}END:VEVENT\r\n")
+}
+
+/// Build one occurrence directly, skipping the feed.
+fn occurrence(summary: &str, start: NaiveDate, end: NaiveDate, is_recurring: bool) -> Occurrence {
+    Occurrence {
+        summary: summary.to_string(),
+        location: None,
+        start_date: start,
+        start_time: None,
+        end_time: None,
+        end_date: end,
+        is_recurring,
+    }
+}
+
+#[test]
+fn test_calendar_normalize_url() {
+    assert_eq!(normalize_calendar_url("webcal://example.com/f.ics"), "https://example.com/f.ics");
+    assert_eq!(normalize_calendar_url("webcals://example.com/f.ics"), "https://example.com/f.ics");
+    assert_eq!(normalize_calendar_url("https://example.com/f.ics"), "https://example.com/f.ics");
+}
+
+#[test]
+fn test_calendar_parse_all_day_event() {
+    let body = ics(&vevent(
+        "a",
+        "SUMMARY:Holiday\r\nDTSTART;VALUE=DATE:20260804\r\nDTEND;VALUE=DATE:20260805\r\n",
+    ));
+    let events = parse_calendar(&body).expect("parse failed");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].summary, "Holiday");
+    assert_matches!(events[0].start, EventTime::AllDay(d) if d == date(2026, 8, 4));
+    // DTEND is exclusive for DATE values.
+    assert_matches!(events[0].end, EventTime::AllDay(d) if d == date(2026, 8, 5));
+    assert!(events[0].recurrence.is_none());
+}
+
+#[test]
+fn test_calendar_parse_utc_timed_event() {
+    let body = ics(&vevent(
+        "b",
+        "SUMMARY:Standup\r\nLOCATION:Kitchen\r\nDTSTART:20260804T160000Z\r\nDTEND:20260804T170000Z\r\n",
+    ));
+    let events = parse_calendar(&body).expect("parse failed");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].location.as_deref(), Some("Kitchen"));
+
+    let expected = Utc.with_ymd_and_hms(2026, 8, 4, 16, 0, 0).unwrap().with_timezone(&Local);
+    assert_matches!(events[0].start, EventTime::Timed(dt) if dt == expected);
+}
+
+#[test]
+fn test_calendar_parse_tzid_timed_event() {
+    let body = ics(&vevent(
+        "c",
+        "SUMMARY:Dinner\r\nDTSTART;TZID=America/Los_Angeles:20260804T180000\r\n\
+         DTEND;TZID=America/Los_Angeles:20260804T200000\r\n",
+    ));
+    let events = parse_calendar(&body).expect("parse failed");
+
+    // 18:00 Pacific in August is 01:00 UTC the next day.
+    let expected = Utc.with_ymd_and_hms(2026, 8, 5, 1, 0, 0).unwrap().with_timezone(&Local);
+    assert_matches!(events[0].start, EventTime::Timed(dt) if dt == expected);
+}
+
+#[test]
+fn test_calendar_parse_multi_day_event_span() {
+    let body = ics(&vevent(
+        "d",
+        "SUMMARY:Camping\r\nDTSTART;VALUE=DATE:20260901\r\nDTEND;VALUE=DATE:20260906\r\n",
+    ));
+    let events = parse_calendar(&body).expect("parse failed");
+    let occurrences = expand(&events, date(2026, 8, 1), date(2026, 12, 1));
+
+    assert_eq!(occurrences.len(), 1);
+    assert_eq!(occurrences[0].start_date, date(2026, 9, 1));
+    // Exclusive DTEND of the 6th means the event covers through the 5th.
+    assert_eq!(occurrences[0].end_date, date(2026, 9, 5));
+}
+
+#[test]
+fn test_calendar_parse_all_day_event_without_dtend() {
+    let body = ics(&vevent("e", "SUMMARY:Birthday\r\nDTSTART;VALUE=DATE:20260804\r\n"));
+    let events = parse_calendar(&body).expect("parse failed");
+    let occurrences = expand(&events, date(2026, 8, 1), date(2026, 9, 1));
+
+    assert_eq!(occurrences.len(), 1);
+    assert_eq!(occurrences[0].start_date, date(2026, 8, 4));
+    assert_eq!(occurrences[0].end_date, date(2026, 8, 4));
+}
+
+#[test]
+fn test_calendar_parse_escaped_summary() {
+    let body =
+        ics(&vevent("f", "SUMMARY:Movie night\\, take 2\r\nDTSTART;VALUE=DATE:20260804\r\n"));
+    let events = parse_calendar(&body).expect("parse failed");
+    assert_eq!(events[0].summary, "Movie night, take 2");
+}
+
+#[test]
+fn test_calendar_parse_event_without_dtstart_is_skipped() {
+    let body = ics(&vevent("g", "SUMMARY:Orphan\r\n"));
+    let events = parse_calendar(&body).expect("parse failed");
+    assert!(events.is_empty());
+}
+
+#[test]
+fn test_calendar_expand_weekly_recurrence() {
+    let body = ics(&vevent(
+        "h",
+        "SUMMARY:Game night\r\nDTSTART;TZID=America/Los_Angeles:20260804T190000\r\n\
+         DTEND;TZID=America/Los_Angeles:20260804T210000\r\nRRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=3\r\n",
+    ));
+    let events = parse_calendar(&body).expect("parse failed");
+    assert!(events[0].recurrence.is_some());
+
+    let occurrences = expand(&events, date(2026, 8, 1), date(2026, 9, 30));
+    let starts: Vec<NaiveDate> = occurrences.iter().map(|o| o.start_date).collect();
+
+    // COUNT=3 caps the series at three Tuesdays.
+    assert_eq!(starts.len(), 3);
+    assert!(occurrences.iter().all(|o| o.is_recurring));
+}
+
+#[test]
+fn test_calendar_expand_honours_exdate() {
+    let with_exdate = ics(&vevent(
+        "i",
+        "SUMMARY:Weekly sync\r\nDTSTART;VALUE=DATE:20260803\r\nDTEND;VALUE=DATE:20260804\r\n\
+         RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4\r\nEXDATE;VALUE=DATE:20260810\r\n",
+    ));
+    let without = ics(&vevent(
+        "i",
+        "SUMMARY:Weekly sync\r\nDTSTART;VALUE=DATE:20260803\r\nDTEND;VALUE=DATE:20260804\r\n\
+         RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=4\r\n",
+    ));
+
+    let window = (date(2026, 8, 1), date(2026, 9, 30));
+    let excluded = expand(&parse_calendar(&with_exdate).unwrap(), window.0, window.1);
+    let all = expand(&parse_calendar(&without).unwrap(), window.0, window.1);
+
+    assert_eq!(all.len(), 4);
+    assert_eq!(excluded.len(), 3);
+    assert!(!excluded.iter().any(|o| o.start_date == date(2026, 8, 10)));
+}
+
+#[test]
+fn test_calendar_agenda_lists_only_events_starting_today() {
+    let today = date(2026, 8, 4);
+    let occurrences = vec![
+        occurrence("Starts today", today, today, false),
+        // Began yesterday, still running: already announced on day 1.
+        occurrence(
+            "Ongoing trip",
+            today - ChronoDuration::days(1),
+            today + ChronoDuration::days(1),
+            false,
+        ),
+    ];
+
+    let message = build_agenda(&occurrences, today, &calendar_config()).expect("expected agenda");
+
+    assert!(message.contains("Starts today"), "got: {message}");
+    assert!(!message.contains("Ongoing trip"), "got: {message}");
+}
+
+#[test]
+fn test_calendar_agenda_multi_day_event_shows_end_date_on_day_one() {
+    let today = date(2026, 8, 4);
+    let occurrences = vec![occurrence("Camping", today, today + ChronoDuration::days(4), false)];
+
+    let message = build_agenda(&occurrences, today, &calendar_config()).expect("expected agenda");
+
+    assert!(message.contains("All day — Camping (through Sat, Aug 8)"), "got: {message}");
+}
+
+#[test]
+fn test_calendar_countdown_fires_only_on_configured_intervals() {
+    let today = date(2026, 8, 4);
+    let config = calendar_config();
+
+    for (offset, expected) in [(89, false), (90, true), (91, false)] {
+        let start = today + ChronoDuration::days(offset);
+        let occurrences =
+            vec![occurrence("Beach week", start, start + ChronoDuration::days(4), false)];
+        let message = build_agenda(&occurrences, today, &config);
+
+        assert_eq!(
+            message.is_some(),
+            expected,
+            "offset {offset} should{} produce a countdown",
+            if expected { "" } else { " not" }
+        );
+    }
+}
+
+#[test]
+fn test_calendar_single_day_event_is_a_reminder_not_a_countdown() {
+    let today = date(2026, 8, 4);
+    let start = today + ChronoDuration::days(7);
+    let occurrences = vec![occurrence("Birthday party", start, start, false)];
+
+    let message = build_agenda(&occurrences, today, &calendar_config()).expect("expected agenda");
+
+    assert!(message.contains("Coming up"), "got: {message}");
+    assert!(!message.contains("Countdowns"), "got: {message}");
+    assert!(message.contains("in 7 days"), "got: {message}");
+}
+
+#[test]
+fn test_calendar_multi_day_event_is_a_countdown_not_a_reminder() {
+    let today = date(2026, 8, 4);
+    let start = today + ChronoDuration::days(14);
+    let occurrences = vec![occurrence("Road trip", start, start + ChronoDuration::days(2), false)];
+
+    let message = build_agenda(&occurrences, today, &calendar_config()).expect("expected agenda");
+
+    assert!(message.contains("Countdowns"), "got: {message}");
+    assert!(!message.contains("Coming up"), "got: {message}");
+}
+
+#[test]
+fn test_calendar_recurring_single_day_event_is_not_reminded() {
+    let today = date(2026, 8, 4);
+    let start = today + ChronoDuration::days(7);
+    let occurrences = vec![occurrence("Weekly sync", start, start, true)];
+
+    assert!(build_agenda(&occurrences, today, &calendar_config()).is_none());
+}
+
+#[test]
+fn test_calendar_tomorrow_reminder_wording() {
+    let today = date(2026, 8, 4);
+    let start = today + ChronoDuration::days(1);
+    let occurrences = vec![occurrence("Dentist", start, start, false)];
+
+    let message = build_agenda(&occurrences, today, &calendar_config()).expect("expected agenda");
+    assert!(message.contains("Dentist — tomorrow"), "got: {message}");
+}
+
+#[test]
+fn test_calendar_agenda_is_none_when_nothing_relevant() {
+    let today = date(2026, 8, 4);
+    let start = today + ChronoDuration::days(45); // Not a configured interval.
+    let occurrences =
+        vec![occurrence("Far off thing", start, start + ChronoDuration::days(3), false)];
+
+    assert!(build_agenda(&occurrences, today, &calendar_config()).is_none());
+    assert!(build_agenda(&[], today, &calendar_config()).is_none());
+}
+
+#[test]
+fn test_calendar_link_footer_is_opt_in_and_hides_the_feed_url() {
+    let today = date(2026, 8, 4);
+    let occurrences = vec![occurrence("Something", today, today, false)];
+
+    let without = build_agenda(&occurrences, today, &calendar_config()).expect("expected agenda");
+    assert!(!without.contains("View the full calendar"), "got: {without}");
+
+    let mut config = calendar_config();
+    config.calendar_link = Some("https://calendar.example.com/public".to_string());
+    config.calendar_link_text = "See everything".to_string();
+
+    let with = build_agenda(&occurrences, today, &config).expect("expected agenda");
+    assert!(with.contains("[See everything](https://calendar.example.com/public)"), "got: {with}");
+    // The private feed URL must never leak into a posted message.
+    assert!(!with.contains(&config.calendar_url), "got: {with}");
+}
+
+#[tokio::test]
+async fn test_calendar_daily_delivery_records_the_date_even_when_silent() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let agenda = CalendarAgenda::new(make_ctx(cmd_tx), calendar_config());
+    let today = date(2026, 8, 4);
+
+    agenda.test_deliver_daily_agenda(today, None).await;
+
+    assert!(cmd_rx.try_recv().is_err(), "nothing should be posted on an empty day");
+    assert_eq!(agenda.test_last_posted_date().await, Some(today));
+}
+
+#[tokio::test]
+async fn test_calendar_daily_delivery_posts_to_configured_room() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let agenda = CalendarAgenda::new(make_ctx(cmd_tx), calendar_config());
+    let today = date(2026, 8, 4);
+
+    agenda.test_deliver_daily_agenda(today, Some("### 📅 Agenda".to_string())).await;
+
+    let command = cmd_rx.try_recv().expect("expected a message");
+    assert_matches!(
+        command,
+        Command::SendRoomMessage { room_id, service_id, markdown_body: Some(_), .. }
+            if room_id == "!room:example.com" && service_id == ServiceId("matrix".to_string())
+    );
+    assert_eq!(agenda.test_last_posted_date().await, Some(today));
+}
+
+#[test]
+fn test_calendar_on_demand_command_matching() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let agenda = CalendarAgenda::new(make_ctx(cmd_tx), calendar_config());
+
+    let message = |room: &str, body: &str, is_self: bool| Event {
+        service_id: ServiceId("matrix".to_string()),
+        kind: EventKind::RoomMessage {
+            room_id: room.to_string(),
+            body: body.to_string(),
+            is_local_user: true,
+            sender_id: "@someone:example.com".to_string(),
+            sender_display_name: None,
+            is_self,
+        },
+    };
+
+    assert!(agenda.test_matches_command(&message("!room:example.com", "!events", false)));
+    assert!(agenda.test_matches_command(&message("!room:example.com", "  !events  ", false)));
+    assert!(!agenda.test_matches_command(&message("!other:example.com", "!events", false)));
+    assert!(!agenda.test_matches_command(&message("!room:example.com", "!eventsx", false)));
+    assert!(!agenda.test_matches_command(&message("!room:example.com", "!events", true)));
+
+    // A disabled command means the middleware never responds to chat.
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let mut config = calendar_config();
+    config.command_string = None;
+    let silent = CalendarAgenda::new(make_ctx(cmd_tx), config);
+    assert!(!silent.test_matches_command(&message("!room:example.com", "!events", false)));
+}
+
+#[test]
+fn test_calendar_next_scheduled_time_rolls_to_tomorrow() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let agenda = CalendarAgenda::new(make_ctx(cmd_tx), calendar_config());
+
+    let before = Local.with_ymd_and_hms(2026, 8, 4, 7, 0, 0).unwrap();
+    assert_eq!(agenda.test_next_scheduled_time(before).date_naive(), date(2026, 8, 4));
+
+    let after = Local.with_ymd_and_hms(2026, 8, 4, 9, 0, 0).unwrap();
+    let next = agenda.test_next_scheduled_time(after);
+    assert_eq!(next.date_naive(), date(2026, 8, 5));
+    assert_eq!(next.time(), NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+}
+
+#[test]
+fn test_calendar_agenda_instantiates_from_config() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "calendar".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::CalendarAgenda {
+                service_id: "matrix".to_string(),
+                room_id: "!room:example.com".to_string(),
+                calendar_url: "webcal://example.com/feed.ics".to_string(),
+                calendar_link: None,
+                calendar_link_text: "View the full calendar".to_string(),
+                post_at_time: "08:00".to_string(),
+                countdown_days: Some(vec!["30".to_string(), "90".to_string()]),
+                reminder_days: None,
+                multi_day_min_days: 2,
+                heading_today: "Today".to_string(),
+                heading_reminders: "Coming up".to_string(),
+                heading_countdowns: "Countdowns".to_string(),
+                command_string: None,
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: Default::default(),
+    };
+
+    let middlewares = instantiate_middleware_from_config(&config, &cmd_tx).expect("should build");
+    assert_eq!(middlewares.len(), 1);
+}
+
+#[test]
+fn test_calendar_agenda_empty_command_string_disables_the_command() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "calendar".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::CalendarAgenda {
+                service_id: "matrix".to_string(),
+                room_id: "!room:example.com".to_string(),
+                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_link: None,
+                calendar_link_text: "View the full calendar".to_string(),
+                post_at_time: "08:00".to_string(),
+                countdown_days: None,
+                reminder_days: None,
+                multi_day_min_days: 2,
+                heading_today: "Today".to_string(),
+                heading_reminders: "Coming up".to_string(),
+                heading_countdowns: "Countdowns".to_string(),
+                // The command defaults to !events, so an empty value is how a
+                // deployment turns it off.
+                command_string: Some("  ".to_string()),
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: Default::default(),
+    };
+
+    let middlewares = instantiate_middleware_from_config(&config, &cmd_tx).expect("should build");
+    let calendar = middlewares.get("calendar").expect("middleware should exist");
+
+    let event = Event {
+        service_id: ServiceId("matrix".to_string()),
+        kind: EventKind::RoomMessage {
+            room_id: "!room:example.com".to_string(),
+            body: "!events".to_string(),
+            is_local_user: true,
+            sender_id: "@someone:example.com".to_string(),
+            sender_display_name: None,
+            is_self: false,
+        },
+    };
+
+    // A disabled command means the event is ignored and nothing is queued.
+    assert_matches!(calendar.on_event(&event), Ok(Verdict::Continue));
+}
+
+#[test]
+fn test_calendar_agenda_rejects_bad_post_time() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "calendar".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::CalendarAgenda {
+                service_id: "matrix".to_string(),
+                room_id: "!room:example.com".to_string(),
+                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_link: None,
+                calendar_link_text: "View the full calendar".to_string(),
+                post_at_time: "8am".to_string(),
+                countdown_days: None,
+                reminder_days: None,
+                multi_day_min_days: 2,
+                heading_today: "Today".to_string(),
+                heading_reminders: "Coming up".to_string(),
+                heading_countdowns: "Countdowns".to_string(),
+                command_string: None,
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: Default::default(),
+    };
+
+    let err = match instantiate_middleware_from_config(&config, &cmd_tx) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an invalid post_at_time should be rejected"),
+    };
+    assert!(err.contains("invalid post_at_time"), "got: {err}");
+}
+
+#[test]
+fn test_calendar_agenda_rejects_bad_countdown_days() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "calendar".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::CalendarAgenda {
+                service_id: "matrix".to_string(),
+                room_id: "!room:example.com".to_string(),
+                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_link: None,
+                calendar_link_text: "View the full calendar".to_string(),
+                post_at_time: "08:00".to_string(),
+                countdown_days: Some(vec!["thirty".to_string()]),
+                reminder_days: None,
+                multi_day_min_days: 2,
+                heading_today: "Today".to_string(),
+                heading_reminders: "Coming up".to_string(),
+                heading_countdowns: "Countdowns".to_string(),
+                command_string: None,
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: Default::default(),
+    };
+
+    let err = match instantiate_middleware_from_config(&config, &cmd_tx) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a non-numeric countdown_days entry should be rejected"),
+    };
+    assert!(err.contains("invalid countdown_days"), "got: {err}");
 }

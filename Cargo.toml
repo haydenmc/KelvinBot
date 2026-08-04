@@ -37,6 +37,9 @@ base64 = "0.22"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 futures = "0.3"
+ical = "0.11.0"
+rrule = "0.14.0"
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
