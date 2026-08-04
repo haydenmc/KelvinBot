@@ -255,7 +255,7 @@ KELVIN__MIDDLEWARES__<name>__MULTI_DAY_MIN_DAYS=2                  # Optional
 KELVIN__MIDDLEWARES__<name>__HEADING_TODAY=Today                   # Optional
 KELVIN__MIDDLEWARES__<name>__HEADING_REMINDERS=Coming up           # Optional
 KELVIN__MIDDLEWARES__<name>__HEADING_COUNTDOWNS=Countdowns         # Optional
-KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=!agenda                # Optional
+KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=!events                # Optional
 ```
 
 **Parameters:**
@@ -265,7 +265,7 @@ KELVIN__MIDDLEWARES__<name>__COMMAND_STRING=!agenda                # Optional
 - `COUNTDOWN_DAYS`: Days-before intervals at which multi-day events get a countdown line (default `90,60,30,14,7`)
 - `REMINDER_DAYS`: Days-before intervals at which single-day, non-recurring events get a reminder line (default `7,1`)
 - `MULTI_DAY_MIN_DAYS`: Minimum length in days for an event to count as "multi-day" (default `2`)
-- `COMMAND_STRING`: Optional chat command that posts the agenda on demand. Disabled when unset
+- `COMMAND_STRING`: Chat command that posts the agenda on demand (default `!events`). Set to an empty string to disable it
 
 **Example:**
 ```bash
@@ -275,7 +275,6 @@ KELVIN__MIDDLEWARES__calendar__ROOM_ID=!abcdef123456:matrix.org
 KELVIN__MIDDLEWARES__calendar__CALENDAR_URL=webcal://calendar.example.com/private/feed.ics
 KELVIN__MIDDLEWARES__calendar__CALENDAR_LINK=https://calendar.example.com/shared/abc
 KELVIN__MIDDLEWARES__calendar__POST_AT_TIME=08:00
-KELVIN__MIDDLEWARES__calendar__COMMAND_STRING=!agenda
 ```
 
 **Behavior:**

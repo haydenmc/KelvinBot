@@ -128,9 +128,9 @@ pub enum MiddlewareKind {
         heading_reminders: String,
         #[serde(default = "default_heading_countdowns")]
         heading_countdowns: String,
-        /// Optional chat command for an on-demand agenda (e.g. `!agenda`).
-        /// Disabled when unset.
-        #[serde(default)]
+        /// Chat command for an on-demand agenda (default `!events`). Set to an
+        /// empty string to disable it.
+        #[serde(default = "default_agenda_command")]
         command_string: Option<String>,
     },
     MovieShowtimes {
@@ -233,6 +233,10 @@ fn default_invite_command() -> String {
 
 fn default_calendar_link_text() -> String {
     "View the full calendar".to_string()
+}
+
+fn default_agenda_command() -> Option<String> {
+    Some("!events".to_string())
 }
 
 fn default_multi_day_min_days() -> u32 {

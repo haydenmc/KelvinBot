@@ -249,6 +249,7 @@ impl Middleware for CalendarAgenda {
             post_at_time=%self.config.post_at_time,
             countdown_days=?self.config.countdown_days,
             reminder_days=?self.config.reminder_days,
+            command_string=?self.config.command_string,
             "calendar_agenda middleware running"
         );
 

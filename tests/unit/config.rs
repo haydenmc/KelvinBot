@@ -53,7 +53,7 @@ fn test_config_serde_calendar_agenda_middleware() {
         countdown_days = "90, 60, 30, 14"
         reminder_days = "7,1"
         multi_day_min_days = "3"
-        command_string = "!agenda"
+        command_string = "!events"
         "#;
 
     let config: Config = toml::from_str(config_str).expect("Failed to parse config");
@@ -76,7 +76,7 @@ fn test_config_serde_calendar_agenda_middleware() {
             // Unset optional fields fall back to their defaults.
             && calendar_link_text == "View the full calendar"
             && heading_today == "Today"
-            && command == "!agenda"
+            && command == "!events"
             && countdown == &["90", "60", "30", "14"]
             && reminder == &["7", "1"]
     );
@@ -105,8 +105,9 @@ fn test_config_serde_calendar_agenda_defaults() {
             countdown_days: None,
             reminder_days: None,
             multi_day_min_days: 2,
-            command_string: None,
+            // The on-demand command is on by default.
+            command_string: Some(command),
             ..
-        }
+        } if command == "!events"
     );
 }

@@ -177,7 +177,12 @@ pub fn instantiate_middleware_from_config(
                         heading_today: heading_today.clone(),
                         heading_reminders: heading_reminders.clone(),
                         heading_countdowns: heading_countdowns.clone(),
-                        command_string: command_string.clone(),
+                        // An explicitly empty command disables the on-demand
+                        // agenda, since the default is to enable it.
+                        command_string: command_string
+                            .clone()
+                            .map(|command| command.trim().to_string())
+                            .filter(|command| !command.is_empty()),
                     },
                 ))
             }

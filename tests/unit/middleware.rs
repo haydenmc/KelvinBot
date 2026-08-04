@@ -3033,7 +3033,7 @@ fn calendar_config() -> CalendarAgendaConfig {
         heading_today: "Today".to_string(),
         heading_reminders: "Coming up".to_string(),
         heading_countdowns: "Countdowns".to_string(),
-        command_string: Some("!agenda".to_string()),
+        command_string: Some("!events".to_string()),
     }
 }
 
@@ -3365,18 +3365,18 @@ fn test_calendar_on_demand_command_matching() {
         },
     };
 
-    assert!(agenda.test_matches_command(&message("!room:example.com", "!agenda", false)));
-    assert!(agenda.test_matches_command(&message("!room:example.com", "  !agenda  ", false)));
-    assert!(!agenda.test_matches_command(&message("!other:example.com", "!agenda", false)));
-    assert!(!agenda.test_matches_command(&message("!room:example.com", "!agendas", false)));
-    assert!(!agenda.test_matches_command(&message("!room:example.com", "!agenda", true)));
+    assert!(agenda.test_matches_command(&message("!room:example.com", "!events", false)));
+    assert!(agenda.test_matches_command(&message("!room:example.com", "  !events  ", false)));
+    assert!(!agenda.test_matches_command(&message("!other:example.com", "!events", false)));
+    assert!(!agenda.test_matches_command(&message("!room:example.com", "!eventsx", false)));
+    assert!(!agenda.test_matches_command(&message("!room:example.com", "!events", true)));
 
-    // Unconfigured command means the middleware never responds to chat.
+    // A disabled command means the middleware never responds to chat.
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let mut config = calendar_config();
     config.command_string = None;
     let silent = CalendarAgenda::new(make_ctx(cmd_tx), config);
-    assert!(!silent.test_matches_command(&message("!room:example.com", "!agenda", false)));
+    assert!(!silent.test_matches_command(&message("!room:example.com", "!events", false)));
 }
 
 #[test]
@@ -3429,6 +3429,61 @@ fn test_calendar_agenda_instantiates_from_config() {
 
     let middlewares = instantiate_middleware_from_config(&config, &cmd_tx).expect("should build");
     assert_eq!(middlewares.len(), 1);
+}
+
+#[test]
+fn test_calendar_agenda_empty_command_string_disables_the_command() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let data_dir = TempDir::new().unwrap();
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "calendar".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::CalendarAgenda {
+                service_id: "matrix".to_string(),
+                room_id: "!room:example.com".to_string(),
+                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_link: None,
+                calendar_link_text: "View the full calendar".to_string(),
+                post_at_time: "08:00".to_string(),
+                countdown_days: None,
+                reminder_days: None,
+                multi_day_min_days: 2,
+                heading_today: "Today".to_string(),
+                heading_reminders: "Coming up".to_string(),
+                heading_countdowns: "Countdowns".to_string(),
+                // The command defaults to !events, so an empty value is how a
+                // deployment turns it off.
+                command_string: Some("  ".to_string()),
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: data_dir.path().to_path_buf(),
+        reconnection: Default::default(),
+    };
+
+    let middlewares = instantiate_middleware_from_config(&config, &cmd_tx).expect("should build");
+    let calendar = middlewares.get("calendar").expect("middleware should exist");
+
+    let event = Event {
+        service_id: ServiceId("matrix".to_string()),
+        kind: EventKind::RoomMessage {
+            room_id: "!room:example.com".to_string(),
+            body: "!events".to_string(),
+            is_local_user: true,
+            sender_id: "@someone:example.com".to_string(),
+            sender_display_name: None,
+            is_self: false,
+        },
+    };
+
+    // A disabled command means the event is ignored and nothing is queued.
+    assert_matches!(calendar.on_event(&event), Ok(Verdict::Continue));
 }
 
 #[test]
