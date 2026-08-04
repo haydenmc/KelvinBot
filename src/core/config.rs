@@ -95,6 +95,44 @@ pub enum MiddlewareKind {
         invite_token_ttl: Duration,
     },
     Logger {},
+    CalendarAgenda {
+        service_id: String,
+        room_id: String,
+        /// `webcal://` or `https://` ICS feed URL. Private to the bot: it is
+        /// never rendered into a message.
+        calendar_url: String,
+        /// Optional human-facing calendar link rendered as a footer on the
+        /// agenda. Distinct from `calendar_url`; omit for no footer.
+        #[serde(default)]
+        calendar_link: Option<String>,
+        /// Link text for `calendar_link`.
+        #[serde(default = "default_calendar_link_text")]
+        calendar_link_text: String,
+        /// Local time of day to post the daily agenda, 24h `HH:MM`.
+        post_at_time: String,
+        /// Comma-separated days-before intervals for multi-day event
+        /// countdowns (e.g. `90,60,30,14`).
+        #[serde(default, deserialize_with = "deserialize_string_list")]
+        countdown_days: Option<Vec<String>>,
+        /// Comma-separated days-before intervals for single-day, non-recurring
+        /// event reminders (e.g. `7,1`).
+        #[serde(default, deserialize_with = "deserialize_string_list")]
+        reminder_days: Option<Vec<String>>,
+        /// Minimum span in days for an event to count as "multi-day".
+        #[serde(default = "default_multi_day_min_days")]
+        #[serde_as(as = "DisplayFromStr")]
+        multi_day_min_days: u32,
+        #[serde(default = "default_heading_today")]
+        heading_today: String,
+        #[serde(default = "default_heading_reminders")]
+        heading_reminders: String,
+        #[serde(default = "default_heading_countdowns")]
+        heading_countdowns: String,
+        /// Optional chat command for an on-demand agenda (e.g. `!agenda`).
+        /// Disabled when unset.
+        #[serde(default)]
+        command_string: Option<String>,
+    },
     MovieShowtimes {
         service_id: String,
         room_id: String,
@@ -191,6 +229,26 @@ fn default_reset_command() -> String {
 
 fn default_invite_command() -> String {
     "!invite".to_string()
+}
+
+fn default_calendar_link_text() -> String {
+    "View the full calendar".to_string()
+}
+
+fn default_multi_day_min_days() -> u32 {
+    2
+}
+
+fn default_heading_today() -> String {
+    "Today".to_string()
+}
+
+fn default_heading_reminders() -> String {
+    "Coming up".to_string()
+}
+
+fn default_heading_countdowns() -> String {
+    "Countdowns".to_string()
 }
 
 fn default_time_prompt_message() -> String {

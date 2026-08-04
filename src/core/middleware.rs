@@ -5,6 +5,7 @@ use crate::core::config::{Config, HouseholdCfg, MiddlewareKind};
 use crate::core::event::Event;
 use crate::middlewares::{
     attendance_relay::{AttendanceRelay, AttendanceRelayConfig},
+    calendar_agenda::{CalendarAgenda, CalendarAgendaConfig},
     chat_relay::{ChatRelay, ChatRelayConfig},
     echo::Echo,
     ezstream_announce::EzStreamAnnounce,
@@ -42,6 +43,41 @@ pub struct MiddlewareContext {
 pub trait Middleware: Send + Sync {
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
     fn on_event(&self, event: &Event) -> Result<Verdict>;
+}
+
+/// Countdown intervals used when `COUNTDOWN_DAYS` is not configured.
+const DEFAULT_COUNTDOWN_DAYS: &[u32] = &[90, 60, 30, 14, 7];
+
+/// Reminder intervals used when `REMINDER_DAYS` is not configured.
+const DEFAULT_REMINDER_DAYS: &[u32] = &[7, 1];
+
+/// Parse a configured list of days-before intervals, falling back to `default`
+/// when unset. Result is sorted descending and deduplicated.
+fn parse_day_intervals(
+    configured: Option<&[String]>,
+    default: &[u32],
+    field: &str,
+    middleware_name: &str,
+) -> Result<Vec<u32>> {
+    let Some(values) = configured.filter(|v| !v.is_empty()) else {
+        return Ok(default.to_vec());
+    };
+
+    let mut days = values
+        .iter()
+        .map(|value| {
+            value.trim().parse::<u32>().map_err(|_| {
+                anyhow::anyhow!(
+                    "invalid {field} entry '{value}' for middleware '{middleware_name}'. \
+                     Expected a comma-separated list of whole days (e.g. 90,60,30)"
+                )
+            })
+        })
+        .collect::<Result<Vec<u32>>>()?;
+
+    days.sort_unstable_by(|a, b| b.cmp(a));
+    days.dedup();
+    Ok(days)
 }
 
 /// Instantiates middleware instances from config as a HashMap keyed by middleware name
@@ -92,6 +128,59 @@ pub fn instantiate_middleware_from_config(
                 },
             )),
             MiddlewareKind::Logger {} => Arc::new(Logger {}),
+            MiddlewareKind::CalendarAgenda {
+                service_id,
+                room_id,
+                calendar_url,
+                calendar_link,
+                calendar_link_text,
+                post_at_time,
+                countdown_days,
+                reminder_days,
+                multi_day_min_days,
+                heading_today,
+                heading_reminders,
+                heading_countdowns,
+                command_string,
+            } => {
+                let post_at_time = chrono::NaiveTime::parse_from_str(post_at_time, "%H:%M")
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "invalid post_at_time '{}' for middleware '{}'. Expected format: HH:MM (e.g., 08:00)",
+                            post_at_time,
+                            name
+                        )
+                    })?;
+
+                Arc::new(CalendarAgenda::new(
+                    make_ctx()?,
+                    CalendarAgendaConfig {
+                        service_id: service_id.clone(),
+                        room_id: room_id.clone(),
+                        calendar_url: calendar_url.clone(),
+                        calendar_link: calendar_link.clone(),
+                        calendar_link_text: calendar_link_text.clone(),
+                        post_at_time,
+                        countdown_days: parse_day_intervals(
+                            countdown_days.as_deref(),
+                            DEFAULT_COUNTDOWN_DAYS,
+                            "countdown_days",
+                            name,
+                        )?,
+                        reminder_days: parse_day_intervals(
+                            reminder_days.as_deref(),
+                            DEFAULT_REMINDER_DAYS,
+                            "reminder_days",
+                            name,
+                        )?,
+                        multi_day_min_days: *multi_day_min_days,
+                        heading_today: heading_today.clone(),
+                        heading_reminders: heading_reminders.clone(),
+                        heading_countdowns: heading_countdowns.clone(),
+                        command_string: command_string.clone(),
+                    },
+                ))
+            }
             MiddlewareKind::MovieShowtimes {
                 service_id,
                 room_id,

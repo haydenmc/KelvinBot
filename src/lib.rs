@@ -16,6 +16,7 @@ pub mod services {
 
 pub mod middlewares {
     pub mod attendance_relay;
+    pub mod calendar_agenda;
     pub mod chat_relay;
     pub mod echo;
     pub mod ezstream_announce;
