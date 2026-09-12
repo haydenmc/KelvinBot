@@ -186,7 +186,7 @@ impl Bus {
 
         // Start all middlewares (collect unique instances across all services)
         info!("starting middlewares...");
-        let mut middleware_handles = Vec::new();
+        let mut middleware_tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
         let mut started_middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
 
         for pipeline in self.service_middlewares.values() {
@@ -199,8 +199,11 @@ impl Bus {
                     started_middlewares.push(middleware.clone());
                     let child_token = cancel.child_token();
                     let middleware_clone = middleware.clone();
-                    middleware_handles
-                        .push(tokio::spawn(async move { middleware_clone.run(child_token).await }));
+                    middleware_tasks.spawn(async move {
+                        let name = middleware_clone.name();
+                        let result = middleware_clone.run(child_token).await;
+                        (name, result)
+                    });
                 }
             }
         }
@@ -279,6 +282,25 @@ impl Bus {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                // Middleware tasks are expected to run until shutdown. Log
+                // loudly if one exits early so a silently dead middleware is
+                // visible rather than discovered by missing behaviour.
+                Some(joined) = middleware_tasks.join_next() => {
+                    match joined {
+                        Ok((name, Ok(()))) if cancel.is_cancelled() => {
+                            tracing::info!(middleware=%name, "middleware exited during shutdown");
+                        }
+                        Ok((name, Ok(()))) => {
+                            tracing::warn!(middleware=%name, "middleware task exited unexpectedly");
+                        }
+                        Ok((name, Err(e))) => {
+                            tracing::error!(middleware=%name, error=%e, "middleware task failed");
+                        }
+                        Err(e) => {
+                            tracing::error!(error=%e, "middleware task panicked or was aborted");
                         }
                     }
                 }

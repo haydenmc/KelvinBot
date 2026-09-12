@@ -41,6 +41,11 @@ pub struct MiddlewareContext {
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
+    /// Human-readable name used in supervision logs. Defaults to the type name.
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
     fn on_event(&self, event: &Event) -> Result<Verdict>;
 }

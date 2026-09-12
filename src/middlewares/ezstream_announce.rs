@@ -12,11 +12,29 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc::Sender};
+use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::{
-    connect_async, tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Bytes,
+    tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
 };
 use tokio_util::sync::CancellationToken;
+
+/// How often the client sends a WebSocket ping to prove the connection is alive.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for any frame (including pong replies) before the
+/// connection is considered dead and torn down for reconnection.
+const READ_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// TCP keepalive settings applied to the underlying socket. These keep NAT and
+/// conntrack entries fresh and let the kernel detect a dead peer even if no
+/// WebSocket traffic is flowing.
+const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
 // Configuration for a single announcement destination
 #[derive(Debug, Clone)]
@@ -135,10 +153,10 @@ impl EzStreamAnnounce {
         let message_body =
             self.format_message(&self.start_message_template, &channel_name, &channel_id, None);
 
-        let mut state = self.state.lock().await;
+        // Send announcements to all configured destinations. This is done
+        // before taking the state lock so that a slow or stuck service
+        // cannot block every other notification behind the mutex.
         let mut message_ids = HashMap::new();
-
-        // Send announcements to all configured destinations
         for dest in &self.destinations {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -182,6 +200,7 @@ impl EzStreamAnnounce {
         }
 
         // Track this stream in state
+        let mut state = self.state.lock().await;
         state.active_streams.insert(
             channel_id.clone(),
             ActiveStream { name: channel_name, start_time: Utc::now(), message_ids },
@@ -194,10 +213,10 @@ impl EzStreamAnnounce {
     async fn handle_stream_end(&self, channel_id: String) -> Result<()> {
         tracing::info!(channel_id=%channel_id, "stream ended");
 
-        let mut state = self.state.lock().await;
-
-        // Remove stream from active list and get its info
-        let Some(stream) = state.active_streams.remove(&channel_id) else {
+        // Remove stream from active list and get its info, releasing the
+        // lock before issuing any commands to the bus.
+        let removed = self.state.lock().await.active_streams.remove(&channel_id);
+        let Some(stream) = removed else {
             tracing::warn!(
                 channel_id=%channel_id,
                 "received stream end notification for unknown stream"
@@ -338,7 +357,17 @@ impl EzStreamAnnounce {
             "WebSocket connection established"
         );
 
+        if let Err(e) = Self::enable_tcp_keepalive(&ws_stream) {
+            tracing::warn!(error=%e, "failed to enable TCP keepalive on WebSocket socket");
+        }
+
         let (mut write, mut read) = ws_stream.split();
+
+        let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+        ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // The first tick completes immediately; consume it so the first ping
+        // is sent after a full interval.
+        ping_interval.tick().await;
 
         loop {
             tokio::select! {
@@ -347,7 +376,24 @@ impl EzStreamAnnounce {
                     let _ = write.send(Message::Close(None)).await;
                     break;
                 }
-                msg = read.next() => {
+                _ = ping_interval.tick() => {
+                    tracing::debug!("sending ping");
+                    write
+                        .send(Message::Ping(Bytes::new()))
+                        .await
+                        .context("failed to send WebSocket ping")?;
+                }
+                msg = tokio::time::timeout(READ_TIMEOUT, read.next()) => {
+                    let msg = match msg {
+                        Ok(msg) => msg,
+                        Err(_) => {
+                            anyhow::bail!(
+                                "no WebSocket frames received in {}s; assuming connection is dead",
+                                READ_TIMEOUT.as_secs()
+                            );
+                        }
+                    };
+
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             tracing::debug!(message=%text, "received WebSocket message");
@@ -383,8 +429,11 @@ impl EzStreamAnnounce {
                             tracing::debug!("received ping, sending pong");
                             let _ = write.send(Message::Pong(data)).await;
                         }
+                        Some(Ok(Message::Pong(_))) => {
+                            tracing::debug!("received pong");
+                        }
                         Some(Ok(_)) => {
-                            // Ignore other message types (Binary, Pong, etc.)
+                            // Ignore other message types (Binary, Frame, etc.)
                         }
                         Some(Err(e)) => {
                             tracing::error!(error=%e, "WebSocket error");
@@ -399,6 +448,32 @@ impl EzStreamAnnounce {
             }
         }
 
+        Ok(())
+    }
+
+    // Enable TCP keepalive on the socket underlying a WebSocket stream
+    fn enable_tcp_keepalive(ws_stream: &WebSocketStream<MaybeTlsStream<TcpStream>>) -> Result<()> {
+        let tcp: &TcpStream = match ws_stream.get_ref() {
+            MaybeTlsStream::Plain(tcp) => tcp,
+            MaybeTlsStream::NativeTls(tls) => tls.get_ref().get_ref().get_ref(),
+            _ => anyhow::bail!("unsupported stream type"),
+        };
+
+        let keepalive = socket2::TcpKeepalive::new()
+            .with_time(TCP_KEEPALIVE_IDLE)
+            .with_interval(TCP_KEEPALIVE_INTERVAL)
+            .with_retries(TCP_KEEPALIVE_RETRIES);
+
+        socket2::SockRef::from(tcp)
+            .set_tcp_keepalive(&keepalive)
+            .context("failed to set TCP keepalive")?;
+
+        tracing::debug!(
+            idle_secs=%TCP_KEEPALIVE_IDLE.as_secs(),
+            interval_secs=%TCP_KEEPALIVE_INTERVAL.as_secs(),
+            retries=%TCP_KEEPALIVE_RETRIES,
+            "TCP keepalive enabled"
+        );
         Ok(())
     }
 }
