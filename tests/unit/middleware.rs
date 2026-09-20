@@ -19,6 +19,11 @@ use kelvin_bot::middlewares::{
     echo::Echo,
     kanidm::{KanidmConfig, KanidmIdentity},
     logger::Logger,
+    lychee_upload::{
+        LEDGER_KEY, LycheeUpload, LycheeUploadConfig, album_ids, derive_file_name,
+        extension_for_mimetype, format_description, is_supported_image, photo_title,
+        render_oversize_message, room_in_scope,
+    },
 };
 use kelvin_bot::store::PersistentStore;
 use secrecy::SecretString;
@@ -3566,4 +3571,454 @@ fn test_calendar_agenda_rejects_bad_countdown_days() {
         Ok(_) => panic!("a non-numeric countdown_days entry should be rejected"),
     };
     assert!(err.contains("invalid countdown_days"), "got: {err}");
+}
+
+// Lychee Upload Middleware Tests
+
+const LYCHEE_UNREACHABLE_URL: &str = "http://127.0.0.1:1";
+const LYCHEE_FAILURE_MESSAGE: &str = "archive failed";
+const LYCHEE_OVERSIZE_TEMPLATE: &str = "too big (limit {max_mb} MB)";
+
+fn lychee_config(
+    room_ids: &[&str],
+    exclude_room_ids: &[&str],
+    max_file_size_bytes: u64,
+) -> LycheeUploadConfig {
+    LycheeUploadConfig {
+        service_id: "matrix".to_string(),
+        room_ids: room_ids.iter().map(|s| s.to_string()).collect(),
+        exclude_room_ids: exclude_room_ids.iter().map(|s| s.to_string()).collect(),
+        lychee_url: format!("{LYCHEE_UNREACHABLE_URL}/"),
+        lychee_token: SecretString::from("lychee-token"),
+        album_id: "AbCdEfGhIjKlMnOpQrStUvWx".to_string(),
+        max_file_size_bytes,
+        failure_message: LYCHEE_FAILURE_MESSAGE.to_string(),
+        oversize_message: LYCHEE_OVERSIZE_TEMPLATE.to_string(),
+        request_timeout: Duration::from_secs(2),
+    }
+}
+
+fn make_lychee(cmd_tx: Sender<Command>, room_ids: &[&str]) -> LycheeUpload {
+    LycheeUpload::new(make_ctx(cmd_tx), lychee_config(room_ids, &[], 1024 * 1024)).unwrap()
+}
+
+fn lychee_image_event(
+    service: &str,
+    room: &str,
+    is_self: bool,
+    mimetype: Option<&str>,
+    image_data: Option<Arc<[u8]>>,
+) -> Event {
+    Event {
+        service_id: ServiceId(service.to_string()),
+        kind: EventKind::RoomImage {
+            room_id: room.to_string(),
+            sender_id: "@alice:example.com".to_string(),
+            sender_display_name: Some("Alice".to_string()),
+            is_self,
+            is_local_user: true,
+            body: "IMG_0001.jpg".to_string(),
+            source_url: format!("https://matrix.to/#/{room}/$evt{}", rand::random::<u32>()),
+            mimetype: mimetype.map(str::to_string),
+            image_data,
+        },
+    }
+}
+
+/// Wait for a room message on `cmd_rx` and return `(room_id, body, markdown_body)`.
+async fn recv_room_message(
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>,
+) -> (String, String, Option<String>) {
+    let cmd = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+        .await
+        .expect("timed out waiting for a command")
+        .expect("command channel closed");
+    match cmd {
+        Command::SendRoomMessage { service_id, room_id, body, markdown_body, .. } => {
+            assert_eq!(service_id.0, "matrix");
+            (room_id, body, markdown_body)
+        }
+        other => panic!("expected SendRoomMessage, got {other:?}"),
+    }
+}
+
+async fn assert_no_command(cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>) {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(cmd_rx.try_recv().is_err(), "expected no command to be sent");
+}
+
+#[tokio::test]
+async fn test_lychee_upload_middleware_run() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+    let cancel_token = CancellationToken::new();
+
+    // Run should return promptly once cancelled; the startup connectivity
+    // check against an unreachable host only warns.
+    cancel_token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(5), lychee.run(cancel_token))
+        .await
+        .expect("run did not return after cancellation");
+    assert_ok!(result);
+}
+
+#[tokio::test]
+async fn test_lychee_upload_ignores_wrong_service() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+
+    let event = lychee_image_event("mumble", "!room:example.com", false, None, None);
+    let result = lychee.on_event(&event);
+    assert_ok!(&result);
+    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn test_lychee_upload_ignores_room_not_in_list() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &["!photos:example.com"]);
+
+    let event = lychee_image_event("matrix", "!other:example.com", false, None, None);
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn test_lychee_upload_all_rooms_when_list_empty() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+
+    // Missing image bytes trigger the failure notice, which proves the event
+    // passed the room filter.
+    let event = lychee_image_event("matrix", "!any:example.com", false, None, None);
+    assert_ok!(lychee.on_event(&event));
+    let (room_id, body, _) = recv_room_message(&mut cmd_rx).await;
+    assert_eq!(room_id, "!any:example.com");
+    assert_eq!(body, LYCHEE_FAILURE_MESSAGE);
+}
+
+#[tokio::test]
+async fn test_lychee_upload_respects_exclude_list() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee =
+        LycheeUpload::new(make_ctx(cmd_tx), lychee_config(&[], &["!private:example.com"], 1024))
+            .unwrap();
+
+    let event = lychee_image_event("matrix", "!private:example.com", false, None, None);
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[test]
+fn test_lychee_room_in_scope() {
+    let listed = vec!["!a:x".to_string()];
+    let excluded = vec!["!a:x".to_string()];
+    let none: Vec<String> = Vec::new();
+
+    assert!(room_in_scope("!a:x", &listed, &none));
+    assert!(!room_in_scope("!b:x", &listed, &none));
+    assert!(room_in_scope("!b:x", &none, &none));
+    assert!(!room_in_scope("!a:x", &listed, &excluded));
+    assert!(!room_in_scope("!a:x", &none, &excluded));
+    assert!(room_in_scope("!b:x", &none, &excluded));
+}
+
+#[tokio::test]
+async fn test_lychee_upload_ignores_self_images() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+
+    let event = lychee_image_event("matrix", "!room:example.com", true, None, None);
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn test_lychee_upload_ignores_non_image_events() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+
+    let event = Event {
+        service_id: ServiceId("matrix".to_string()),
+        kind: EventKind::RoomMessage {
+            room_id: "!room:example.com".to_string(),
+            body: "just text".to_string(),
+            is_local_user: true,
+            sender_id: "@alice:example.com".to_string(),
+            sender_display_name: Some("Alice".to_string()),
+            is_self: false,
+        },
+    };
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn test_lychee_upload_ignores_video_mimetype() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+
+    let event = lychee_image_event("matrix", "!room:example.com", false, Some("video/mp4"), None);
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[test]
+fn test_lychee_is_supported_image() {
+    assert!(is_supported_image(None));
+    assert!(is_supported_image(Some("image/jpeg")));
+    assert!(is_supported_image(Some("IMAGE/PNG")));
+    assert!(is_supported_image(Some("image/heic; charset=binary")));
+    assert!(!is_supported_image(Some("video/mp4")));
+    assert!(!is_supported_image(Some("application/octet-stream")));
+}
+
+#[tokio::test]
+async fn test_lychee_upload_sends_failure_message_when_image_data_missing() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &["!photos:example.com"]);
+
+    let event =
+        lychee_image_event("matrix", "!photos:example.com", false, Some("image/jpeg"), None);
+    assert_ok!(lychee.on_event(&event));
+
+    let (room_id, body, markdown_body) = recv_room_message(&mut cmd_rx).await;
+    assert_eq!(room_id, "!photos:example.com");
+    assert_eq!(body, LYCHEE_FAILURE_MESSAGE);
+    assert_eq!(markdown_body, None);
+}
+
+#[tokio::test]
+async fn test_lychee_upload_skips_oversize_photo() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let store = Arc::new(PersistentStore::in_memory());
+    let lychee =
+        LycheeUpload::new(make_ctx_with_store(cmd_tx, store.clone()), lychee_config(&[], &[], 10))
+            .unwrap();
+
+    let bytes: Arc<[u8]> = Arc::from(vec![0u8; 11]);
+    let event =
+        lychee_image_event("matrix", "!room:example.com", false, Some("image/png"), Some(bytes));
+    let source_url = match &event.kind {
+        EventKind::RoomImage { source_url, .. } => source_url.clone(),
+        _ => unreachable!(),
+    };
+    assert_ok!(lychee.on_event(&event));
+
+    let (_, body, _) = recv_room_message(&mut cmd_rx).await;
+    assert_eq!(body, "too big (limit 0 MB)");
+    assert_no_command(&mut cmd_rx).await;
+
+    // Oversize photos are recorded so a replay never re-notifies.
+    let ledger: Vec<String> = store.get(LEDGER_KEY).await.unwrap_or_default();
+    assert_eq!(ledger, vec![source_url]);
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn test_lychee_upload_allows_photo_at_limit() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = LycheeUpload::new(make_ctx(cmd_tx), lychee_config(&[], &[], 10)).unwrap();
+
+    // Exactly at the limit passes the size check and reaches the (unreachable)
+    // server, so the regular failure notice is what comes back.
+    let bytes: Arc<[u8]> = Arc::from(vec![0u8; 10]);
+    let event =
+        lychee_image_event("matrix", "!room:example.com", false, Some("image/png"), Some(bytes));
+    assert_ok!(lychee.on_event(&event));
+
+    let (_, body, _) = recv_room_message(&mut cmd_rx).await;
+    assert_eq!(body, LYCHEE_FAILURE_MESSAGE);
+}
+
+#[test]
+fn test_lychee_render_oversize_message() {
+    assert_eq!(
+        render_oversize_message("Too large (limit {max_mb} MB).", 50 * 1024 * 1024),
+        "Too large (limit 50 MB)."
+    );
+    assert_eq!(render_oversize_message("no placeholder", 1), "no placeholder");
+}
+
+#[tokio::test]
+async fn test_lychee_upload_skips_already_uploaded_source_url() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let store = Arc::new(PersistentStore::in_memory());
+    let event = lychee_image_event("matrix", "!room:example.com", false, None, None);
+    let source_url = match &event.kind {
+        EventKind::RoomImage { source_url, .. } => source_url.clone(),
+        _ => unreachable!(),
+    };
+    store.set(LEDGER_KEY, &vec![source_url]).await.unwrap();
+
+    let lychee =
+        LycheeUpload::new(make_ctx_with_store(cmd_tx, store), lychee_config(&[], &[], 1024))
+            .unwrap();
+
+    // Dedup runs before the missing-bytes path, so no failure notice either.
+    assert_ok!(lychee.on_event(&event));
+    assert_no_command(&mut cmd_rx).await;
+}
+
+#[tokio::test]
+async fn test_lychee_upload_sends_failure_message_when_server_unreachable() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let lychee = make_lychee(cmd_tx, &[]);
+
+    let bytes: Arc<[u8]> = Arc::from(b"not really a jpeg".to_vec());
+    let event =
+        lychee_image_event("matrix", "!room:example.com", false, Some("image/jpeg"), Some(bytes));
+    assert_ok!(lychee.on_event(&event));
+
+    let (room_id, body, _) = recv_room_message(&mut cmd_rx).await;
+    assert_eq!(room_id, "!room:example.com");
+    assert_eq!(body, LYCHEE_FAILURE_MESSAGE);
+}
+
+#[tokio::test]
+async fn test_lychee_upload_instantiation_from_config() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "lychee".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::LycheeUpload {
+                service_id: "matrix".to_string(),
+                room_ids: Some(vec!["!photos:example.com".to_string()]),
+                exclude_room_ids: None,
+                lychee_url: "https://photos.example.com".to_string(),
+                lychee_token: SecretString::from("token"),
+                album_id: "AbCdEfGhIjKlMnOpQrStUvWx".to_string(),
+                max_file_size_bytes: 1024,
+                failure_message: "failed".to_string(),
+                oversize_message: "too big".to_string(),
+                request_timeout: Duration::from_secs(10),
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
+    };
+
+    let result = instantiate_middleware_from_config(&config, &cmd_tx);
+    assert_ok!(&result);
+    let middlewares = result.unwrap();
+    assert_eq!(middlewares.len(), 1);
+    assert!(middlewares.contains_key("lychee"));
+}
+
+#[tokio::test]
+async fn test_lychee_upload_instantiation_rejects_empty_album_id() {
+    let (cmd_tx, _cmd_rx) = create_command_channel(10);
+
+    let mut middlewares_map = HashMap::new();
+    middlewares_map.insert(
+        "lychee".to_string(),
+        MiddlewareCfg {
+            kind: MiddlewareKind::LycheeUpload {
+                service_id: "matrix".to_string(),
+                room_ids: None,
+                exclude_room_ids: None,
+                lychee_url: "https://photos.example.com".to_string(),
+                lychee_token: SecretString::from("token"),
+                album_id: "  ".to_string(),
+                max_file_size_bytes: 1024,
+                failure_message: "failed".to_string(),
+                oversize_message: "too big".to_string(),
+                request_timeout: Duration::from_secs(10),
+            },
+        },
+    );
+
+    let config = Config {
+        services: HashMap::new(),
+        middlewares: middlewares_map,
+        data_directory: TempDir::new().unwrap().path().to_path_buf(),
+        reconnection: ReconnectionConfig::default(),
+    };
+
+    let err = match instantiate_middleware_from_config(&config, &cmd_tx) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an empty album_id should be rejected"),
+    };
+    assert!(err.contains("album_id is required for middleware 'lychee'"), "got: {err}");
+}
+
+#[test]
+fn test_lychee_derive_file_name() {
+    assert_eq!(derive_file_name("IMG_1.jpg", None), ("IMG_1.jpg".to_string(), "jpg".to_string()));
+    assert_eq!(
+        derive_file_name("", Some("image/png")),
+        ("photo.png".to_string(), "png".to_string())
+    );
+    assert_eq!(
+        derive_file_name("screenshot", Some("image/webp")),
+        ("screenshot.webp".to_string(), "webp".to_string())
+    );
+    assert_eq!(derive_file_name("", None), ("photo.jpg".to_string(), "jpg".to_string()));
+    assert_eq!(derive_file_name("a/b/c.PNG", None), ("c.PNG".to_string(), "png".to_string()));
+    assert_eq!(
+        derive_file_name("noext.", Some("image/gif")),
+        ("noext.gif".to_string(), "gif".to_string())
+    );
+    assert_eq!(
+        derive_file_name("  spaced name.jpeg  ", None),
+        ("spaced name.jpeg".to_string(), "jpeg".to_string())
+    );
+}
+
+#[test]
+fn test_lychee_extension_for_mimetype() {
+    assert_eq!(extension_for_mimetype("image/jpeg"), Some("jpg"));
+    assert_eq!(extension_for_mimetype("image/png"), Some("png"));
+    assert_eq!(extension_for_mimetype("image/webp"), Some("webp"));
+    assert_eq!(extension_for_mimetype("image/gif"), Some("gif"));
+    assert_eq!(extension_for_mimetype("image/heic"), Some("heic"));
+    assert_eq!(extension_for_mimetype("IMAGE/JPEG"), Some("jpg"));
+    assert_eq!(extension_for_mimetype("image/jpeg; charset=binary"), Some("jpg"));
+    assert_eq!(extension_for_mimetype("application/pdf"), None);
+}
+
+#[test]
+fn test_lychee_format_description() {
+    assert_eq!(
+        format_description("@alice:x", Some("Alice"), "!room:x"),
+        "Sent by Alice in !room:x"
+    );
+    assert_eq!(format_description("@alice:x", None, "!room:x"), "Sent by @alice:x in !room:x");
+    assert_eq!(
+        format_description("@alice:x", Some("  "), "!room:x"),
+        "Sent by @alice:x in !room:x"
+    );
+}
+
+#[test]
+fn test_lychee_photo_title() {
+    assert_eq!(photo_title("IMG_1.jpg"), Some("IMG_1".to_string()));
+    assert_eq!(photo_title("a/b/holiday.PNG"), Some("holiday".to_string()));
+    assert_eq!(photo_title("screenshot"), Some("screenshot".to_string()));
+    assert_eq!(photo_title(""), None);
+    assert_eq!(photo_title("   "), None);
+    assert_eq!(photo_title(&"x".repeat(150)).unwrap().chars().count(), 100);
+}
+
+#[test]
+fn test_lychee_album_ids() {
+    let albums = serde_json::json!({
+        "smart_albums": [{"id": "unsorted", "title": "Unsorted"}],
+        "albums": [{"id": "AAA", "title": "Trips"}, {"id": "BBB", "title": "Pets"}],
+        "shared_albums": [{"id": "CCC", "title": "Shared"}],
+        "root_rights": {"can_upload": true}
+    });
+    let mut ids = album_ids(&albums);
+    ids.sort();
+    assert_eq!(ids, vec!["AAA", "BBB", "CCC", "unsorted"]);
+    assert!(album_ids(&serde_json::json!("not an object")).is_empty());
 }

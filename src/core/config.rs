@@ -204,6 +204,41 @@ pub enum MiddlewareKind {
         #[serde(default)]
         households: HashMap<String, HouseholdCfg>,
     },
+    LycheeUpload {
+        /// Service whose image events are archived (a Matrix service).
+        service_id: String,
+        /// Comma-separated room IDs to archive from. Empty or omitted means
+        /// every room on the service except direct chats.
+        #[serde(default, deserialize_with = "deserialize_string_list")]
+        room_ids: Option<Vec<String>>,
+        /// Comma-separated room IDs that are never archived, even if listed
+        /// in `room_ids`.
+        #[serde(default, deserialize_with = "deserialize_string_list")]
+        exclude_room_ids: Option<Vec<String>>,
+        /// Lychee origin, e.g. `https://photos.example.com` (no trailing path).
+        lychee_url: String,
+        /// Lychee API token (Settings -> Profile -> API Token). Sent as a
+        /// bearer token and never logged.
+        lychee_token: SecretString,
+        /// Random ID of the destination album, as seen in the album URL.
+        album_id: String,
+        /// Largest file, in bytes, sent in the single-chunk upload. Bigger
+        /// photos are skipped with `oversize_message`. Keep at or below
+        /// Lychee's PHP `upload_max_filesize` / `post_max_size`.
+        #[serde(default = "default_lychee_max_file_size_bytes")]
+        #[serde_as(as = "DisplayFromStr")]
+        max_file_size_bytes: u64,
+        /// Posted to the originating room when a photo could not be archived.
+        #[serde(default = "default_lychee_failure_message")]
+        failure_message: String,
+        /// Posted instead of `failure_message` when a photo exceeds
+        /// `max_file_size_bytes`. `{max_mb}` renders the limit in whole MiB.
+        #[serde(default = "default_lychee_oversize_message")]
+        oversize_message: String,
+        /// Whole-request timeout for the upload (e.g. `60s`, `2m`).
+        #[serde(default = "default_lychee_request_timeout", with = "humantime_serde")]
+        request_timeout: Duration,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -277,6 +312,23 @@ fn default_thumbnail_max_height() -> u32 {
 
 fn default_thumbnail_jpeg_quality() -> u8 {
     75
+}
+
+fn default_lychee_max_file_size_bytes() -> u64 {
+    50 * 1024 * 1024 // 50 MiB
+}
+
+fn default_lychee_failure_message() -> String {
+    "Sorry, I couldn't archive that photo to the album. Please try sending it again later."
+        .to_string()
+}
+
+fn default_lychee_oversize_message() -> String {
+    "Sorry, that photo is too large to archive (limit {max_mb} MB).".to_string()
+}
+
+fn default_lychee_request_timeout() -> Duration {
+    Duration::from_secs(60)
 }
 
 // Reconnection configuration with exponential backoff

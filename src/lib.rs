@@ -22,6 +22,7 @@ pub mod middlewares {
     pub mod ezstream_announce;
     pub mod kanidm;
     pub mod logger;
+    pub mod lychee_upload;
     pub mod movie_showtimes;
     pub mod weekly_gathering;
 }

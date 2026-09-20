@@ -111,3 +111,105 @@ fn test_config_serde_calendar_agenda_defaults() {
         } if command == "!events"
     );
 }
+
+#[test]
+fn test_config_serde_lychee_upload_middleware() {
+    let config_str = r#"
+        [services.matrix1]
+        kind = "dummy"
+
+        [middlewares.lychee]
+        kind = "lycheeupload"
+        service_id = "matrix1"
+        room_ids = "!a:x, !b:x"
+        exclude_room_ids = "!c:x"
+        lychee_url = "https://photos.example.com"
+        lychee_token = "secret"
+        album_id = "AbCdEfGhIjKlMnOpQrStUvWx"
+        max_file_size_bytes = "20971520"
+        failure_message = "nope"
+        oversize_message = "big ({max_mb})"
+        request_timeout = "30s"
+        "#;
+
+    let config: Config = toml::from_str(config_str).expect("Failed to parse config");
+
+    assert_matches!(
+        &config.middlewares["lychee"].kind,
+        MiddlewareKind::LycheeUpload {
+            service_id,
+            room_ids: Some(rooms),
+            exclude_room_ids: Some(excluded),
+            lychee_url,
+            album_id,
+            max_file_size_bytes: 20_971_520,
+            failure_message,
+            oversize_message,
+            request_timeout,
+            ..
+        } if service_id == "matrix1"
+            && rooms == &["!a:x", "!b:x"]
+            && excluded == &["!c:x"]
+            && lychee_url == "https://photos.example.com"
+            && album_id == "AbCdEfGhIjKlMnOpQrStUvWx"
+            && failure_message == "nope"
+            && oversize_message == "big ({max_mb})"
+            && *request_timeout == std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn test_config_serde_lychee_upload_defaults() {
+    let config_str = r#"
+        [services.matrix1]
+        kind = "dummy"
+
+        [middlewares.lychee]
+        kind = "lycheeupload"
+        service_id = "matrix1"
+        lychee_url = "https://photos.example.com"
+        lychee_token = "secret"
+        album_id = "AbCdEfGhIjKlMnOpQrStUvWx"
+        "#;
+
+    let config: Config = toml::from_str(config_str).expect("Failed to parse config");
+
+    assert_matches!(
+        &config.middlewares["lychee"].kind,
+        MiddlewareKind::LycheeUpload {
+            room_ids: None,
+            exclude_room_ids: None,
+            max_file_size_bytes: 52_428_800,
+            failure_message,
+            oversize_message,
+            request_timeout,
+            ..
+        } if failure_message.contains("couldn't archive")
+            && oversize_message.contains("{max_mb}")
+            && *request_timeout == std::time::Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn test_config_serde_lychee_upload_empty_room_list() {
+    let config_str = r#"
+        [services.matrix1]
+        kind = "dummy"
+
+        [middlewares.lychee]
+        kind = "lycheeupload"
+        service_id = "matrix1"
+        room_ids = ""
+        lychee_url = "https://photos.example.com"
+        lychee_token = "secret"
+        album_id = "AbCdEfGhIjKlMnOpQrStUvWx"
+        "#;
+
+    let config: Config = toml::from_str(config_str).expect("Failed to parse config");
+
+    // An explicitly empty list is equivalent to omitting it: every room.
+    assert_matches!(
+        &config.middlewares["lychee"].kind,
+        MiddlewareKind::LycheeUpload { room_ids: Some(rooms), .. } if rooms.is_empty()
+    );
+}

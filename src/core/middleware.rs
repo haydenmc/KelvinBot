@@ -11,6 +11,7 @@ use crate::middlewares::{
     ezstream_announce::EzStreamAnnounce,
     kanidm::{KanidmConfig, KanidmIdentity},
     logger::Logger,
+    lychee_upload::{LycheeUpload, LycheeUploadConfig},
     movie_showtimes::MovieShowtimes,
     weekly_gathering::{Household, WeeklyGathering, WeeklyGatheringConfig},
 };
@@ -372,6 +373,42 @@ pub fn instantiate_middleware_from_config(
                         households: runtime_households,
                     },
                 ))
+            }
+            MiddlewareKind::LycheeUpload {
+                service_id,
+                room_ids,
+                exclude_room_ids,
+                lychee_url,
+                lychee_token,
+                album_id,
+                max_file_size_bytes,
+                failure_message,
+                oversize_message,
+                request_timeout,
+            } => {
+                if lychee_url.trim().is_empty() {
+                    bail!("lychee_url is required for middleware '{}'", name);
+                }
+                if album_id.trim().is_empty() {
+                    bail!("album_id is required for middleware '{}'", name);
+                }
+                let middleware = LycheeUpload::new(
+                    make_ctx()?,
+                    LycheeUploadConfig {
+                        service_id: service_id.clone(),
+                        room_ids: room_ids.clone().unwrap_or_default(),
+                        exclude_room_ids: exclude_room_ids.clone().unwrap_or_default(),
+                        lychee_url: lychee_url.trim().to_string(),
+                        lychee_token: lychee_token.clone(),
+                        album_id: album_id.trim().to_string(),
+                        max_file_size_bytes: *max_file_size_bytes,
+                        failure_message: failure_message.clone(),
+                        oversize_message: oversize_message.clone(),
+                        request_timeout: *request_timeout,
+                    },
+                )
+                .map_err(|e| anyhow::anyhow!("{} for middleware '{}'", e, name))?;
+                Arc::new(middleware)
             }
             MiddlewareKind::Unknown => {
                 warn!(middleware_name=%name, "unknown middleware kind, skipping");
