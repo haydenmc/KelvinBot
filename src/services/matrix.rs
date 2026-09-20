@@ -631,6 +631,12 @@ impl Service for MatrixService {
 
         // An initial sync to set up state and so our bot doesn't respond to old messages.
         // This also fetches cross-signing keys from the server.
+        //
+        // Keep this BEFORE setup_event_handlers(): nothing delivered by this first sync
+        // (the initial timeline on a fresh store, or the backlog that accumulated while
+        // the bot was down) reaches any handler, and the background sync below resumes
+        // from this response's token. Middlewares such as lychee_upload rely on that to
+        // never bulk-upload old photos.
         self.client.sync_once(SyncSettings::default()).await?;
 
         // Set up event handlers before encryption setup so verification events are processed

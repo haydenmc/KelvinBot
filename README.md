@@ -504,6 +504,9 @@ KELVIN__MIDDLEWARES__<name>__REQUEST_TIMEOUT=<duration>             # Optional, 
   `OVERSIZE_MESSAGE` is posted instead.
 - Archived photos are remembered in `<data_directory>/<name>.store.json`, so a restart never uploads
   the same photo twice. Each photo's Lychee description records the sender and room.
+- Only photos posted while the bot is running are archived. The Matrix service completes an initial
+  sync before it starts delivering events, so nothing from the sync backlog (old history on a fresh
+  store, or photos sent while the bot was down) is ever uploaded.
 
 **Example:**
 ```bash
