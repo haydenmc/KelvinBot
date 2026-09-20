@@ -506,11 +506,17 @@ impl LycheeApi {
     }
 
     /// `GET /Albums`, used only as a startup connectivity check.
+    ///
+    /// Lychee's JSON routes answer 406 unless the request carries both
+    /// `Accept: application/json` and `Content-Type: application/json`, even
+    /// on a body-less GET. (The multipart upload is exempt: it must keep its
+    /// own content type.)
     async fn list_albums(&self) -> Result<serde_json::Value> {
         let response = self
             .http
             .get(self.endpoint("Albums"))
             .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
             .bearer_auth(self.config.token.expose_secret())
             .send()
             .await
