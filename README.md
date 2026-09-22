@@ -466,6 +466,62 @@ KELVIN__MIDDLEWARES__gathering__HOUSEHOLDS__h1__MEMBERS=@alice:matrix.org,@bob:m
 KELVIN__SERVICES__matrix_main__MIDDLEWARE=gathering,logger
 ```
 
+#### Lychee Upload Middleware
+
+Archives photos posted in chat rooms to an album on a self-hosted [Lychee](https://lycheeorg.dev/)
+instance (v6 or newer, API v2), so shared media outlives the chat scrollback. Uploads are silent;
+when a photo could not be archived, a short message is posted back into the room it came from.
+
+**Prerequisites:**
+- A Lychee API token from **Settings → Profile → API Token** (shown once; treat it like a password).
+- The destination album's ID: the 24-character string at the end of the album URL.
+
+**Configuration:**
+```bash
+KELVIN__MIDDLEWARES__<name>__KIND=lycheeupload
+KELVIN__MIDDLEWARES__<name>__SERVICE_ID=<service_name>
+KELVIN__MIDDLEWARES__<name>__ROOM_IDS=<room_id,room_id,...>        # Optional; empty = all rooms
+KELVIN__MIDDLEWARES__<name>__EXCLUDE_ROOM_IDS=<room_id,...>         # Optional
+KELVIN__MIDDLEWARES__<name>__LYCHEE_URL=<https://photos.example.com>
+KELVIN__MIDDLEWARES__<name>__LYCHEE_TOKEN=<api_token>
+KELVIN__MIDDLEWARES__<name>__ALBUM_ID=<album_id>
+KELVIN__MIDDLEWARES__<name>__MAX_FILE_SIZE_BYTES=<bytes>            # Optional, default 52428800
+KELVIN__MIDDLEWARES__<name>__FAILURE_MESSAGE=<text>                 # Optional
+KELVIN__MIDDLEWARES__<name>__OVERSIZE_MESSAGE=<text>                # Optional, {max_mb} placeholder
+KELVIN__MIDDLEWARES__<name>__REQUEST_TIMEOUT=<duration>             # Optional, default 60s
+```
+
+**Behavior:**
+- Only image messages (`m.image`) are archived. Videos and generic file attachments are ignored, as
+  are images sent in direct chats with the bot and the bot's own images.
+- With `ROOM_IDS` empty or omitted, every room on the service is archived except direct chats.
+  `EXCLUDE_ROOM_IDS` always wins.
+- **Originals only.** The bot uploads the exact bytes it received from Matrix: full resolution, EXIF
+  intact, never resized or re-encoded. Matrix clients can still compress before sending, so ask
+  people to send originals if quality matters.
+- Uploads go in a single chunk, so `MAX_FILE_SIZE_BYTES` must stay at or below the PHP
+  `upload_max_filesize` / `post_max_size` of your Lychee instance. Larger photos are skipped and
+  `OVERSIZE_MESSAGE` is posted instead.
+- Archived photos are remembered in `<data_directory>/<name>.store.json`, so a restart never uploads
+  the same photo twice. Each photo's Lychee description records the sender and room.
+- Only photos posted while the bot is running are archived. The Matrix service completes an initial
+  sync before it starts delivering events, so nothing from the sync backlog (old history on a fresh
+  store, or photos sent while the bot was down) is ever uploaded.
+
+**Example:**
+```bash
+KELVIN__MIDDLEWARES__lychee__KIND=lycheeupload
+KELVIN__MIDDLEWARES__lychee__SERVICE_ID=matrix_main
+KELVIN__MIDDLEWARES__lychee__ROOM_IDS=!photos:matrix.org,!trips:matrix.org
+KELVIN__MIDDLEWARES__lychee__LYCHEE_URL=https://photos.example.com
+KELVIN__MIDDLEWARES__lychee__LYCHEE_TOKEN=your_lychee_api_token
+KELVIN__MIDDLEWARES__lychee__ALBUM_ID=AbCdEfGhIjKlMnOpQrStUvWx
+KELVIN__SERVICES__matrix_main__MIDDLEWARE=logger,lychee
+```
+
+See `.env.lychee.example` for a fuller walkthrough, including curl commands to sanity-check the
+token and album ID.
+
 ### Middleware Pipelines
 
 Services can have multiple middlewares that process events sequentially:

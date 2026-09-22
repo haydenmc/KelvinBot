@@ -327,7 +327,24 @@ impl MatrixService {
                             if bot_server == room_server {
                                 match room.join().await {
                                     Ok(_) => {
-                                        info!(room_id=%room.room_id(), "Successfully joined room")
+                                        info!(room_id=%room.room_id(), "Successfully joined room");
+                                        // The SDK only reports a joined room as direct if it
+                                        // appears in the bot's own m.direct account data, which
+                                        // joining alone never updates. Honor the invite's flag so
+                                        // DMs and group DMs are classified correctly afterwards.
+                                        if event.content.is_direct == Some(true) {
+                                            match room.set_is_direct(true).await {
+                                                Ok(()) => info!(
+                                                    room_id=%room.room_id(),
+                                                    "marked invited room as direct"
+                                                ),
+                                                Err(e) => warn!(
+                                                    room_id=%room.room_id(),
+                                                    error=%e,
+                                                    "failed to mark invited room as direct"
+                                                ),
+                                            }
+                                        }
                                     }
                                     Err(e) => error!("Failed to accept invite: {}", e),
                                 }
@@ -614,6 +631,12 @@ impl Service for MatrixService {
 
         // An initial sync to set up state and so our bot doesn't respond to old messages.
         // This also fetches cross-signing keys from the server.
+        //
+        // Keep this BEFORE setup_event_handlers(): nothing delivered by this first sync
+        // (the initial timeline on a fresh store, or the backlog that accumulated while
+        // the bot was down) reaches any handler, and the background sync below resumes
+        // from this response's token. Middlewares such as lychee_upload rely on that to
+        // never bulk-upload old photos.
         self.client.sync_once(SyncSettings::default()).await?;
 
         // Set up event handlers before encryption setup so verification events are processed
