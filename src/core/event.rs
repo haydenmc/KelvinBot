@@ -75,7 +75,7 @@ pub enum EventKind {
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}]", &self.service_id)?;
+        write!(f, "[{}]", self.service_id)?;
         match &self.kind {
             EventKind::DirectMessage { user_id, body, .. } => {
                 write!(f, "[DM] {user_id}: {body}")
