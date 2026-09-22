@@ -713,7 +713,7 @@ impl Service for MatrixService {
                         match room.send(content).await {
                             Ok(response) => {
                                 debug!("DM sent successfully");
-                                Ok(response.event_id.to_string())
+                                Ok(response.response.event_id.to_string())
                             }
                             Err(e) => {
                                 error!(error=%e, "failed to send DM");
@@ -759,7 +759,7 @@ impl Service for MatrixService {
                     match room.send(content).await {
                         Ok(response) => {
                             debug!("room message sent successfully");
-                            Ok(response.event_id.to_string())
+                            Ok(response.response.event_id.to_string())
                         }
                         Err(e) => {
                             error!(error=%e, "failed to send room message");
@@ -830,7 +830,7 @@ impl Service for MatrixService {
                     match room.send(content).await {
                         Ok(response) => {
                             debug!("thread reply sent successfully");
-                            Ok(response.event_id.to_string())
+                            Ok(response.response.event_id.to_string())
                         }
                         Err(e) => {
                             error!(error=%e, "failed to send thread reply");

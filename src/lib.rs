@@ -1,6 +1,7 @@
 // rustc 1.94+ overflows the default recursion limit while proving `Send` for the
-// matrix-sdk 0.14 sync future spawned in `services::matrix`. This is the same fix
-// upstream applied to their own crate in matrix-sdk 0.17
+// matrix-sdk sync future spawned in `services::matrix`. The overflow is evaluated in
+// this crate, so it is needed regardless of the SDK version (still required on 0.19).
+// Upstream applied the same attribute to their own crate in matrix-sdk 0.17
 // (matrix-org/matrix-rust-sdk#6254, #6489).
 #![recursion_limit = "256"]
 
