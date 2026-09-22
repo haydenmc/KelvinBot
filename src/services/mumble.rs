@@ -464,8 +464,8 @@ impl Service for MumbleService {
 
                 if let Some(tx) = response_tx {
                     let _ = tx.send(result);
-                } else if let Err(e) = result {
-                    return Err(e);
+                } else {
+                    result?;
                 }
             }
             Command::SendRoomMessage { room_id, body, response_tx, .. } => {
@@ -491,8 +491,8 @@ impl Service for MumbleService {
 
                 if let Some(tx) = response_tx {
                     let _ = tx.send(result);
-                } else if let Err(e) = result {
-                    return Err(e);
+                } else {
+                    result?;
                 }
             }
             Command::EditMessage { .. } => {
