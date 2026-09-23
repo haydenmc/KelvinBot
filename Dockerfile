@@ -21,7 +21,7 @@ COPY src/ ./src/
 RUN cargo build --release
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -40,6 +40,10 @@ VOLUME ["/data"]
 
 # Copy the binary from builder stage
 COPY --from=builder /app/target/release/kelvin-bot /usr/local/bin/kelvin-bot
+
+# Fail the build if the binary needs anything this image's libc lacks, e.g. when
+# the builder and runtime stages drift onto different Debian releases.
+RUN ! ldd /usr/local/bin/kelvin-bot 2>&1 | grep -q "not found"
 
 # Set ownership and permissions
 RUN chown root:root /usr/local/bin/kelvin-bot && \
