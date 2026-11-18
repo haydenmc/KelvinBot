@@ -55,7 +55,21 @@ pub enum Command {
     },
 }
 
-// Implement Debug manually since oneshot::Sender doesn't implement Clone
+/// Debug placeholder for message text, which is deliberately kept out of logs.
+///
+/// Bodies can carry secrets (for example the credential reset links sent by
+/// the kanidm middleware) as well as private conversation, so only the length
+/// is shown.
+struct Redacted<'a>(&'a str);
+
+impl std::fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<redacted, {} bytes>", self.0.len())
+    }
+}
+
+// Implemented manually so message text is redacted (see `Redacted`) and
+// because oneshot::Sender has no useful Debug output.
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -63,15 +77,15 @@ impl std::fmt::Debug for Command {
                 .debug_struct("SendDirectMessage")
                 .field("service_id", service_id)
                 .field("user_id", user_id)
-                .field("body", body)
+                .field("body", &Redacted(body))
                 .field("response_tx", &"<Option<oneshot::Sender>>")
                 .finish(),
             Command::SendRoomMessage { service_id, room_id, body, markdown_body, .. } => f
                 .debug_struct("SendRoomMessage")
                 .field("service_id", service_id)
                 .field("room_id", room_id)
-                .field("body", body)
-                .field("markdown_body", markdown_body)
+                .field("body", &Redacted(body))
+                .field("markdown_body", &markdown_body.as_deref().map(Redacted))
                 .field("response_tx", &"<Option<oneshot::Sender>>")
                 .finish(),
             Command::SendThreadReply {
@@ -86,16 +100,16 @@ impl std::fmt::Debug for Command {
                 .field("service_id", service_id)
                 .field("room_id", room_id)
                 .field("thread_root_id", thread_root_id)
-                .field("body", body)
-                .field("markdown_body", markdown_body)
+                .field("body", &Redacted(body))
+                .field("markdown_body", &markdown_body.as_deref().map(Redacted))
                 .field("response_tx", &"<Option<oneshot::Sender>>")
                 .finish(),
             Command::EditMessage { service_id, message_id, new_body, new_markdown_body } => f
                 .debug_struct("EditMessage")
                 .field("service_id", service_id)
                 .field("message_id", message_id)
-                .field("new_body", new_body)
-                .field("new_markdown_body", new_markdown_body)
+                .field("new_body", &Redacted(new_body))
+                .field("new_markdown_body", &new_markdown_body.as_deref().map(Redacted))
                 .finish(),
             Command::AddReaction { service_id, room_id, event_id, key } => f
                 .debug_struct("AddReaction")
@@ -108,7 +122,7 @@ impl std::fmt::Debug for Command {
                 .debug_struct("SendRoomImage")
                 .field("service_id", service_id)
                 .field("room_id", room_id)
-                .field("caption", caption)
+                .field("caption", &Redacted(caption))
                 .finish(),
         }
     }
