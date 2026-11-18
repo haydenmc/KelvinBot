@@ -31,6 +31,15 @@ pub enum ServiceKind {
         device_id: String,
         db_passphrase: SecretString,
         verification_device_id: Option<String>,
+        /// Largest image, in bytes, the service downloads to attach to a
+        /// `RoomImage` event. Bigger images are still reported, but without
+        /// their bytes, so one huge upload cannot exhaust memory. Keep it at
+        /// or above any `lycheeupload` `max_file_size_bytes`, or photos in
+        /// between get that middleware's generic failure notice instead of
+        /// its oversize notice.
+        #[serde(default = "default_matrix_max_image_size_bytes")]
+        #[serde_as(as = "DisplayFromStr")]
+        max_image_size_bytes: u64,
     },
     Mumble {
         hostname: String,
@@ -312,6 +321,10 @@ fn default_thumbnail_max_height() -> u32 {
 
 fn default_thumbnail_jpeg_quality() -> u8 {
     75
+}
+
+fn default_matrix_max_image_size_bytes() -> u64 {
+    100 * 1024 * 1024 // 100 MiB
 }
 
 fn default_lychee_max_file_size_bytes() -> u64 {

@@ -59,6 +59,7 @@ pub async fn instantiate_services_from_config(
                 device_id,
                 db_passphrase,
                 verification_device_id,
+                max_image_size_bytes,
             } => {
                 match MatrixService::create(
                     service_id.clone(),
@@ -70,6 +71,7 @@ pub async fn instantiate_services_from_config(
                     config.data_directory.clone(),
                     db_passphrase.clone(),
                     verification_device_id.clone(),
+                    *max_image_size_bytes,
                 )
                 .await
                 {

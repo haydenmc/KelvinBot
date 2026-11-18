@@ -43,6 +43,12 @@ impl fmt::Display for MatrixUserId {
     }
 }
 
+/// Whether an image of `size` bytes is over the download cap. An unknown size
+/// is let through; the downloaded length is checked afterwards.
+fn exceeds_image_cap(size: Option<u64>, max_image_size_bytes: u64) -> bool {
+    size.is_some_and(|size| size > max_image_size_bytes)
+}
+
 struct ReactionInfo {
     target_event_id: String,
     key: String,
@@ -54,6 +60,7 @@ pub struct MatrixService {
     password: SecretString,
     device_id: String,
     verification_device_id: Option<String>,
+    max_image_size_bytes: u64,
     evt_tx: tokio::sync::mpsc::Sender<Event>,
     client: Client,
     reaction_registry: Arc<Mutex<HashMap<String, ReactionInfo>>>,
@@ -71,6 +78,7 @@ impl MatrixService {
         data_directory: PathBuf,
         db_passphrase: SecretString,
         verification_device_id: Option<String>,
+        max_image_size_bytes: u64,
     ) -> Result<Self> {
         // Create storage directory
         let mut sqlite_path = data_directory.clone();
@@ -97,6 +105,7 @@ impl MatrixService {
             password,
             device_id,
             verification_device_id,
+            max_image_size_bytes,
             evt_tx,
             client,
             reaction_registry,
@@ -384,6 +393,7 @@ impl MatrixService {
         let evt_tx = self.evt_tx.clone();
         let bot_user_id_for_handler =
             self.client.user_id().expect("client should have user_id after login").to_owned();
+        let max_image_size_bytes = self.max_image_size_bytes;
         self.client.add_event_handler(
             move |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| {
                 let service_id = service_id.clone();
@@ -451,6 +461,8 @@ impl MatrixService {
                             }
                             let mimetype =
                                 image_content.info.as_ref().and_then(|i| i.mimetype.clone());
+                            let declared_size =
+                                image_content.info.as_ref().and_then(|i| i.size).map(u64::from);
                             let room_id = room.room_id().to_string();
                             let source_url =
                                 format!("https://matrix.to/#/{}/{}", room_id, event.event_id);
@@ -463,15 +475,43 @@ impl MatrixService {
                                     source: image_content.source.clone(),
                                     format: MediaFormat::File,
                                 };
-                                let image_data = match _client
-                                    .media()
-                                    .get_media_content(&request, false)
-                                    .await
-                                {
-                                    Ok(bytes) => Some(Arc::from(bytes)),
-                                    Err(e) => {
-                                        warn!(error=%e, "failed to fetch image content for relay");
-                                        None
+                                // The event is still emitted when the image is too
+                                // large or the fetch fails, just without bytes, so
+                                // middlewares can report it rather than miss it.
+                                let image_data = if exceeds_image_cap(
+                                    declared_size,
+                                    max_image_size_bytes,
+                                ) {
+                                    warn!(
+                                        room_id=%room_id,
+                                        declared_size=?declared_size,
+                                        limit=max_image_size_bytes,
+                                        "image exceeds max_image_size_bytes; not downloading"
+                                    );
+                                    None
+                                } else {
+                                    match _client.media().get_media_content(&request, false).await {
+                                        // The declared size is supplied by the sender, so
+                                        // the real length is checked as well.
+                                        Ok(bytes)
+                                            if exceeds_image_cap(
+                                                Some(bytes.len() as u64),
+                                                max_image_size_bytes,
+                                            ) =>
+                                        {
+                                            warn!(
+                                                room_id=%room_id,
+                                                size=bytes.len(),
+                                                limit=max_image_size_bytes,
+                                                "downloaded image exceeds max_image_size_bytes; discarding"
+                                            );
+                                            None
+                                        }
+                                        Ok(bytes) => Some(Arc::from(bytes)),
+                                        Err(e) => {
+                                            warn!(error=%e, "failed to fetch image content for relay");
+                                            None
+                                        }
                                     }
                                 };
                                 let event = Event {
@@ -951,5 +991,22 @@ impl Service for MatrixService {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_cap_applies_to_known_sizes() {
+        assert!(!exceeds_image_cap(Some(0), 100));
+        assert!(!exceeds_image_cap(Some(100), 100));
+        assert!(exceeds_image_cap(Some(101), 100));
+    }
+
+    #[test]
+    fn image_cap_lets_unknown_sizes_through() {
+        assert!(!exceeds_image_cap(None, 100));
     }
 }

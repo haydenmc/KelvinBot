@@ -13,6 +13,54 @@ use crate::core::{
     service::ServiceId,
 };
 
+/// Largest width or height, in pixels, of an image that will be decoded for a
+/// thumbnail. Well beyond any camera, but stops absurd dimensions early.
+const MAX_DECODE_DIMENSION: u32 = 16_384;
+
+/// Memory budget for decoding one image. Images come from anyone in the
+/// relayed room, and a small file can declare enormous dimensions, so the
+/// decoder is not allowed its default 512 MiB. 256 MiB still covers an
+/// uncompressed 80-megapixel RGB photo.
+const MAX_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How many thumbnails may be decoded at once across all relays. A burst of
+/// photos would otherwise decode in parallel and multiply the budget above.
+static THUMBNAIL_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Decode `raw`, shrink it to fit `max_width` x `max_height` and re-encode it
+/// as a JPEG, within the decode limits above.
+fn make_thumbnail(
+    raw: &[u8],
+    max_width: u32,
+    max_height: u32,
+    jpeg_quality: u8,
+) -> anyhow::Result<Vec<u8>> {
+    use image::{ImageEncoder, ImageReader, Limits, codecs::jpeg::JpegEncoder};
+    use std::io::Cursor;
+
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_DECODE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+
+    let mut reader = ImageReader::new(Cursor::new(raw)).with_guessed_format()?;
+    reader.limits(limits);
+    let img = reader.decode()?;
+
+    // Normalise to Rgb8 before encoding — JpegEncoder can silently produce
+    // empty output when handed an Rgb8 DynamicImage via write_with_encoder,
+    // so we call write_image directly with an explicit color type instead.
+    let thumb = img.thumbnail(max_width, max_height).into_rgb8();
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, jpeg_quality).write_image(
+        thumb.as_raw(),
+        thumb.width(),
+        thumb.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(out)
+}
+
 pub struct ChatRelayConfig {
     pub source_service_id: String,
     pub source_room_id: Option<String>,
@@ -167,25 +215,20 @@ impl ChatRelay {
 
         info!(raw_bytes=%raw_bytes.len(), "processing image thumbnail for relay");
 
-        // Decode, resize, and re-encode as JPEG on a blocking thread.
-        // Normalise to Rgb8 before encoding — JpegEncoder can silently produce
-        // empty output when handed an Rgb8 DynamicImage via write_with_encoder,
-        // so we call write_image directly with an explicit color type instead.
-        let thumbnail_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-            use image::{ImageEncoder, ImageReader, codecs::jpeg::JpegEncoder};
-            use std::io::Cursor;
-            let img = ImageReader::new(Cursor::new(&raw_bytes)).with_guessed_format()?.decode()?;
-            let thumb = img.thumbnail(thumbnail_max_width, thumbnail_max_height).into_rgb8();
-            let mut out = Vec::new();
-            JpegEncoder::new_with_quality(&mut out, thumbnail_jpeg_quality).write_image(
-                thumb.as_raw(),
-                thumb.width(),
-                thumb.height(),
-                image::ExtendedColorType::Rgb8,
-            )?;
-            Ok(out)
-        })
-        .await;
+        // Decode, resize, and re-encode as JPEG on a blocking thread, a
+        // bounded number at a time (see `THUMBNAIL_JOBS`).
+        let thumbnail_result = {
+            let _permit = THUMBNAIL_JOBS.acquire().await;
+            tokio::task::spawn_blocking(move || {
+                make_thumbnail(
+                    &raw_bytes,
+                    thumbnail_max_width,
+                    thumbnail_max_height,
+                    thumbnail_jpeg_quality,
+                )
+            })
+            .await
+        };
 
         let thumbnail_data = match thumbnail_result {
             Ok(Ok(data)) => {
@@ -366,5 +409,52 @@ impl Middleware for ChatRelay {
         }
 
         Ok(Verdict::Continue)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageFormat, RgbImage};
+    use std::io::Cursor;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        RgbImage::new(width, height)
+            .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .expect("failed to encode test image");
+        out
+    }
+
+    #[test]
+    fn thumbnail_is_a_jpeg_within_the_requested_bounds() {
+        let thumbnail = make_thumbnail(&png(800, 400), 200, 150, 60).expect("thumbnail");
+
+        let decoded = image::load_from_memory(&thumbnail).expect("thumbnail should decode");
+        assert_eq!(image::guess_format(&thumbnail).unwrap(), ImageFormat::Jpeg);
+        assert!(decoded.width() <= 200 && decoded.height() <= 150);
+        // Aspect ratio is preserved: 800x400 fits 200x150 as 200x100.
+        assert_eq!((decoded.width(), decoded.height()), (200, 100));
+    }
+
+    #[test]
+    fn oversized_dimensions_are_rejected() {
+        // Tiny on the wire, but one side is past the decode limit.
+        let tall = png(1, MAX_DECODE_DIMENSION + 1);
+        assert!(tall.len() < 1024 * 1024);
+        assert!(make_thumbnail(&tall, 200, 150, 60).is_err());
+
+        let wide = png(MAX_DECODE_DIMENSION + 1, 1);
+        assert!(make_thumbnail(&wide, 200, 150, 60).is_err());
+    }
+
+    #[test]
+    fn largest_allowed_dimension_still_decodes() {
+        assert!(make_thumbnail(&png(1, MAX_DECODE_DIMENSION), 200, 150, 60).is_ok());
+    }
+
+    #[test]
+    fn garbage_input_is_an_error() {
+        assert!(make_thumbnail(b"not an image", 200, 150, 60).is_err());
     }
 }
