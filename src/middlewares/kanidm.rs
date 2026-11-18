@@ -15,11 +15,12 @@
 
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use crate::core::{
     bus::Command,
@@ -27,6 +28,13 @@ use crate::core::{
     middleware::{Middleware, MiddlewareContext, Verdict},
     service::ServiceId,
 };
+
+/// Whole-request timeout for every kanidm and MAS call, so a stalled server
+/// cannot leave a command pending forever.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Longest username accepted by `!invite`.
+const MAX_USERNAME_LEN: usize = 64;
 
 /// Static configuration for the kanidm identity middleware.
 pub struct KanidmConfig {
@@ -61,13 +69,17 @@ impl KanidmIdentity {
         command_reset: String,
         command_invite: String,
         config: KanidmConfig,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .context("failed to build kanidm HTTP client")?;
+        Ok(Self {
             cmd_tx: ctx.cmd_tx,
             command_reset,
             command_invite,
-            api: IdentityApi { http: reqwest::Client::new(), config: Arc::new(config) },
-        }
+            api: IdentityApi { http, config: Arc::new(config) },
+        })
     }
 
     /// Spawn a DM reply. Used for all user-facing responses so `on_event` can
@@ -120,11 +132,16 @@ impl Middleware for KanidmIdentity {
             match parse_invite_args(body.strip_prefix(&invite_prefix).unwrap_or("")) {
                 Some(cmd) => cmd,
                 None => {
-                    // Missing username / missing or invalid email — reply with usage.
+                    // Missing or invalid username / email — reply with usage.
                     self.reply(
                         evt.service_id.clone(),
                         user_id.clone(),
-                        format!("Usage: {} <username> <email>", self.command_invite),
+                        format!(
+                            "Usage: {} <username> <email>\n\
+                             Usernames start with a letter or digit and may contain only \
+                             letters, digits, '.', '_' and '-'.",
+                            self.command_invite
+                        ),
                     );
                     return Ok(Verdict::Continue);
                 }
@@ -161,8 +178,12 @@ impl Middleware for KanidmIdentity {
                         )
                     }
                     Err(e) => {
-                        tracing::error!(user_id=%user_id, error=%e, "failed to generate reset link");
-                        format!("Sorry, I couldn't generate a reset link: {e}")
+                        // Full detail (including upstream response bodies) goes
+                        // to the log only; the user gets a generic message.
+                        tracing::error!(user_id=%user_id, error=%format!("{e:#}"), "failed to generate reset link");
+                        "Sorry, I couldn't generate a reset link. Please try again later or \
+                         ask an administrator."
+                            .to_string()
                     }
                 },
                 ParsedCommand::Invite { username, email } => {
@@ -176,8 +197,12 @@ impl Middleware for KanidmIdentity {
                             )
                         }
                         Err(e) => {
-                            tracing::error!(username=%username, error=%e, "failed to create account");
-                            format!("Sorry, I couldn't create account '{username}': {e}")
+                            tracing::error!(username=%username, error=%format!("{e:#}"), "failed to create account");
+                            format!(
+                                "Sorry, I couldn't create account '{username}'. The username \
+                                 may already be taken; otherwise please try again later or ask \
+                                 an administrator."
+                            )
                         }
                     }
                 }
@@ -199,13 +224,13 @@ impl Middleware for KanidmIdentity {
 }
 
 /// Parse the argument portion of an `!invite` command (everything after the
-/// command word). Both a username and a valid-looking email are required;
-/// returns `None` if either is missing or the email fails a basic sanity check.
+/// command word). Both a valid username and a valid-looking email are
+/// required; returns `None` if either is missing or fails its check.
 fn parse_invite_args(args: &str) -> Option<ParsedCommand> {
     let args = args.trim();
     let mut parts = args.split_whitespace();
     let username = parts.next()?.trim();
-    if username.is_empty() {
+    if !is_valid_username(username) {
         return None;
     }
     let email = parts.next()?.trim();
@@ -213,6 +238,41 @@ fn parse_invite_args(args: &str) -> Option<ParsedCommand> {
         return None;
     }
     Some(ParsedCommand::Invite { username: username.to_string(), email: email.to_string() })
+}
+
+/// Whether `s` is acceptable as a new kanidm account name: 1 to
+/// `MAX_USERNAME_LEN` ASCII letters, digits, `.`, `_` or `-`, starting with a
+/// letter or digit.
+///
+/// Deliberately stricter than kanidm. The name comes straight from a chat
+/// message and is placed in a request path, so anything that could alter the
+/// URL (`/`, `?`, `#`, `%`, `..`) is refused before a request is made.
+fn is_valid_username(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    s.len() <= MAX_USERNAME_LEN
+        && first.is_ascii_alphanumeric()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Build `base` + `segments` as a URL, percent-encoding each segment so a
+/// value taken from user input or another service stays a single path
+/// component (`/` becomes `%2F`, and so on).
+///
+/// Empty, `.` and `..` segments are rejected rather than silently dropped,
+/// since dropping one would address a different endpoint.
+fn api_url(base: &str, segments: &[&str]) -> Result<Url> {
+    if let Some(bad) = segments.iter().find(|s| matches!(**s, "" | "." | "..")) {
+        bail!("refusing to build a request URL with path segment '{bad}'");
+    }
+    let mut url = Url::parse(base).context("invalid base URL")?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow!("base URL cannot have path segments"))?
+        .pop_if_empty()
+        .extend(segments);
+    Ok(url)
 }
 
 /// Lightweight sanity check for an email address: exactly one `@`, a non-empty
@@ -264,7 +324,7 @@ impl IdentityApi {
     async fn invite_new_account(&self, username: &str, email: &str) -> Result<String> {
         self.create_person(username, email).await?;
         let token = self.create_reset_token(username, self.config.invite_token_ttl).await?;
-        Ok(self.reset_link(&token))
+        self.reset_link(&token)
     }
 
     /// `!reset` flow: resolve the Matrix user to their kanidm account via MAS,
@@ -273,17 +333,19 @@ impl IdentityApi {
         let localpart = matrix_localpart(matrix_user_id);
         let subject = self.resolve_kanidm_subject(localpart).await?;
         let token = self.create_reset_token(&subject, self.config.reset_token_ttl).await?;
-        Ok(self.reset_link(&token))
+        self.reset_link(&token)
     }
 
-    fn reset_link(&self, token: &str) -> String {
-        format!("{}/ui/reset?token={}", self.config.kanidm_url.trim_end_matches('/'), token)
+    fn reset_link(&self, token: &str) -> Result<String> {
+        let mut url = api_url(&self.config.kanidm_url, &["ui", "reset"])?;
+        url.query_pairs_mut().append_pair("token", token);
+        Ok(url.into())
     }
 
     // --- kanidm REST API ---------------------------------------------------
 
     async fn create_person(&self, name: &str, email: &str) -> Result<()> {
-        let url = format!("{}/v1/person", self.config.kanidm_url.trim_end_matches('/'));
+        let url = api_url(&self.config.kanidm_url, &["v1", "person"])?;
         // kanidm requires a `displayname` at creation; default it to the
         // username (the person can change it later during credential setup).
         let body = serde_json::json!({
@@ -295,7 +357,7 @@ impl IdentityApi {
         });
         let response = self
             .http
-            .post(&url)
+            .post(url)
             .bearer_auth(self.config.kanidm_token.expose_secret())
             .json(&body)
             .send()
@@ -310,15 +372,14 @@ impl IdentityApi {
     /// validity window; kanidm clamps it to its own bounds (5m..=24h). Returns
     /// the raw token.
     async fn create_reset_token(&self, account_id: &str, ttl: Duration) -> Result<String> {
-        let url = format!(
-            "{}/v1/person/{}/_credential/_update_intent/{}",
-            self.config.kanidm_url.trim_end_matches('/'),
-            account_id,
-            ttl.as_secs()
-        );
+        let ttl_secs = ttl.as_secs().to_string();
+        let url = api_url(
+            &self.config.kanidm_url,
+            &["v1", "person", account_id, "_credential", "_update_intent", &ttl_secs],
+        )?;
         let response = self
             .http
-            .get(&url)
+            .get(url)
             .bearer_auth(self.config.kanidm_token.expose_secret())
             .send()
             .await
@@ -338,10 +399,10 @@ impl IdentityApi {
     /// grant. Credentials are sent in the request body (`client_secret_post`),
     /// which is how the MAS client is registered.
     async fn mas_admin_token(&self) -> Result<String> {
-        let url = format!("{}/oauth2/token", self.config.mas_url.trim_end_matches('/'));
+        let url = api_url(&self.config.mas_url, &["oauth2", "token"])?;
         let response = self
             .http
-            .post(&url)
+            .post(url)
             .form(&[
                 ("grant_type", "client_credentials"),
                 ("scope", "urn:mas:admin"),
@@ -368,14 +429,13 @@ impl IdentityApi {
         let token = self.mas_admin_token().await?;
 
         // 1. Look up the MAS user by username.
-        let user_url = format!(
-            "{}/api/admin/v1/users/by-username/{}",
-            self.config.mas_url.trim_end_matches('/'),
-            localpart
-        );
+        let user_url = api_url(
+            &self.config.mas_url,
+            &["api", "admin", "v1", "users", "by-username", localpart],
+        )?;
         let user: serde_json::Value = ensure_success(
             self.http
-                .get(&user_url)
+                .get(user_url)
                 .bearer_auth(&token)
                 .send()
                 .await
@@ -391,13 +451,11 @@ impl IdentityApi {
 
         // 2. List the user's upstream OAuth links (top-level collection filtered
         // by user + provider) and take the kanidm subject.
-        let links_url = format!(
-            "{}/api/admin/v1/upstream-oauth-links",
-            self.config.mas_url.trim_end_matches('/')
-        );
+        let links_url =
+            api_url(&self.config.mas_url, &["api", "admin", "v1", "upstream-oauth-links"])?;
         let links: serde_json::Value = ensure_success(
             self.http
-                .get(&links_url)
+                .get(links_url)
                 .query(&[
                     ("filter[user]", user_id.as_str()),
                     ("filter[provider]", self.config.mas_provider_id.as_str()),
@@ -442,4 +500,97 @@ async fn ensure_success(response: reqwest::Response, what: &str) -> Result<reqwe
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     anyhow::bail!("{what} request failed: HTTP {status} - {text}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn username_accepts_ordinary_names() {
+        for name in ["alice", "Alice", "a", "alice.smith", "alice_smith", "alice-smith", "a1", "1a"]
+        {
+            assert!(is_valid_username(name), "{name} should be accepted");
+        }
+        assert!(is_valid_username(&"a".repeat(MAX_USERNAME_LEN)));
+    }
+
+    #[test]
+    fn username_rejects_anything_that_could_alter_a_url() {
+        for name in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "-dash",
+            "_under",
+            "a/b",
+            "../admin",
+            "a?b",
+            "a#b",
+            "a%2Fb",
+            "a b",
+            "a@b",
+            "a\\b",
+            "alice\u{e9}",
+        ] {
+            assert!(!is_valid_username(name), "{name:?} should be rejected");
+        }
+        assert!(!is_valid_username(&"a".repeat(MAX_USERNAME_LEN + 1)));
+    }
+
+    #[test]
+    fn invite_args_require_valid_username_and_email() {
+        assert!(matches!(
+            parse_invite_args("alice alice@example.com"),
+            Some(ParsedCommand::Invite { username, email })
+                if username == "alice" && email == "alice@example.com"
+        ));
+        assert!(parse_invite_args("").is_none());
+        assert!(parse_invite_args("alice").is_none());
+        assert!(parse_invite_args("alice not-an-email").is_none());
+        assert!(parse_invite_args("../admin alice@example.com").is_none());
+        assert!(parse_invite_args("a/b alice@example.com").is_none());
+    }
+
+    #[test]
+    fn api_url_joins_segments_onto_the_base() {
+        let url = api_url("https://idm.example.com", &["v1", "person"]).unwrap();
+        assert_eq!(url.as_str(), "https://idm.example.com/v1/person");
+    }
+
+    #[test]
+    fn api_url_tolerates_trailing_slash_and_base_path() {
+        let url = api_url("https://idm.example.com/", &["v1", "person"]).unwrap();
+        assert_eq!(url.as_str(), "https://idm.example.com/v1/person");
+
+        let url = api_url("https://example.com/auth/", &["oauth2", "token"]).unwrap();
+        assert_eq!(url.as_str(), "https://example.com/auth/oauth2/token");
+    }
+
+    #[test]
+    fn api_url_keeps_hostile_values_inside_one_segment() {
+        let url =
+            api_url("https://auth.example.com", &["users", "by-username", "a/b?c#d%2F"]).unwrap();
+        assert_eq!(url.as_str(), "https://auth.example.com/users/by-username/a%2Fb%3Fc%23d%252F");
+        assert_eq!(url.query(), None);
+        assert_eq!(url.fragment(), None);
+        assert_eq!(url.path_segments().unwrap().count(), 3);
+    }
+
+    #[test]
+    fn api_url_rejects_traversal_and_empty_segments() {
+        for bad in ["..", ".", ""] {
+            assert!(
+                api_url("https://auth.example.com", &["users", "by-username", bad]).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn api_url_rejects_invalid_base() {
+        assert!(api_url("not a url", &["v1"]).is_err());
+        assert!(api_url("mailto:admin@example.com", &["v1"]).is_err());
+    }
 }
