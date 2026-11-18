@@ -132,7 +132,7 @@ pub fn instantiate_middleware_from_config(
                     reset_token_ttl: *reset_token_ttl,
                     invite_token_ttl: *invite_token_ttl,
                 },
-            )),
+            )?),
             MiddlewareKind::Logger {} => Arc::new(Logger {}),
             MiddlewareKind::CalendarAgenda {
                 service_id,

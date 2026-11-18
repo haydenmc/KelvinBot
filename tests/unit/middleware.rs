@@ -257,6 +257,7 @@ fn make_kanidm(cmd_tx: Sender<Command>) -> KanidmIdentity {
             invite_token_ttl: Duration::from_secs(86400),
         },
     )
+    .expect("failed to build kanidm middleware")
 }
 
 fn dm_event(body: &str, is_local_user: bool, is_self: bool) -> Event {
