@@ -1,0 +1,25 @@
+{
+  "name": "KelvinBot",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "remoteUser": "dev",
+  // Rootless Podman on an SELinux host (Fedora): opt out of SELinux label
+  // separation, otherwise container_t is denied access to the user_home_t
+  // source tree. (devpod already adds --userns=keep-id for Podman.)
+  "runArgs": ["--security-opt", "label=disable"],
+  "mounts": [
+    // Keep container build output separate from the host's target/ (different libc).
+    "source=kelvinbot-target,target=/workspace-target,type=volume",
+    "source=kelvinbot-cargo-registry,target=/usr/local/cargo/registry,type=volume"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}
