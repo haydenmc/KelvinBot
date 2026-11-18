@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
+use linkify::{LinkFinder, LinkKind};
 use mumble_protocol_2x::control::msgs::{
     Authenticate, ChannelState, Ping, ServerSync, TextMessage, UserRemove, UserState, Version,
 };
@@ -53,79 +54,25 @@ fn escape_html(text: &str) -> String {
 /// shape, and `http(s)` URLs become links, since Mumble clients do not
 /// linkify received text themselves.
 fn plain_text_to_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url]);
 
-    while let Some((start, end)) = find_url(rest) {
-        let url = escape_html(&rest[start..end]);
-        push_escaped_text(&mut out, &rest[..start]);
-        out.push_str(&format!("<a href=\"{url}\">{url}</a>"));
-        rest = &rest[end..];
+    let mut out = String::with_capacity(text.len());
+    for span in finder.spans(text) {
+        let piece = span.as_str();
+        // linkify accepts any `scheme://`; only web links are made clickable.
+        let is_web_link = span.kind().is_some()
+            && (piece.starts_with("https://") || piece.starts_with("http://"));
+
+        if is_web_link {
+            let url = escape_html(piece);
+            out.push_str(&format!("<a href=\"{url}\">{url}</a>"));
+        } else {
+            out.push_str(&escape_html(piece).replace("\r\n", "<br/>").replace('\n', "<br/>"));
+        }
     }
-    push_escaped_text(&mut out, rest);
 
     out
-}
-
-/// Append non-URL text: escaped, with line breaks as `<br/>`.
-fn push_escaped_text(out: &mut String, text: &str) {
-    out.push_str(&escape_html(text).replace("\r\n", "<br/>").replace('\n', "<br/>"));
-}
-
-/// Locate the first `http://` or `https://` URL in `text`, returning its byte
-/// range.
-///
-/// A URL starts at a scheme that is not glued to a preceding letter or digit
-/// and runs to the next whitespace, quote or angle bracket. Trailing sentence
-/// punctuation, and closing brackets with no opener inside the URL, are left
-/// out so "see https://example.com/a." and "(https://example.com)" link the
-/// intended address.
-fn find_url(text: &str) -> Option<(usize, usize)> {
-    let mut search_from = 0;
-
-    while search_from < text.len() {
-        let candidates = ["https://", "http://"]
-            .iter()
-            .filter_map(|scheme| text[search_from..].find(scheme).map(|i| (i, scheme.len())));
-        let (offset, scheme_len) = candidates.min_by_key(|(i, _)| *i)?;
-        let start = search_from + offset;
-
-        let glued = text[..start].chars().next_back().is_some_and(char::is_alphanumeric);
-
-        let tail = &text[start..];
-        let raw_len = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
-            .unwrap_or(tail.len());
-        let url = trim_url_end(&tail[..raw_len]);
-
-        if !glued && url.len() > scheme_len {
-            return Some((start, start + url.len()));
-        }
-        search_from = start + scheme_len;
-    }
-
-    None
-}
-
-/// Drop trailing characters that are far more likely to be surrounding prose
-/// than part of the URL.
-fn trim_url_end(mut url: &str) -> &str {
-    loop {
-        let Some(last) = url.chars().next_back() else {
-            return url;
-        };
-        let unbalanced = |open: char, close: char| {
-            last == close && url.matches(close).count() > url.matches(open).count()
-        };
-        let trim = matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'')
-            || unbalanced('(', ')')
-            || unbalanced('[', ']')
-            || unbalanced('{', '}');
-        if !trim {
-            return url;
-        }
-        url = &url[..url.len() - last.len_utf8()];
-    }
 }
 
 /// Build the HTML for a relayed image: caption, inline thumbnail and a link
