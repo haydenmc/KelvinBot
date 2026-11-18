@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveTime, TimeZone};
 use ical::parser::ical::component::IcalEvent;
 use rrule::RRuleSet;
+use secrecy::{ExposeSecret, SecretString};
 use std::io::BufReader;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
@@ -30,8 +31,9 @@ const EXPANSION_SLACK_DAYS: i64 = 1;
 pub struct CalendarAgendaConfig {
     pub service_id: String,
     pub room_id: String,
-    /// ICS feed URL. Private to the bot: never rendered into a message.
-    pub calendar_url: String,
+    /// ICS feed URL. Private to the bot: never rendered into a message or a
+    /// log line.
+    pub calendar_url: SecretString,
     /// Optional human-facing calendar link rendered as a footer.
     pub calendar_link: Option<String>,
     pub calendar_link_text: String,
@@ -153,7 +155,7 @@ impl CalendarAgenda {
 
     /// Fetch, parse, and expand the feed into occurrences relevant to `today`.
     async fn load_occurrences(&self, today: NaiveDate) -> Result<Vec<Occurrence>> {
-        let body = fetch_calendar(&self.config.calendar_url).await?;
+        let body = fetch_calendar(self.config.calendar_url.expose_secret()).await?;
         let events = parse_calendar(&body)?;
         Ok(expand(&events, today, today + Duration::days(self.lookahead_days())))
     }
@@ -333,13 +335,23 @@ async fn fetch_calendar(url: &str) -> Result<String> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("failed to build calendar HTTP client")?;
-    let response = client.get(&url).send().await.context("failed to fetch calendar feed")?;
+    // `without_url` keeps the secret feed URL out of the error chain.
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("failed to fetch calendar feed")?;
     let status = response.status();
     if !status.is_success() {
         // Deliberately does not include the URL: the feed is a secret.
         return Err(anyhow!("calendar feed returned HTTP {status}"));
     }
-    response.text().await.context("failed to read calendar feed body")
+    response
+        .text()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("failed to read calendar feed body")
 }
 
 /// `webcal://host/path` is just `https://host/path` with a scheme that tells

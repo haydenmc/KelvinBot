@@ -1,5 +1,6 @@
 use assert_matches::assert_matches;
 use kelvin_bot::core::config::{Config, MiddlewareKind, ServiceKind};
+use secrecy::ExposeSecret;
 
 #[test]
 fn test_config_serde_dummy_service() {
@@ -71,7 +72,7 @@ fn test_config_serde_calendar_agenda_middleware() {
             heading_today,
             command_string: Some(command),
             ..
-        } if calendar_url == "webcal://example.com/private.ics"
+        } if calendar_url.expose_secret() == "webcal://example.com/private.ics"
             && link == "https://example.com/calendar"
             // Unset optional fields fall back to their defaults.
             && calendar_link_text == "View the full calendar"

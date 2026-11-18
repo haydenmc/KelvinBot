@@ -99,8 +99,8 @@ pub enum MiddlewareKind {
         service_id: String,
         room_id: String,
         /// `webcal://` or `https://` ICS feed URL. Private to the bot: it is
-        /// never rendered into a message.
-        calendar_url: String,
+        /// never rendered into a message or a log line.
+        calendar_url: SecretString,
         /// Optional human-facing calendar link rendered as a footer on the
         /// agenda. Distinct from `calendar_url`; omit for no footer.
         #[serde(default)]
@@ -141,7 +141,7 @@ pub enum MiddlewareKind {
         search_location: LatLng,
         #[serde_as(as = "DisplayFromStr")]
         search_radius_mi: u16,
-        gracenote_api_key: String,
+        gracenote_api_key: SecretString,
         #[serde(default, deserialize_with = "deserialize_string_list")]
         theater_id_filter: Option<Vec<String>>,
         #[serde(default)]
