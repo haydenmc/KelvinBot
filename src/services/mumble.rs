@@ -50,9 +50,82 @@ fn escape_html(text: &str) -> String {
 /// plain text that often originates from users on other services (relayed
 /// chat, display names). Escaping here keeps that text from being interpreted
 /// as markup; line breaks become `<br/>` so multi-line messages keep their
-/// shape.
+/// shape, and `http(s)` URLs become links, since Mumble clients do not
+/// linkify received text themselves.
 fn plain_text_to_html(text: &str) -> String {
-    escape_html(text).replace("\r\n", "<br/>").replace('\n', "<br/>")
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some((start, end)) = find_url(rest) {
+        let url = escape_html(&rest[start..end]);
+        push_escaped_text(&mut out, &rest[..start]);
+        out.push_str(&format!("<a href=\"{url}\">{url}</a>"));
+        rest = &rest[end..];
+    }
+    push_escaped_text(&mut out, rest);
+
+    out
+}
+
+/// Append non-URL text: escaped, with line breaks as `<br/>`.
+fn push_escaped_text(out: &mut String, text: &str) {
+    out.push_str(&escape_html(text).replace("\r\n", "<br/>").replace('\n', "<br/>"));
+}
+
+/// Locate the first `http://` or `https://` URL in `text`, returning its byte
+/// range.
+///
+/// A URL starts at a scheme that is not glued to a preceding letter or digit
+/// and runs to the next whitespace, quote or angle bracket. Trailing sentence
+/// punctuation, and closing brackets with no opener inside the URL, are left
+/// out so "see https://example.com/a." and "(https://example.com)" link the
+/// intended address.
+fn find_url(text: &str) -> Option<(usize, usize)> {
+    let mut search_from = 0;
+
+    while search_from < text.len() {
+        let candidates = ["https://", "http://"]
+            .iter()
+            .filter_map(|scheme| text[search_from..].find(scheme).map(|i| (i, scheme.len())));
+        let (offset, scheme_len) = candidates.min_by_key(|(i, _)| *i)?;
+        let start = search_from + offset;
+
+        let glued = text[..start].chars().next_back().is_some_and(char::is_alphanumeric);
+
+        let tail = &text[start..];
+        let raw_len = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+            .unwrap_or(tail.len());
+        let url = trim_url_end(&tail[..raw_len]);
+
+        if !glued && url.len() > scheme_len {
+            return Some((start, start + url.len()));
+        }
+        search_from = start + scheme_len;
+    }
+
+    None
+}
+
+/// Drop trailing characters that are far more likely to be surrounding prose
+/// than part of the URL.
+fn trim_url_end(mut url: &str) -> &str {
+    loop {
+        let Some(last) = url.chars().next_back() else {
+            return url;
+        };
+        let unbalanced = |open: char, close: char| {
+            last == close && url.matches(close).count() > url.matches(open).count()
+        };
+        let trim = matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'')
+            || unbalanced('(', ')')
+            || unbalanced('[', ']')
+            || unbalanced('{', '}');
+        if !trim {
+            return url;
+        }
+        url = &url[..url.len() - last.len_utf8()];
+    }
 }
 
 /// Build the HTML for a relayed image: caption, inline thumbnail and a link
@@ -631,13 +704,101 @@ mod tests {
     #[test]
     fn plain_text_markup_is_not_interpreted() {
         let html = plain_text_to_html("[Matrix] Mallory: <img src=\"http://evil/x.png\">");
-        assert!(!html.contains('<'), "got: {html}");
-        assert!(html.contains("&lt;img"), "got: {html}");
+        assert!(!html.contains("<img"), "got: {html}");
+        assert!(html.contains("&lt;img src=&quot;"), "got: {html}");
+        // The address inside the escaped tag is still an ordinary link.
+        assert!(html.contains("<a href=\"http://evil/x.png\">"), "got: {html}");
     }
 
     #[test]
     fn plain_text_line_breaks_become_br() {
         assert_eq!(plain_text_to_html("one\ntwo\r\nthree"), "one<br/>two<br/>three");
+    }
+
+    #[test]
+    fn urls_become_links() {
+        assert_eq!(
+            plain_text_to_html("watch at https://example.com/live now"),
+            "watch at <a href=\"https://example.com/live\">https://example.com/live</a> now"
+        );
+        assert_eq!(
+            plain_text_to_html("http://example.com"),
+            "<a href=\"http://example.com\">http://example.com</a>"
+        );
+    }
+
+    #[test]
+    fn multiple_urls_and_line_breaks_are_handled_together() {
+        assert_eq!(
+            plain_text_to_html("a https://one.example\nb https://two.example/x"),
+            "a <a href=\"https://one.example\">https://one.example</a><br/>\
+             b <a href=\"https://two.example/x\">https://two.example/x</a>"
+        );
+    }
+
+    #[test]
+    fn url_special_characters_are_escaped_in_link() {
+        assert_eq!(
+            plain_text_to_html("https://example.com/?a=1&b=2"),
+            "<a href=\"https://example.com/?a=1&amp;b=2\">https://example.com/?a=1&amp;b=2</a>"
+        );
+    }
+
+    #[test]
+    fn url_cannot_break_out_of_the_link() {
+        let html = plain_text_to_html("https://example.com/\"><script>alert(1)</script>");
+        assert!(html.starts_with("<a href=\"https://example.com/\">https://example.com/</a>"));
+        assert!(!html.contains("<script>"), "got: {html}");
+
+        let html = plain_text_to_html("https://example.com/'onmouseover='x");
+        assert!(!html.contains('\''), "got: {html}");
+    }
+
+    #[test]
+    fn trailing_punctuation_is_not_linked() {
+        let link = "<a href=\"https://example.com/a\">https://example.com/a</a>";
+        assert_eq!(plain_text_to_html("see https://example.com/a."), format!("see {link}."));
+        assert_eq!(plain_text_to_html("(https://example.com/a)"), format!("({link})"));
+        assert_eq!(plain_text_to_html("https://example.com/a, ok?"), format!("{link}, ok?"));
+        // The chat relay's image fallback wraps the URL in brackets.
+        assert_eq!(
+            plain_text_to_html("[image: https://example.com/a]"),
+            format!("[image: {link}]")
+        );
+    }
+
+    #[test]
+    fn balanced_brackets_stay_in_the_url() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(plain_text_to_html(url), format!("<a href=\"{url}\">{url}</a>"));
+    }
+
+    #[test]
+    fn matrix_to_links_are_linked_whole() {
+        let url = "https://matrix.to/#/!room:example.com/$event";
+        assert_eq!(plain_text_to_html(url), format!("<a href=\"{url}\">{url}</a>"));
+    }
+
+    #[test]
+    fn non_urls_are_not_linked() {
+        for text in [
+            "no links here",
+            "https://",
+            "http:// nothing",
+            "xhttps://example.com",
+            "ftp://example.com",
+            "javascript:alert(1)",
+        ] {
+            assert!(!plain_text_to_html(text).contains("<a "), "{text:?} should not be linked");
+        }
+    }
+
+    #[test]
+    fn non_ascii_text_around_urls_is_preserved() {
+        assert_eq!(
+            plain_text_to_html("café → https://example.com/é ✓"),
+            "café → <a href=\"https://example.com/é\">https://example.com/é</a> ✓"
+        );
     }
 
     #[test]
