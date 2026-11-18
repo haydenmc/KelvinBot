@@ -692,7 +692,9 @@ impl Service for MatrixService {
     async fn handle_command(&self, command: Command) -> Result<()> {
         match command {
             Command::SendDirectMessage { user_id, body, response_tx, .. } => {
-                info!(service=%self.id, user_id=%user_id, body=%body, "sending DM");
+                // The body is never logged: DMs carry secrets such as credential
+                // reset links.
+                info!(service=%self.id, user_id=%user_id, body_len=body.len(), "sending DM");
 
                 // Parse the user ID
                 let user_id = match UserId::parse(&user_id) {
@@ -732,7 +734,7 @@ impl Service for MatrixService {
                 }
             }
             Command::SendRoomMessage { room_id, body, markdown_body, response_tx, .. } => {
-                info!(service=%self.id, room_id=%room_id, body=%body, "sending room message");
+                info!(service=%self.id, room_id=%room_id, body_len=body.len(), "sending room message");
 
                 // Parse the room ID
                 let room_id = match RoomId::parse(&room_id) {
