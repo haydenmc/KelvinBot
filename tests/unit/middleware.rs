@@ -26,7 +26,7 @@ use kelvin_bot::middlewares::{
     },
 };
 use kelvin_bot::store::PersistentStore;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -3029,7 +3029,7 @@ fn calendar_config() -> CalendarAgendaConfig {
     CalendarAgendaConfig {
         service_id: "matrix".to_string(),
         room_id: "!room:example.com".to_string(),
-        calendar_url: "https://calendar.example.com/private/feed.ics".to_string(),
+        calendar_url: SecretString::from("https://calendar.example.com/private/feed.ics"),
         calendar_link: None,
         calendar_link_text: "View the full calendar".to_string(),
         post_at_time: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
@@ -3322,7 +3322,7 @@ fn test_calendar_link_footer_is_opt_in_and_hides_the_feed_url() {
     let with = build_agenda(&occurrences, today, &config).expect("expected agenda");
     assert!(with.contains("[See everything](https://calendar.example.com/public)"), "got: {with}");
     // The private feed URL must never leak into a posted message.
-    assert!(!with.contains(&config.calendar_url), "got: {with}");
+    assert!(!with.contains(config.calendar_url.expose_secret()), "got: {with}");
 }
 
 #[tokio::test]
@@ -3411,7 +3411,7 @@ fn test_calendar_agenda_instantiates_from_config() {
             kind: MiddlewareKind::CalendarAgenda {
                 service_id: "matrix".to_string(),
                 room_id: "!room:example.com".to_string(),
-                calendar_url: "webcal://example.com/feed.ics".to_string(),
+                calendar_url: SecretString::from("webcal://example.com/feed.ics"),
                 calendar_link: None,
                 calendar_link_text: "View the full calendar".to_string(),
                 post_at_time: "08:00".to_string(),
@@ -3449,7 +3449,7 @@ fn test_calendar_agenda_empty_command_string_disables_the_command() {
             kind: MiddlewareKind::CalendarAgenda {
                 service_id: "matrix".to_string(),
                 room_id: "!room:example.com".to_string(),
-                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_url: SecretString::from("https://example.com/feed.ics"),
                 calendar_link: None,
                 calendar_link_text: "View the full calendar".to_string(),
                 post_at_time: "08:00".to_string(),
@@ -3504,7 +3504,7 @@ fn test_calendar_agenda_rejects_bad_post_time() {
             kind: MiddlewareKind::CalendarAgenda {
                 service_id: "matrix".to_string(),
                 room_id: "!room:example.com".to_string(),
-                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_url: SecretString::from("https://example.com/feed.ics"),
                 calendar_link: None,
                 calendar_link_text: "View the full calendar".to_string(),
                 post_at_time: "8am".to_string(),
@@ -3545,7 +3545,7 @@ fn test_calendar_agenda_rejects_bad_countdown_days() {
             kind: MiddlewareKind::CalendarAgenda {
                 service_id: "matrix".to_string(),
                 room_id: "!room:example.com".to_string(),
-                calendar_url: "https://example.com/feed.ics".to_string(),
+                calendar_url: SecretString::from("https://example.com/feed.ics"),
                 calendar_link: None,
                 calendar_link_text: "View the full calendar".to_string(),
                 post_at_time: "08:00".to_string(),

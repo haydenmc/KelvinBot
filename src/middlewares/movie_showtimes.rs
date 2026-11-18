@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{
     DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::collections::HashMap;
@@ -24,6 +25,13 @@ pub struct LatLng {
     #[serde_as(as = "DisplayFromStr")]
     pub lng: f64,
 }
+
+/// Gracenote (TMS) showings endpoint.
+const TMS_SHOWINGS_URL: &str = "https://data.tmsapi.com/v1.1/movies/showings";
+
+/// Whole-request timeout for the showings fetch. Without one a stalled
+/// request would block the scheduler loop indefinitely.
+const TMS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // TMS API response structures
 #[derive(Debug, Deserialize)]
@@ -86,7 +94,7 @@ struct CachedListings {
 struct MovieFetchConfig {
     search_location: LatLng,
     search_radius_mi: u16,
-    gracenote_api_key: String,
+    gracenote_api_key: SecretString,
     theater_id_filter: Option<Vec<String>>,
 }
 
@@ -113,7 +121,7 @@ impl MovieShowtimes {
         post_at_time: NaiveTime,
         search_location: LatLng,
         search_radius_mi: u16,
-        gracenote_api_key: String,
+        gracenote_api_key: SecretString,
         theater_id_filter: Option<Vec<String>>,
         command_string: Option<String>,
     ) -> Self {
@@ -297,28 +305,39 @@ impl MovieShowtimes {
     async fn fetch_and_process_showtimes(&self) -> Result<Vec<MovieListing>> {
         tracing::info!("fetching movie showtimes from TMS API");
 
-        // Build API request (same as before)
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let url = format!(
-            "http://data.tmsapi.com/v1.1/movies/showings?api_key={}&lat={}&lng={}&radius={}&units=mi&startDate={}&numDays=7",
-            self.fetch_config.gracenote_api_key,
-            self.fetch_config.search_location.lat,
-            self.fetch_config.search_location.lng,
-            self.fetch_config.search_radius_mi,
-            today
-        );
+        let client = reqwest::Client::builder()
+            .timeout(TMS_REQUEST_TIMEOUT)
+            .build()
+            .context("failed to build TMS HTTP client")?;
 
-        // Fetch from API
-        let client = reqwest::Client::new();
-        let response =
-            client.get(&url).send().await.context("failed to send request to TMS API")?;
+        // The API key travels in the query string, so the request must use
+        // HTTPS, and `without_url` keeps the key out of any error chain.
+        let response = client
+            .get(TMS_SHOWINGS_URL)
+            .query(&[
+                ("api_key", self.fetch_config.gracenote_api_key.expose_secret()),
+                ("lat", &self.fetch_config.search_location.lat.to_string()),
+                ("lng", &self.fetch_config.search_location.lng.to_string()),
+                ("radius", &self.fetch_config.search_radius_mi.to_string()),
+                ("units", "mi"),
+                ("startDate", &today),
+                ("numDays", "7"),
+            ])
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("failed to send request to TMS API")?;
 
         if !response.status().is_success() {
             anyhow::bail!("TMS API returned error: {}", response.status());
         }
 
-        let movies: Vec<TmsMovie> =
-            response.json().await.context("failed to parse TMS API response")?;
+        let movies: Vec<TmsMovie> = response
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("failed to parse TMS API response")?;
         tracing::info!(movie_count = movies.len(), "received movies from API");
 
         // Process and filter
