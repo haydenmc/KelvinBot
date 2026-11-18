@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
+use linkify::{LinkFinder, LinkKind};
 use mumble_protocol_2x::control::msgs::{
     Authenticate, ChannelState, Ping, ServerSync, TextMessage, UserRemove, UserState, Version,
 };
@@ -25,6 +26,77 @@ use crate::core::service::{Service, ServiceId};
 const VERSION_MAJOR: u16 = 1;
 const VERSION_MINOR: u8 = 5;
 const VERSION_PATCH: u8 = 0;
+
+/// Escape the characters that are significant in HTML text and attribute
+/// values.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render a plain-text command body as the HTML a Mumble text message
+/// carries.
+///
+/// Mumble clients render message text as HTML, while `Command` bodies are
+/// plain text that often originates from users on other services (relayed
+/// chat, display names). Escaping here keeps that text from being interpreted
+/// as markup; line breaks become `<br/>` so multi-line messages keep their
+/// shape, and `http(s)` URLs become links, since Mumble clients do not
+/// linkify received text themselves.
+fn plain_text_to_html(text: &str) -> String {
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url]);
+
+    let mut out = String::with_capacity(text.len());
+    for span in finder.spans(text) {
+        let piece = span.as_str();
+        // linkify accepts any `scheme://`; only web links are made clickable.
+        let is_web_link = span.kind().is_some()
+            && (piece.starts_with("https://") || piece.starts_with("http://"));
+
+        if is_web_link {
+            let url = escape_html(piece);
+            out.push_str(&format!("<a href=\"{url}\">{url}</a>"));
+        } else {
+            out.push_str(&escape_html(piece).replace("\r\n", "<br/>").replace('\n', "<br/>"));
+        }
+    }
+
+    out
+}
+
+/// Build the HTML for a relayed image: caption, inline thumbnail and a link
+/// to the original. Every interpolated value is escaped, and the link is only
+/// emitted for `http(s)` URLs; anything else is shown as text.
+fn image_message_html(
+    caption: &str,
+    thumbnail_mimetype: &str,
+    thumbnail_base64: &str,
+    source_url: &str,
+) -> String {
+    let caption = plain_text_to_html(caption);
+    let mimetype = escape_html(thumbnail_mimetype);
+    let thumbnail = escape_html(thumbnail_base64);
+    let url = escape_html(source_url);
+
+    let link = if source_url.starts_with("https://") || source_url.starts_with("http://") {
+        format!("<a href=\"{url}\">View full image</a>")
+    } else {
+        url
+    };
+
+    format!("{caption}<br/><img src=\"data:{mimetype};base64,{thumbnail}\"/><br/>{link}")
+}
 
 struct MumbleState {
     user_sessions: HashMap<String, u32>,
@@ -448,7 +520,7 @@ impl Service for MumbleService {
                 let result = match state.user_sessions.get(&user_id) {
                     Some(session_id) => {
                         let mut msg = TextMessage::new();
-                        msg.set_message(body);
+                        msg.set_message(plain_text_to_html(&body));
                         msg.session = vec![*session_id];
 
                         match tx.send(ControlPacket::TextMessage(Box::new(msg))).await {
@@ -475,7 +547,7 @@ impl Service for MumbleService {
                 let result = match state.channel_ids.get(&room_id) {
                     Some(channel_id) => {
                         let mut msg = TextMessage::new();
-                        msg.set_message(body);
+                        msg.set_message(plain_text_to_html(&body));
                         msg.channel_id = vec![*channel_id];
 
                         match tx.send(ControlPacket::TextMessage(Box::new(msg))).await {
@@ -523,10 +595,11 @@ impl Service for MumbleService {
                         use base64::Engine as _;
                         let encoded =
                             base64::engine::general_purpose::STANDARD.encode(&thumbnail_data);
-                        let html = format!(
-                            "{caption}<br/>\
-                             <img src=\"data:{thumbnail_mimetype};base64,{encoded}\"/><br/>\
-                             <a href=\"{source_url}\">View full image</a>"
+                        let html = image_message_html(
+                            &caption,
+                            &thumbnail_mimetype,
+                            &encoded,
+                            &source_url,
                         );
 
                         let mut msg = TextMessage::new();
@@ -548,5 +621,167 @@ impl Service for MumbleService {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_html_escapes_markup_characters() {
+        assert_eq!(
+            escape_html(r#"<a href="x">Tom & 'Jerry'</a>"#),
+            "&lt;a href=&quot;x&quot;&gt;Tom &amp; &#39;Jerry&#39;&lt;/a&gt;"
+        );
+    }
+
+    #[test]
+    fn escape_html_leaves_ordinary_text_alone() {
+        assert_eq!(escape_html("hello, world! 🎉 1 + 1 = 2"), "hello, world! 🎉 1 + 1 = 2");
+        assert_eq!(escape_html(""), "");
+    }
+
+    #[test]
+    fn escape_html_does_not_double_decode_entities() {
+        // Text that already looks like an entity is shown literally.
+        assert_eq!(escape_html("&lt;b&gt;"), "&amp;lt;b&amp;gt;");
+    }
+
+    #[test]
+    fn plain_text_markup_is_not_interpreted() {
+        let html = plain_text_to_html("[Matrix] Mallory: <img src=\"http://evil/x.png\">");
+        assert!(!html.contains("<img"), "got: {html}");
+        assert!(html.contains("&lt;img src=&quot;"), "got: {html}");
+        // The address inside the escaped tag is still an ordinary link.
+        assert!(html.contains("<a href=\"http://evil/x.png\">"), "got: {html}");
+    }
+
+    #[test]
+    fn plain_text_line_breaks_become_br() {
+        assert_eq!(plain_text_to_html("one\ntwo\r\nthree"), "one<br/>two<br/>three");
+    }
+
+    #[test]
+    fn urls_become_links() {
+        assert_eq!(
+            plain_text_to_html("watch at https://example.com/live now"),
+            "watch at <a href=\"https://example.com/live\">https://example.com/live</a> now"
+        );
+        assert_eq!(
+            plain_text_to_html("http://example.com"),
+            "<a href=\"http://example.com\">http://example.com</a>"
+        );
+    }
+
+    #[test]
+    fn multiple_urls_and_line_breaks_are_handled_together() {
+        assert_eq!(
+            plain_text_to_html("a https://one.example\nb https://two.example/x"),
+            "a <a href=\"https://one.example\">https://one.example</a><br/>\
+             b <a href=\"https://two.example/x\">https://two.example/x</a>"
+        );
+    }
+
+    #[test]
+    fn url_special_characters_are_escaped_in_link() {
+        assert_eq!(
+            plain_text_to_html("https://example.com/?a=1&b=2"),
+            "<a href=\"https://example.com/?a=1&amp;b=2\">https://example.com/?a=1&amp;b=2</a>"
+        );
+    }
+
+    #[test]
+    fn url_cannot_break_out_of_the_link() {
+        let html = plain_text_to_html("https://example.com/\"><script>alert(1)</script>");
+        assert!(html.starts_with("<a href=\"https://example.com/\">https://example.com/</a>"));
+        assert!(!html.contains("<script>"), "got: {html}");
+
+        let html = plain_text_to_html("https://example.com/'onmouseover='x");
+        assert!(!html.contains('\''), "got: {html}");
+    }
+
+    #[test]
+    fn trailing_punctuation_is_not_linked() {
+        let link = "<a href=\"https://example.com/a\">https://example.com/a</a>";
+        assert_eq!(plain_text_to_html("see https://example.com/a."), format!("see {link}."));
+        assert_eq!(plain_text_to_html("(https://example.com/a)"), format!("({link})"));
+        assert_eq!(plain_text_to_html("https://example.com/a, ok?"), format!("{link}, ok?"));
+        // The chat relay's image fallback wraps the URL in brackets.
+        assert_eq!(
+            plain_text_to_html("[image: https://example.com/a]"),
+            format!("[image: {link}]")
+        );
+    }
+
+    #[test]
+    fn balanced_brackets_stay_in_the_url() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(plain_text_to_html(url), format!("<a href=\"{url}\">{url}</a>"));
+    }
+
+    #[test]
+    fn matrix_to_links_are_linked_whole() {
+        let url = "https://matrix.to/#/!room:example.com/$event";
+        assert_eq!(plain_text_to_html(url), format!("<a href=\"{url}\">{url}</a>"));
+    }
+
+    #[test]
+    fn non_urls_are_not_linked() {
+        for text in [
+            "no links here",
+            "https://",
+            "http:// nothing",
+            "xhttps://example.com",
+            "ftp://example.com",
+            "javascript:alert(1)",
+        ] {
+            assert!(!plain_text_to_html(text).contains("<a "), "{text:?} should not be linked");
+        }
+    }
+
+    #[test]
+    fn non_ascii_text_around_urls_is_preserved() {
+        assert_eq!(
+            plain_text_to_html("café → https://example.com/é ✓"),
+            "café → <a href=\"https://example.com/é\">https://example.com/é</a> ✓"
+        );
+    }
+
+    #[test]
+    fn image_message_escapes_every_field() {
+        let html = image_message_html(
+            "[Matrix] <b>Mallory</b>:",
+            "image/jpeg\"><script>",
+            "QUJD",
+            "https://matrix.to/#/!room:example.com/$event?a=1&b=\"2\"",
+        );
+
+        assert!(html.starts_with("[Matrix] &lt;b&gt;Mallory&lt;/b&gt;:<br/>"), "got: {html}");
+        assert!(!html.contains("<script>"), "got: {html}");
+        assert!(!html.contains("<b>"), "got: {html}");
+        assert!(
+            html.contains(
+                "<a href=\"https://matrix.to/#/!room:example.com/$event?a=1&amp;b=&quot;2&quot;\">"
+            ),
+            "got: {html}"
+        );
+        assert!(html.contains("<img src=\"data:image/jpeg&quot;&gt;"), "got: {html}");
+    }
+
+    #[test]
+    fn image_message_keeps_expected_shape() {
+        assert_eq!(
+            image_message_html("[Matrix] Alice:", "image/jpeg", "QUJD", "https://example.com/i"),
+            "[Matrix] Alice:<br/><img src=\"data:image/jpeg;base64,QUJD\"/><br/>\
+             <a href=\"https://example.com/i\">View full image</a>"
+        );
+    }
+
+    #[test]
+    fn image_message_only_links_http_urls() {
+        let html = image_message_html("c", "image/jpeg", "QUJD", "javascript:alert(1)");
+        assert!(!html.contains("<a "), "got: {html}");
+        assert!(html.ends_with("<br/>javascript:alert(1)"), "got: {html}");
     }
 }
