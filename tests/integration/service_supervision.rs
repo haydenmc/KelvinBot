@@ -26,6 +26,8 @@ const PROMPT: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy)]
 enum Failure {
     ReturnErr,
+    /// Cancels the token it was given, then returns an error.
+    CancelOwnTokenThenErr,
     ReturnOk,
     Panic,
 }
@@ -64,6 +66,10 @@ impl Service for FlakyService {
         if run < self.failures {
             match self.failure {
                 Failure::ReturnErr => anyhow::bail!("connection refused (test)"),
+                Failure::CancelOwnTokenThenErr => {
+                    cancel.cancel();
+                    anyhow::bail!("gave up and cancelled own token (test)")
+                }
                 Failure::ReturnOk => return Ok(()),
                 Failure::Panic => panic!("service panic (test)"),
             }
@@ -192,6 +198,11 @@ async fn service_returning_ok_is_restarted() {
 }
 
 #[tokio::test]
+async fn service_that_cancels_its_own_token_is_restarted() {
+    assert_restarted_after(Failure::CancelOwnTokenThenErr).await;
+}
+
+#[tokio::test]
 async fn service_that_panics_is_restarted() {
     assert_restarted_after(Failure::Panic).await;
 }
@@ -231,5 +242,33 @@ async fn service_waiting_to_restart_does_not_delay_other_services() {
     assert_eq!(broken.runs.load(Ordering::SeqCst), 1, "still waiting out its backoff");
 
     // Shutdown does not wait for the backoff either.
+    bus.shut_down().await;
+}
+
+#[tokio::test]
+async fn service_cancelling_its_own_token_does_not_stop_other_services() {
+    let (evt_tx, evt_rx) = create_event_channel(10);
+
+    let quitter_id = ServiceId("quitter".to_string());
+    let quitter =
+        Arc::new(FlakyService::new(&quitter_id, &evt_tx, Failure::CancelOwnTokenThenErr, 1));
+
+    let healthy_id = ServiceId("healthy".to_string());
+    let (healthy, healthy_control) = MockService::new(healthy_id.clone(), evt_tx.clone());
+
+    let mut bus = RunningBus::start(
+        vec![(quitter_id.clone(), quitter), (healthy_id.clone(), Arc::new(healthy))],
+        evt_rx,
+        reconnect_after(Duration::from_millis(5)),
+    );
+
+    // The quitter comes back up after cancelling its own token...
+    assert_eq!(bus.next_event_from().await, quitter_id);
+
+    // ...and the other service, which would have exited had the cancellation
+    // reached it, is still running.
+    healthy_control.send(1).await.expect("mock service should still be running");
+    assert_eq!(bus.next_event_from().await, healthy_id);
+
     bus.shut_down().await;
 }
