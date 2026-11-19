@@ -231,7 +231,6 @@ pub fn instantiate_middleware_from_config(
             }
             MiddlewareKind::AttendanceRelay {
                 source_service_id,
-                source_room_id,
                 dest_service_id,
                 dest_room_id,
                 session_start_message,
@@ -241,7 +240,6 @@ pub fn instantiate_middleware_from_config(
                 make_ctx()?,
                 AttendanceRelayConfig {
                     source_service_id: source_service_id.clone(),
-                    source_room_id: source_room_id.clone(),
                     dest_service_id: dest_service_id.clone(),
                     dest_room_id: dest_room_id.clone(),
                     session_start_message: session_start_message.clone(),

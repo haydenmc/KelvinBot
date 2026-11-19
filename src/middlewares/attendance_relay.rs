@@ -8,13 +8,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
-use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 
 pub struct AttendanceRelayConfig {
     pub source_service_id: String,
-    pub source_room_id: Option<String>,
     pub dest_service_id: String,
     pub dest_room_id: String,
     pub session_start_message: String,
@@ -25,13 +23,12 @@ pub struct AttendanceRelayConfig {
 pub struct AttendanceRelay {
     cmd_tx: Sender<Command>,
     source_service_id: String,
-    source_room_id: Option<String>,
     dest_service_id: String,
     dest_room_id: String,
     session_start_message: String,
     session_end_message: String,
     session_ended_edit_message: String,
-    state: Arc<Mutex<SessionState>>,
+    state: Mutex<SessionState>,
 }
 
 struct SessionState {
@@ -72,13 +69,12 @@ impl AttendanceRelay {
         Self {
             cmd_tx: ctx.cmd_tx,
             source_service_id: config.source_service_id,
-            source_room_id: config.source_room_id,
             dest_service_id: config.dest_service_id,
             dest_room_id: config.dest_room_id,
             session_start_message: config.session_start_message,
             session_end_message: config.session_end_message,
             session_ended_edit_message: config.session_ended_edit_message,
-            state: Arc::new(Mutex::new(SessionState::new())),
+            state: Mutex::new(SessionState::new()),
         }
     }
 }
@@ -88,7 +84,6 @@ impl Middleware for AttendanceRelay {
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         tracing::info!(
             source_service=%self.source_service_id,
-            source_room=?self.source_room_id,
             dest_service=%self.dest_service_id,
             dest_room=%self.dest_room_id,
             "attendance_relay middleware running..."
@@ -109,17 +104,6 @@ impl Middleware for AttendanceRelay {
             return Ok(());
         };
 
-        // Filter: if source_room_id is specified, only handle events from that room
-        // Note: For services without room concept (like Mumble), this field won't exist in the event
-        // and source_room_id should be None
-        if let Some(ref expected_room_id) = self.source_room_id {
-            // Check if this event has a room_id and if it matches
-            // For now, we'll assume UserListUpdate events don't have room filtering
-            // If needed in the future, we can extend the Event struct
-            // For services like Mumble, source_room_id will be None so this check is skipped
-            let _ = expected_room_id; // Silence unused warning for now
-        }
-
         // Extract non-self active users
         let current_active: HashSet<String> = users
             .iter()
@@ -127,8 +111,6 @@ impl Middleware for AttendanceRelay {
             .map(|u| u.display_name.clone())
             .collect();
 
-        // Clone data for async task
-        let state = self.state.clone();
         let cmd_tx = self.cmd_tx.clone();
         let destination = DestinationConfig {
             service_id: ServiceId(self.dest_service_id.clone()),
@@ -140,24 +122,11 @@ impl Middleware for AttendanceRelay {
             session_ended_edit: self.session_ended_edit_message.clone(),
         };
 
-        // Spawn async task to handle state changes
-        tokio::spawn(async move {
-            let mut state_guard = state.lock().await;
-
-            if let Err(e) = handle_user_list_change(
-                &mut state_guard,
-                current_active,
-                cmd_tx,
-                destination,
-                messages,
-            )
-            .await
-            {
-                tracing::error!(error=%e, "failed to handle user list change");
-            }
-        });
-
-        Ok(())
+        // Handled here, not in a spawned task, so that updates are applied in
+        // the order they arrived: each one is finished (including waiting for
+        // the ID of a message it posts) before the next is looked at.
+        let mut state = self.state.lock().await;
+        handle_user_list_change(&mut state, current_active, cmd_tx, destination, messages).await
     }
 }
 

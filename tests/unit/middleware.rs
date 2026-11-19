@@ -788,6 +788,29 @@ async fn test_chat_relay_instantiation_from_config() {
 
 // Attendance Relay Middleware Tests
 
+/// Delivers an event that makes the relay post a message and wait for that
+/// message's ID, and answers it with `message_id` (or with no ID at all).
+/// Returns the command the relay sent.
+async fn deliver_posting(
+    relay: &AttendanceRelay,
+    event: &Event,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>,
+    message_id: Option<&str>,
+) -> Command {
+    let answer = async {
+        let mut cmd = cmd_rx.recv().await.expect("the relay should post a message");
+        if let Command::SendRoomMessage { response_tx, .. } = &mut cmd
+            && let (Some(tx), Some(id)) = (response_tx.take(), message_id)
+        {
+            let _ = tx.send(Ok(id.to_string()));
+        }
+        cmd
+    };
+    let (result, cmd) = tokio::join!(relay.on_event(event), answer);
+    result.expect("on_event should succeed");
+    cmd
+}
+
 #[tokio::test]
 async fn test_attendance_relay_middleware_run() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
@@ -795,7 +818,6 @@ async fn test_attendance_relay_middleware_run() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Session started".to_string(),
@@ -818,7 +840,6 @@ async fn test_attendance_relay_session_start() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -850,17 +871,9 @@ async fn test_attendance_relay_session_start() {
         },
     };
 
-    let result = attendance_relay.on_event(&event).await;
-    assert_ok!(&result);
-    assert!(result.is_ok());
-
-    // Give async command sending time to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
     // Should have sent a SendRoomMessage command with initial participants
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
+    let cmd = deliver_posting(&attendance_relay, &event, &mut cmd_rx, None).await;
+    match cmd {
         Command::SendRoomMessage { service_id, room_id, body, .. } => {
             assert_eq!(service_id.0, "matrix");
             assert_eq!(room_id, "!test:example.com");
@@ -879,7 +892,6 @@ async fn test_attendance_relay_session_update_with_edit() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -902,23 +914,8 @@ async fn test_attendance_relay_session_update_with_edit() {
         },
     };
 
-    attendance_relay.on_event(&event1).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Get the initial SendRoomMessage and respond to its oneshot with a message_id
-    let cmd = cmd_rx.recv().await.unwrap();
-    match cmd {
-        Command::SendRoomMessage { response_tx, .. } => {
-            if let Some(tx) = response_tx {
-                // Simulate command handler responding with a message_id
-                let _ = tx.send(Ok("msg_123".to_string()));
-            }
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
-
-    // Give time for the async task to process the response and set live_message_id
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // The session-start message is answered with its message ID
+    deliver_posting(&attendance_relay, &event1, &mut cmd_rx, Some("msg_123")).await;
 
     // Second event: Bob joins (session update: 1 → 2 users)
     let event2 = Event {
@@ -968,7 +965,6 @@ async fn test_attendance_relay_multiple_updates() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -991,20 +987,8 @@ async fn test_attendance_relay_multiple_updates() {
         },
     };
 
-    attendance_relay.on_event(&event1).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Respond to initial SendRoomMessage with message_id
-    let cmd = cmd_rx.recv().await.unwrap();
-    match cmd {
-        Command::SendRoomMessage { response_tx, .. } => {
-            if let Some(tx) = response_tx {
-                let _ = tx.send(Ok("msg_123".to_string()));
-            }
-        }
-        _ => panic!("Expected SendRoomMessage command"),
-    }
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // The session-start message is answered with its message ID
+    deliver_posting(&attendance_relay, &event1, &mut cmd_rx, Some("msg_123")).await;
 
     // Event 2: Bob joins
     let event2 = Event {
@@ -1134,7 +1118,6 @@ async fn test_attendance_relay_session_end() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -1157,11 +1140,8 @@ async fn test_attendance_relay_session_end() {
         },
     };
 
-    attendance_relay.on_event(&event1).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Drain the initial SendRoomMessage
-    cmd_rx.try_recv().unwrap();
+    // Posts a message; no message ID comes back
+    deliver_posting(&attendance_relay, &event1, &mut cmd_rx, None).await;
 
     // Second event: Everyone leaves (session end: 1 → 0 users)
     let event2 = Event {
@@ -1235,7 +1215,6 @@ async fn test_attendance_relay_ignores_wrong_service() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -1274,7 +1253,6 @@ async fn test_attendance_relay_ignores_non_userlist_events() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -1312,7 +1290,6 @@ async fn test_attendance_relay_filters_self_user() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -1344,15 +1321,9 @@ async fn test_attendance_relay_filters_self_user() {
         },
     };
 
-    let result = attendance_relay.on_event(&event).await;
-    assert_ok!(&result);
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
     // Should have sent a message, but only with Alice (bot filtered out)
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
+    let cmd = deliver_posting(&attendance_relay, &event, &mut cmd_rx, None).await;
+    match cmd {
         Command::SendRoomMessage { body, .. } => {
             assert!(body.contains("- Alice"));
             assert!(!body.contains("KelvinBot"));
@@ -1368,7 +1339,6 @@ async fn test_attendance_relay_filters_inactive_users() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -1400,15 +1370,9 @@ async fn test_attendance_relay_filters_inactive_users() {
         },
     };
 
-    let result = attendance_relay.on_event(&event).await;
-    assert_ok!(&result);
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
     // Should have sent a message, but only with active Alice (Bob filtered out)
-    let cmd = cmd_rx.try_recv();
-    assert!(cmd.is_ok());
-    match cmd.unwrap() {
+    let cmd = deliver_posting(&attendance_relay, &event, &mut cmd_rx, None).await;
+    match cmd {
         Command::SendRoomMessage { body, .. } => {
             assert!(body.contains("- Alice"));
             assert!(!body.contains("Bob"));
@@ -1424,7 +1388,6 @@ async fn test_attendance_relay_tracks_all_participants() {
         make_ctx(cmd_tx),
         AttendanceRelayConfig {
             source_service_id: "dummy".to_string(),
-            source_room_id: None,
             dest_service_id: "matrix".to_string(),
             dest_room_id: "!test:example.com".to_string(),
             session_start_message: "Active participants:".to_string(),
@@ -1447,9 +1410,8 @@ async fn test_attendance_relay_tracks_all_participants() {
         },
     };
 
-    attendance_relay.on_event(&event1).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    cmd_rx.try_recv().unwrap(); // Drain
+    // Posts a message; no message ID comes back
+    deliver_posting(&attendance_relay, &event1, &mut cmd_rx, None).await;
 
     // Event 2: Bob joins (Alice still active)
     let event2 = Event {
@@ -1474,9 +1436,8 @@ async fn test_attendance_relay_tracks_all_participants() {
         },
     };
 
-    attendance_relay.on_event(&event2).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    cmd_rx.try_recv().unwrap(); // Drain
+    // Posts a message; no message ID comes back
+    deliver_posting(&attendance_relay, &event2, &mut cmd_rx, None).await;
 
     // Event 3: Alice leaves, only Bob active
     let event3 = Event {
@@ -1492,9 +1453,8 @@ async fn test_attendance_relay_tracks_all_participants() {
         },
     };
 
-    attendance_relay.on_event(&event3).await.unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    cmd_rx.try_recv().unwrap(); // Drain
+    // Posts a message; no message ID comes back
+    deliver_posting(&attendance_relay, &event3, &mut cmd_rx, None).await;
 
     // Event 4: Everyone leaves - session ends
     let event4 = Event {
@@ -1522,6 +1482,66 @@ async fn test_attendance_relay_tracks_all_participants() {
 }
 
 #[tokio::test]
+async fn test_attendance_relay_applies_updates_in_order() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let attendance_relay = AttendanceRelay::new(
+        make_ctx(cmd_tx),
+        AttendanceRelayConfig {
+            source_service_id: "dummy".to_string(),
+            dest_service_id: "matrix".to_string(),
+            dest_room_id: "!test:example.com".to_string(),
+            session_start_message: "Active participants:".to_string(),
+            session_end_message: "Session summary".to_string(),
+            session_ended_edit_message: "Session has ended".to_string(),
+        },
+    );
+    let user_list = |names: &[&str]| Event {
+        service_id: ServiceId("dummy".to_string()),
+        kind: EventKind::UserListUpdate {
+            users: names
+                .iter()
+                .map(|name| User {
+                    id: name.to_lowercase(),
+                    username: name.to_lowercase(),
+                    display_name: name.to_string(),
+                    is_active: true,
+                    is_self: false,
+                })
+                .collect(),
+        },
+    };
+
+    deliver_posting(&attendance_relay, &user_list(&["Alice"]), &mut cmd_rx, Some("msg_123")).await;
+
+    // Bob joins and then everyone leaves, back to back. Each update is fully
+    // handled by the time on_event returns, so nothing needs waiting for.
+    attendance_relay.on_event(&user_list(&["Alice", "Bob"])).await.unwrap();
+    attendance_relay.on_event(&user_list(&[])).await.unwrap();
+
+    match cmd_rx.try_recv().expect("the live message is updated first") {
+        Command::EditMessage { message_id, new_body, .. } => {
+            assert_eq!(message_id, "msg_123");
+            assert!(new_body.contains("- Bob"), "got: {new_body}");
+        }
+        other => panic!("Expected EditMessage command, got {other:?}"),
+    }
+    match cmd_rx.try_recv().expect("then it is marked as ended") {
+        Command::EditMessage { message_id, new_body, .. } => {
+            assert_eq!(message_id, "msg_123");
+            assert_eq!(new_body, "Session has ended");
+        }
+        other => panic!("Expected EditMessage command, got {other:?}"),
+    }
+    match cmd_rx.try_recv().expect("then the summary is posted") {
+        Command::SendRoomMessage { body, .. } => {
+            assert!(body.contains("- Alice") && body.contains("- Bob"), "got: {body}");
+        }
+        other => panic!("Expected SendRoomMessage command, got {other:?}"),
+    }
+    assert!(cmd_rx.try_recv().is_err(), "no further commands");
+}
+
+#[tokio::test]
 async fn test_attendance_relay_instantiation_from_config() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
 
@@ -1531,7 +1551,6 @@ async fn test_attendance_relay_instantiation_from_config() {
         MiddlewareCfg {
             kind: MiddlewareKind::AttendanceRelay {
                 source_service_id: "dummy".to_string(),
-                source_room_id: None,
                 dest_service_id: "matrix".to_string(),
                 dest_room_id: "!announcements:matrix.org".to_string(),
                 session_start_message: "Session in progress".to_string(),
