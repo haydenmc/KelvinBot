@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -65,6 +66,20 @@ struct Redacted<'a>(&'a str);
 impl std::fmt::Debug for Redacted<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<redacted, {} bytes>", self.0.len())
+    }
+}
+
+impl Command {
+    /// The service this command is addressed to.
+    pub fn service_id(&self) -> &ServiceId {
+        match self {
+            Command::SendDirectMessage { service_id, .. }
+            | Command::SendRoomMessage { service_id, .. }
+            | Command::SendThreadReply { service_id, .. }
+            | Command::EditMessage { service_id, .. }
+            | Command::AddReaction { service_id, .. }
+            | Command::SendRoomImage { service_id, .. } => service_id,
+        }
     }
 }
 
@@ -216,6 +231,50 @@ async fn supervise_service(
     }
 }
 
+/// How many commands may wait for one service before new ones are dropped.
+const SERVICE_COMMAND_QUEUE_CAPACITY: usize = 256;
+
+/// Delivers one service's commands to it, one at a time and in order.
+///
+/// Each service has its own queue and dispatcher task, so a slow
+/// `handle_command` only delays later commands for that same service; the bus
+/// keeps routing events and other services' commands meanwhile.
+async fn dispatch_commands(
+    service_id: ServiceId,
+    service: Arc<dyn Service>,
+    mut commands: Receiver<Command>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let command = tokio::select! {
+            _ = cancel.cancelled() => return,
+            maybe_command = commands.recv() => match maybe_command {
+                Some(command) => command,
+                None => return,
+            },
+        };
+
+        if let Err(e) = service.handle_command(command).await {
+            tracing::error!(service_id=%service_id, error=format!("{e:#}"), "failed to handle command");
+        }
+    }
+}
+
+/// Checks the exit of a task that is meant to run until shutdown.
+///
+/// Returns an error if it panicked, or ended while the bus was still running.
+fn ensure_stopped_by_shutdown(
+    task: &str,
+    joined: Result<(), tokio::task::JoinError>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    match joined {
+        Ok(()) if cancel.is_cancelled() => Ok(()),
+        Ok(()) => Err(anyhow::anyhow!("{task} stopped unexpectedly")),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("{task} panicked or was aborted"))),
+    }
+}
+
 pub struct Bus {
     // Receive events from services
     evt_rx: Receiver<Event>,
@@ -257,6 +316,21 @@ impl Bus {
             ));
         }
 
+        // Start a command dispatcher per service
+        let mut dispatch_tasks: JoinSet<()> = JoinSet::new();
+        let mut command_queues: HashMap<ServiceId, Sender<Command>> = HashMap::new();
+
+        for (service_id, service) in &self.services {
+            let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(SERVICE_COMMAND_QUEUE_CAPACITY);
+            command_queues.insert(service_id.clone(), queue_tx);
+            dispatch_tasks.spawn(dispatch_commands(
+                service_id.clone(),
+                service.clone(),
+                queue_rx,
+                cancel.child_token(),
+            ));
+        }
+
         // Start all middlewares (collect unique instances across all services)
         info!("starting middlewares...");
         let mut middleware_tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
@@ -286,12 +360,15 @@ impl Bus {
 
         loop {
             tokio::select! {
-                // Supervisors restart their own service and only return on
-                // shutdown, so anything else here means one has died.
+                // Supervisors and dispatchers only return on shutdown. If one
+                // ends any other way its service is no longer restarted or no
+                // longer receives commands, so stop the bus (and with it the
+                // process) rather than carry on half-working.
                 Some(joined) = service_tasks.join_next() => {
-                    if let Err(e) = joined {
-                        tracing::error!(error=%e, "service supervisor panicked or was aborted; its service will not be restarted");
-                    }
+                    ensure_stopped_by_shutdown("service supervisor", joined, &cancel)?;
+                }
+                Some(joined) = dispatch_tasks.join_next() => {
+                    ensure_stopped_by_shutdown("command dispatcher", joined, &cancel)?;
                 }
                 // Middleware tasks are expected to run until shutdown. Log
                 // loudly if one exits early so a silently dead middleware is
@@ -336,23 +413,22 @@ impl Bus {
                     info!("command received");
                     let Some(cmd) = maybe_cmd else { break };
 
-                    // Extract service_id from command
-                    let service_id = match &cmd {
-                        Command::SendDirectMessage { service_id, .. } => service_id.clone(),
-                        Command::SendRoomMessage { service_id, .. } => service_id.clone(),
-                        Command::SendThreadReply { service_id, .. } => service_id.clone(),
-                        Command::EditMessage { service_id, .. } => service_id.clone(),
-                        Command::AddReaction { service_id, .. } => service_id.clone(),
-                        Command::SendRoomImage { service_id, .. } => service_id.clone(),
+                    // Hand the command to its service's queue without waiting,
+                    // so a busy service can never stall the bus. Dropping the
+                    // command also drops any `response_tx`, which tells a
+                    // waiting sender that it failed.
+                    let Some(queue) = command_queues.get(cmd.service_id()) else {
+                        tracing::warn!(service_id=%cmd.service_id(), "command sent to unknown service");
+                        continue;
                     };
-
-                    // Dispatch command to appropriate service
-                    if let Some(service) = self.services.get(&service_id) {
-                        if let Err(e) = service.handle_command(cmd).await {
-                            tracing::error!(service_id=%service_id, error=%e, "failed to handle command");
+                    match queue.try_send(cmd) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(cmd)) => {
+                            tracing::error!(service_id=%cmd.service_id(), command=?cmd, "service command queue is full; dropping command");
                         }
-                    } else {
-                        tracing::warn!(service_id=%service_id, "command sent to unknown service");
+                        Err(TrySendError::Closed(cmd)) => {
+                            tracing::error!(service_id=%cmd.service_id(), command=?cmd, "service command dispatcher has stopped; dropping command");
+                        }
                     }
                 }
             }
