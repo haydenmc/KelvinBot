@@ -68,7 +68,7 @@ pub struct LycheeUpload {
 }
 
 /// Everything a spawned upload task needs, shared behind one `Arc` so
-/// `on_event` can stay synchronous and cheap.
+/// `on_event` can return without waiting for the upload.
 struct Inner {
     cmd_tx: Sender<Command>,
     service_id: String,
@@ -256,7 +256,7 @@ impl Middleware for LycheeUpload {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> Result<()> {
+    async fn on_event(&self, event: &Event) -> Result<()> {
         if event.service_id.0 != self.inner.service_id {
             return Ok(());
         }

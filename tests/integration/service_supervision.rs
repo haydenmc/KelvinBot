@@ -102,7 +102,7 @@ impl Middleware for Recorder {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> anyhow::Result<()> {
+    async fn on_event(&self, event: &Event) -> anyhow::Result<()> {
         let _ = self.seen_tx.send(event.service_id.clone());
         Ok(())
     }

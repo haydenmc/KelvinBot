@@ -52,7 +52,7 @@ impl Middleware for Probe {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> anyhow::Result<()> {
+    async fn on_event(&self, event: &Event) -> anyhow::Result<()> {
         if let EventKind::RoomMessage { body, .. } = &event.kind {
             let _ = self.seen_tx.send(body.clone());
         }

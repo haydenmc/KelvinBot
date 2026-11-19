@@ -17,7 +17,7 @@ impl Middleware for Logger {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> anyhow::Result<()> {
+    async fn on_event(&self, evt: &Event) -> anyhow::Result<()> {
         match &evt.kind {
             EventKind::UserListUpdate { users } => {
                 let usernames: Vec<String> = users

@@ -282,7 +282,7 @@ async fn deliver_events(
             },
         };
 
-        if let Err(e) = middleware.on_event(&event) {
+        if let Err(e) = middleware.on_event(&event).await {
             tracing::error!(
                 middleware=%middleware.name(),
                 service_id=%event.service_id,

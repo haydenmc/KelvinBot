@@ -41,7 +41,14 @@ pub trait Middleware: Send + Sync {
     }
 
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
-    fn on_event(&self, event: &Event) -> Result<()>;
+
+    /// Handles one event from a service this middleware is attached to.
+    ///
+    /// Called from the middleware's own task, one event at a time and in
+    /// arrival order: the next event is not delivered until this returns.
+    /// Awaiting here delays only this middleware's later events, never the
+    /// bus or other middlewares. An `Err` is logged and delivery continues.
+    async fn on_event(&self, event: &Event) -> Result<()>;
 }
 
 /// Countdown intervals used when `COUNTDOWN_DAYS` is not configured.

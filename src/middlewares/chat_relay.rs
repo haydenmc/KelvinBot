@@ -301,7 +301,7 @@ impl Middleware for ChatRelay {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> Result<()> {
+    async fn on_event(&self, event: &Event) -> Result<()> {
         // Filter: only handle events from source service
         if event.service_id.0 != self.source_service_id {
             return Ok(());

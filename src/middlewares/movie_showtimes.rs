@@ -663,7 +663,7 @@ impl Middleware for MovieShowtimes {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<()> {
+    async fn on_event(&self, evt: &Event) -> Result<()> {
         // Only handle room messages in the configured room
         let (room_id, body, is_self) = match &evt.kind {
             EventKind::RoomMessage { room_id, body, is_self, .. } => (room_id, body, is_self),

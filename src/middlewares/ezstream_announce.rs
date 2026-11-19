@@ -490,7 +490,7 @@ impl Middleware for EzStreamAnnounce {
         self.websocket_loop(cancel).await
     }
 
-    fn on_event(&self, _event: &Event) -> Result<()> {
+    async fn on_event(&self, _event: &Event) -> Result<()> {
         // This middleware doesn't react to events, only to WebSocket notifications
         Ok(())
     }

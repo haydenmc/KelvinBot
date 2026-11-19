@@ -28,7 +28,7 @@ impl Middleware for Echo {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<()> {
+    async fn on_event(&self, evt: &Event) -> Result<()> {
         // Only handle message events
         let (body, is_self) = match &evt.kind {
             EventKind::DirectMessage { body, is_self, .. } => (body, *is_self),
