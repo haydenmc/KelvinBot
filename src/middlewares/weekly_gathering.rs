@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 use crate::store::PersistentStore;
@@ -1002,10 +1002,10 @@ impl Middleware for WeeklyGathering {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<Verdict> {
+    fn on_event(&self, evt: &Event) -> Result<()> {
         // Only process reaction events from the configured service
         if evt.service_id.0 != self.config.service_id {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         match &evt.kind {
@@ -1014,12 +1014,12 @@ impl Middleware for WeeklyGathering {
             } => {
                 // Ignore reactions from self
                 if *is_self {
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
 
                 // Only process reactions in the configured room
                 if room_id != &self.config.room_id {
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
 
                 let reaction = ReactionEvent::Added {
@@ -1042,12 +1042,12 @@ impl Middleware for WeeklyGathering {
             } => {
                 // Ignore reactions from self
                 if *is_self {
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
 
                 // Only process reactions in the configured room
                 if room_id != &self.config.room_id {
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
 
                 let reaction = ReactionEvent::Removed {
@@ -1063,6 +1063,6 @@ impl Middleware for WeeklyGathering {
             _ => {}
         }
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }

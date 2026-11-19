@@ -20,7 +20,6 @@ Tests individual components in isolation, organized by module:
 #### `unit/middleware.rs`
 - Middleware trait implementation
 - Logger middleware event processing
-- Verdict system (Continue/Stop)
 
 #### `unit/config.rs`
 - TOML configuration parsing
@@ -42,9 +41,8 @@ Tests component interactions and full system behavior:
 
 #### `integration/event_flow.rs`
 - End-to-end event processing pipeline with **deterministic event counting**
-- Middleware execution order and pipeline stopping behavior validation
+- Middleware execution order validation
 - **MockService-based testing** for reliable, non-timing-dependent tests
-- Verdict::Stop functionality verification
 
 #### `integration/configuration.rs`
 - Complex configuration scenarios

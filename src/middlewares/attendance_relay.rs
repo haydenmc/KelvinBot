@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 use anyhow::Result;
@@ -98,15 +98,15 @@ impl Middleware for AttendanceRelay {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> Result<Verdict> {
+    fn on_event(&self, event: &Event) -> Result<()> {
         // Filter: only handle events from our source service
         if event.service_id.0 != self.source_service_id {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         // Filter: only handle UserListUpdate events
         let EventKind::UserListUpdate { users } = &event.kind else {
-            return Ok(Verdict::Continue);
+            return Ok(());
         };
 
         // Filter: if source_room_id is specified, only handle events from that room
@@ -157,7 +157,7 @@ impl Middleware for AttendanceRelay {
             }
         });
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 

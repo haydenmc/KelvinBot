@@ -9,7 +9,7 @@ use tracing::{debug, error, info};
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 
@@ -301,10 +301,10 @@ impl Middleware for ChatRelay {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> Result<Verdict> {
+    fn on_event(&self, event: &Event) -> Result<()> {
         // Filter: only handle events from source service
         if event.service_id.0 != self.source_service_id {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         match &event.kind {
@@ -319,11 +319,11 @@ impl Middleware for ChatRelay {
                 if let Some(ref expected_room) = self.source_room_id
                     && room_id != expected_room
                 {
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
                 if *is_self {
                     debug!("ignoring message from bot itself");
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
 
                 let formatted_body = Self::format_relayed_message(
@@ -368,11 +368,11 @@ impl Middleware for ChatRelay {
                 if let Some(ref expected_room) = self.source_room_id
                     && room_id != expected_room
                 {
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
                 if *is_self {
                     debug!("ignoring image from bot itself");
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
 
                 let http_client = self.http_client.clone();
@@ -408,7 +408,7 @@ impl Middleware for ChatRelay {
             _ => {}
         }
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 

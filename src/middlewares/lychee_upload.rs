@@ -25,7 +25,7 @@ use crate::{
     core::{
         bus::Command,
         event::{Event, EventKind},
-        middleware::{Middleware, MiddlewareContext, Verdict},
+        middleware::{Middleware, MiddlewareContext},
         service::ServiceId,
     },
     store::PersistentStore,
@@ -256,9 +256,9 @@ impl Middleware for LycheeUpload {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> Result<Verdict> {
+    fn on_event(&self, event: &Event) -> Result<()> {
         if event.service_id.0 != self.inner.service_id {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
         let EventKind::RoomImage {
             room_id,
@@ -272,20 +272,20 @@ impl Middleware for LycheeUpload {
             ..
         } = &event.kind
         else {
-            return Ok(Verdict::Continue);
+            return Ok(());
         };
 
         if !room_in_scope(room_id, &self.inner.room_ids, &self.inner.exclude_room_ids) {
             debug!(room_id=%room_id, "room not in scope for lychee upload");
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
         if *is_self {
             debug!("ignoring image from bot itself");
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
         if !is_supported_image(mimetype.as_deref()) {
             debug!(mimetype=?mimetype, "ignoring non-image attachment");
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         let job = ImageJob {
@@ -301,7 +301,7 @@ impl Middleware for LycheeUpload {
         let inner = self.inner.clone();
         tokio::spawn(async move { inner.archive_image(job).await });
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 

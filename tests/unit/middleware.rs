@@ -4,7 +4,7 @@ use kelvin_bot::core::{
     config::{Config, MiddlewareCfg, MiddlewareKind, ReconnectionConfig},
     event::{Event, EventKind, User},
     middleware::{
-        Middleware, MiddlewareContext, Verdict, build_middleware_pipeline,
+        Middleware, MiddlewareContext, build_middleware_pipeline,
         instantiate_middleware_from_config,
     },
     service::ServiceId,
@@ -43,14 +43,6 @@ fn make_ctx_with_store(cmd_tx: Sender<Command>, store: Arc<PersistentStore>) -> 
     MiddlewareContext { cmd_tx, store }
 }
 
-#[test]
-fn test_verdict_copy_trait() {
-    let verdict1 = Verdict::Continue;
-    let verdict2 = verdict1; // This should work due to Copy trait
-    assert_matches!(verdict1, Verdict::Continue);
-    assert_matches!(verdict2, Verdict::Continue);
-}
-
 #[tokio::test]
 async fn test_logger_middleware_run() {
     let logger = Logger {};
@@ -79,7 +71,7 @@ fn test_logger_middleware_on_event() {
 
     let result = logger.on_event(&event);
     assert_ok!(result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -101,7 +93,7 @@ async fn test_echo_middleware_with_custom_command() {
 
     let result = echo.on_event(&event);
     assert_ok!(result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
 
     // Give async command sending time to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -294,7 +286,7 @@ async fn test_kanidm_rejects_non_local_user() {
     let event = dm_event("!reset", false, false);
     let result = kanidm.on_event(&event);
     assert_ok!(&result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -514,7 +506,7 @@ async fn test_chat_relay_forwards_message_with_correct_format() {
 
     let result = chat_relay.on_event(&event);
     assert_ok!(&result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
 
     // Give async command sending time to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -563,7 +555,7 @@ async fn test_chat_relay_filters_bot_messages() {
 
     let result = chat_relay.on_event(&event);
     assert_ok!(&result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -860,7 +852,7 @@ async fn test_attendance_relay_session_start() {
 
     let result = attendance_relay.on_event(&event);
     assert_ok!(&result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
 
     // Give async command sending time to complete
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -3489,7 +3481,7 @@ fn test_calendar_agenda_empty_command_string_disables_the_command() {
     };
 
     // A disabled command means the event is ignored and nothing is queued.
-    assert_matches!(calendar.on_event(&event), Ok(Verdict::Continue));
+    assert_matches!(calendar.on_event(&event), Ok(()));
 }
 
 #[test]
@@ -3671,7 +3663,7 @@ async fn test_lychee_upload_ignores_wrong_service() {
     let event = lychee_image_event("mumble", "!room:example.com", false, None, None);
     let result = lychee.on_event(&event);
     assert_ok!(&result);
-    assert_matches!(result.unwrap(), Verdict::Continue);
+    assert!(result.is_ok());
     assert_no_command(&mut cmd_rx).await;
 }
 

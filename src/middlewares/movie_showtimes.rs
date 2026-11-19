@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 use anyhow::{Context, Result};
@@ -663,21 +663,21 @@ impl Middleware for MovieShowtimes {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<Verdict> {
+    fn on_event(&self, evt: &Event) -> Result<()> {
         // Only handle room messages in the configured room
         let (room_id, body, is_self) = match &evt.kind {
             EventKind::RoomMessage { room_id, body, is_self, .. } => (room_id, body, is_self),
-            _ => return Ok(Verdict::Continue),
+            _ => return Ok(()),
         };
 
         // Only respond in the configured room
         if room_id != &self.room_id {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         // Ignore messages from self
         if *is_self {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         // Check for movie command
@@ -692,7 +692,7 @@ impl Middleware for MovieShowtimes {
             }
         }
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 

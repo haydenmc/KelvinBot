@@ -7,7 +7,7 @@ use kelvin_bot::core::{
     bus::{Bus, Command, create_command_channel, create_event_channel},
     config::ReconnectionConfig,
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::Middleware,
     service::{Service, ServiceId},
 };
 use std::collections::HashMap;
@@ -102,9 +102,9 @@ impl Middleware for Recorder {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> anyhow::Result<Verdict> {
+    fn on_event(&self, event: &Event) -> anyhow::Result<()> {
         let _ = self.seen_tx.send(event.service_id.clone());
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 

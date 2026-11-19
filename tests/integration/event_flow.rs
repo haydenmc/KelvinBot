@@ -4,7 +4,7 @@ use kelvin_bot::core::{
     bus::{Bus, create_command_channel, create_event_channel},
     config::ReconnectionConfig,
     event::Event,
-    middleware::{Middleware, Verdict},
+    middleware::Middleware,
     service::ServiceId,
 };
 use std::collections::HashMap;
@@ -28,10 +28,10 @@ async fn test_end_to_end_event_processing_pipeline() {
             Ok(())
         }
 
-        fn on_event(&self, _event: &Event) -> anyhow::Result<Verdict> {
+        fn on_event(&self, _event: &Event) -> anyhow::Result<()> {
             let mut count = self.count.lock().unwrap();
             *count += 1;
-            Ok(Verdict::Continue)
+            Ok(())
         }
     }
 
@@ -90,13 +90,12 @@ async fn test_end_to_end_event_processing_pipeline() {
 }
 
 #[tokio::test]
-async fn test_middleware_pipeline_order_and_stopping() {
-    // Create middlewares that track processing order and can stop the pipeline
+async fn test_middleware_pipeline_order() {
+    // Create middlewares that track processing order
     #[derive(Debug)]
     struct OrderTrackingMiddleware {
         id: &'static str,
         order: Arc<Mutex<Vec<&'static str>>>,
-        should_stop: bool,
     }
 
     #[async_trait]
@@ -106,33 +105,18 @@ async fn test_middleware_pipeline_order_and_stopping() {
             Ok(())
         }
 
-        fn on_event(&self, _event: &Event) -> anyhow::Result<Verdict> {
-            let mut order = self.order.lock().unwrap();
-            order.push(self.id);
-
-            if self.should_stop { Ok(Verdict::Stop) } else { Ok(Verdict::Continue) }
+        fn on_event(&self, _event: &Event) -> anyhow::Result<()> {
+            self.order.lock().unwrap().push(self.id);
+            Ok(())
         }
     }
 
     let order_tracker = Arc::new(Mutex::new(Vec::new()));
 
-    let middleware1 = Arc::new(OrderTrackingMiddleware {
-        id: "first",
-        order: order_tracker.clone(),
-        should_stop: false,
-    });
-
-    let middleware2 = Arc::new(OrderTrackingMiddleware {
-        id: "second",
-        order: order_tracker.clone(),
-        should_stop: true, // This should stop the pipeline
-    });
-
-    let middleware3 = Arc::new(OrderTrackingMiddleware {
-        id: "third",
-        order: order_tracker.clone(),
-        should_stop: false,
-    });
+    let middleware = |id| Arc::new(OrderTrackingMiddleware { id, order: order_tracker.clone() });
+    let middleware1 = middleware("first");
+    let middleware2 = middleware("second");
+    let middleware3 = middleware("third");
 
     let (_cmd_tx, cmd_rx) = create_command_channel(10);
     let (evt_tx, evt_rx) = create_event_channel(10);
@@ -148,7 +132,7 @@ async fn test_middleware_pipeline_order_and_stopping() {
         Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>,
     );
 
-    // Create middleware pipeline for our service: first -> second (stops) -> third (should not execute)
+    // Create middleware pipeline for our service: first -> second -> third
     let mut service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>> = HashMap::new();
     service_middlewares.insert(
         service_id,
@@ -181,39 +165,8 @@ async fn test_middleware_pipeline_order_and_stopping() {
     cancel_token.cancel();
     assert_ok!(bus_handle.await.unwrap());
 
-    // Verify middleware execution order and stopping behavior
+    // Each of the 3 events visits every middleware, in pipeline order.
     let final_order = order_tracker.lock().unwrap();
-
-    // We sent exactly 3 events, so we should have exactly 6 middleware executions
-    // (first, second) for each of the 3 events = 6 total
-    assert_eq!(
-        final_order.len(),
-        6,
-        "Expected exactly 6 middleware executions (3 events × 2 middlewares), got {}",
-        final_order.len()
-    );
-
-    // Check that we see the expected pattern: first, second, first, second, first, second
-    // (third should never appear because second stops the pipeline)
-    for (i, &middleware_name) in final_order.iter().enumerate() {
-        if i % 2 == 0 {
-            assert_eq!(
-                middleware_name, "first",
-                "Expected 'first' middleware at position {}, got '{}'",
-                i, middleware_name
-            );
-        } else {
-            assert_eq!(
-                middleware_name, "second",
-                "Expected 'second' middleware at position {}, got '{}'",
-                i, middleware_name
-            );
-        }
-    }
-
-    // Verify that third middleware never executed (pipeline was stopped)
-    assert!(
-        !final_order.contains(&"third"),
-        "Third middleware should not execute because second middleware stops the pipeline"
-    );
+    let expected: Vec<&str> = ["first", "second", "third"].repeat(3);
+    assert_eq!(*final_order, expected);
 }

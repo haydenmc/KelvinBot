@@ -543,9 +543,7 @@ KELVIN__SERVICES__test_dummy__MIDDLEWARE=logger
 
 **Processing order:**
 1. Events flow through middlewares in the order specified
-2. Each middleware returns a `Verdict`:
-   - `Continue`: Pass event to next middleware
-   - `Stop`: Halt processing for this event
+2. Every middleware in the list sees every event
 3. Middleware instances can be reused across multiple services
 
 ### Future Middleware Ideas
@@ -701,9 +699,7 @@ The project uses GitHub Actions for automated testing:
 
 1. **Services** generate `Event` objects from external sources
 2. **Event Bus** receives events and routes them to middlewares
-3. **Middlewares** process events in order, each returning a `Verdict`:
-   - `Continue`: Pass event to next middleware
-   - `Stop`: Halt processing for this event
+3. **Middlewares** process events in order; every middleware attached to the service sees every event
 
 ## Development
 
@@ -760,7 +756,7 @@ The project uses GitHub Actions for automated testing:
 
 ```rust
 // src/middlewares/greeter.rs
-use crate::core::{event::Event, middleware::{Middleware, Verdict}};
+use crate::core::{event::Event, middleware::Middleware};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -781,9 +777,9 @@ impl Middleware for Greeter {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> anyhow::Result<Verdict> {
+    fn on_event(&self, event: &Event) -> anyhow::Result<()> {
         // Process event and potentially send greeting
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 ```

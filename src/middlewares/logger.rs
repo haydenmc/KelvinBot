@@ -1,6 +1,6 @@
 use crate::core::{
     event::{Event, EventKind},
-    middleware::{Middleware, Verdict},
+    middleware::Middleware,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ impl Middleware for Logger {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> anyhow::Result<Verdict> {
+    fn on_event(&self, evt: &Event) -> anyhow::Result<()> {
         match &evt.kind {
             EventKind::UserListUpdate { users } => {
                 let usernames: Vec<String> = users
@@ -41,6 +41,6 @@ impl Middleware for Logger {
                 tracing::info!(event=%evt, "inbound event");
             }
         }
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }

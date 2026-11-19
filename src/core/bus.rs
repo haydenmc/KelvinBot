@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::core::config::{ExponentialBackoff, ReconnectionConfig};
 use crate::core::event::Event;
-use crate::core::middleware::{Middleware, Verdict};
+use crate::core::middleware::Middleware;
 use crate::core::service::{Service, ServiceId};
 
 pub enum Command {
@@ -400,10 +400,7 @@ impl Bus {
                     // Get the middleware pipeline for this service
                     if let Some(pipeline) = self.service_middlewares.get(&evt.service_id) {
                         for mw in pipeline {
-                            match mw.on_event(&evt)? {
-                                Verdict::Continue => {},
-                                Verdict::Stop => { break; }
-                            }
+                            mw.on_event(&evt)?;
                         }
                     } else {
                         tracing::debug!(service_id=%evt.service_id, "no middleware pipeline configured for service");
