@@ -302,7 +302,7 @@ impl Middleware for CalendarAgenda {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<()> {
+    async fn on_event(&self, evt: &Event) -> Result<()> {
         if self.matches_command(evt) {
             // Use try_send so a full queue can't block the event pipeline.
             if let Err(e) = self.query_tx.try_send(()) {

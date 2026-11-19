@@ -777,7 +777,7 @@ impl Middleware for Greeter {
         Ok(())
     }
 
-    fn on_event(&self, event: &Event) -> anyhow::Result<()> {
+    async fn on_event(&self, event: &Event) -> anyhow::Result<()> {
         // Process event and potentially send greeting
         Ok(())
     }

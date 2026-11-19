@@ -1002,7 +1002,7 @@ impl Middleware for WeeklyGathering {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<()> {
+    async fn on_event(&self, evt: &Event) -> Result<()> {
         // Only process reaction events from the configured service
         if evt.service_id.0 != self.config.service_id {
             return Ok(());

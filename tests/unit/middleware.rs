@@ -54,8 +54,8 @@ async fn test_logger_middleware_run() {
     assert_ok!(result);
 }
 
-#[test]
-fn test_logger_middleware_on_event() {
+#[tokio::test]
+async fn test_logger_middleware_on_event() {
     let logger = Logger {};
     let event = Event {
         service_id: ServiceId("test".to_string()),
@@ -69,7 +69,7 @@ fn test_logger_middleware_on_event() {
         },
     };
 
-    let result = logger.on_event(&event);
+    let result = logger.on_event(&event).await;
     assert_ok!(result);
     assert!(result.is_ok());
 }
@@ -91,7 +91,7 @@ async fn test_echo_middleware_with_custom_command() {
         },
     };
 
-    let result = echo.on_event(&event);
+    let result = echo.on_event(&event).await;
     assert_ok!(result);
     assert!(result.is_ok());
 
@@ -127,7 +127,7 @@ async fn test_echo_middleware_ignores_wrong_command() {
         },
     };
 
-    let result = echo.on_event(&event);
+    let result = echo.on_event(&event).await;
     assert_ok!(result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -153,7 +153,7 @@ async fn test_echo_middleware_ignores_self_messages() {
         },
     };
 
-    let result = echo.on_event(&event);
+    let result = echo.on_event(&event).await;
     assert_ok!(result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -284,7 +284,7 @@ async fn test_kanidm_rejects_non_local_user() {
     let kanidm = make_kanidm(cmd_tx);
 
     let event = dm_event("!reset", false, false);
-    let result = kanidm.on_event(&event);
+    let result = kanidm.on_event(&event).await;
     assert_ok!(&result);
     assert!(result.is_ok());
 
@@ -307,7 +307,7 @@ async fn test_kanidm_invite_missing_username_replies_usage() {
 
     // Bare "!invite" with no username should return a usage hint (no network).
     let event = dm_event("!invite", true, false);
-    assert_ok!(&kanidm.on_event(&event));
+    assert_ok!(&kanidm.on_event(&event).await);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -328,7 +328,7 @@ async fn test_kanidm_invite_missing_email_replies_usage() {
 
     // Username but no email should return the usage hint (no network).
     let event = dm_event("!invite alice", true, false);
-    assert_ok!(&kanidm.on_event(&event));
+    assert_ok!(&kanidm.on_event(&event).await);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -348,7 +348,7 @@ async fn test_kanidm_invite_invalid_email_replies_usage() {
 
     // A malformed email should be rejected before any network call.
     let event = dm_event("!invite alice not-an-email", true, false);
-    assert_ok!(&kanidm.on_event(&event));
+    assert_ok!(&kanidm.on_event(&event).await);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -367,7 +367,7 @@ async fn test_kanidm_ignores_wrong_command() {
     let kanidm = make_kanidm(cmd_tx);
 
     let event = dm_event("!different", true, false);
-    assert_ok!(&kanidm.on_event(&event));
+    assert_ok!(&kanidm.on_event(&event).await);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     assert!(cmd_rx.try_recv().is_err());
@@ -380,7 +380,7 @@ async fn test_kanidm_ignores_self_messages() {
 
     // A message from the bot itself must never trigger a command.
     let event = dm_event("!reset", true, true);
-    assert_ok!(&kanidm.on_event(&event));
+    assert_ok!(&kanidm.on_event(&event).await);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     assert!(cmd_rx.try_recv().is_err());
@@ -403,7 +403,7 @@ async fn test_kanidm_ignores_room_messages() {
         },
     };
 
-    assert_ok!(&kanidm.on_event(&event));
+    assert_ok!(&kanidm.on_event(&event).await);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -504,7 +504,7 @@ async fn test_chat_relay_forwards_message_with_correct_format() {
         },
     };
 
-    let result = chat_relay.on_event(&event);
+    let result = chat_relay.on_event(&event).await;
     assert_ok!(&result);
     assert!(result.is_ok());
 
@@ -553,7 +553,7 @@ async fn test_chat_relay_filters_bot_messages() {
         },
     };
 
-    let result = chat_relay.on_event(&event);
+    let result = chat_relay.on_event(&event).await;
     assert_ok!(&result);
     assert!(result.is_ok());
 
@@ -592,7 +592,7 @@ async fn test_chat_relay_ignores_wrong_service() {
         },
     };
 
-    let result = chat_relay.on_event(&event);
+    let result = chat_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -631,7 +631,7 @@ async fn test_chat_relay_filters_by_source_room() {
         },
     };
 
-    let result = chat_relay.on_event(&event_correct_room);
+    let result = chat_relay.on_event(&event_correct_room).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -658,7 +658,7 @@ async fn test_chat_relay_filters_by_source_room() {
         },
     };
 
-    let result = chat_relay.on_event(&event_wrong_room);
+    let result = chat_relay.on_event(&event_wrong_room).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -696,7 +696,7 @@ async fn test_chat_relay_ignores_direct_messages() {
         },
     };
 
-    let result = chat_relay.on_event(&event);
+    let result = chat_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -734,7 +734,7 @@ async fn test_chat_relay_handles_missing_display_name() {
         },
     };
 
-    let result = chat_relay.on_event(&event);
+    let result = chat_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -850,7 +850,7 @@ async fn test_attendance_relay_session_start() {
         },
     };
 
-    let result = attendance_relay.on_event(&event);
+    let result = attendance_relay.on_event(&event).await;
     assert_ok!(&result);
     assert!(result.is_ok());
 
@@ -902,7 +902,7 @@ async fn test_attendance_relay_session_update_with_edit() {
         },
     };
 
-    attendance_relay.on_event(&event1).unwrap();
+    attendance_relay.on_event(&event1).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Get the initial SendRoomMessage and respond to its oneshot with a message_id
@@ -943,7 +943,7 @@ async fn test_attendance_relay_session_update_with_edit() {
         },
     };
 
-    attendance_relay.on_event(&event2).unwrap();
+    attendance_relay.on_event(&event2).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Now we should get an EditMessage command (not SendRoomMessage)
@@ -990,7 +990,7 @@ async fn test_attendance_relay_multiple_updates() {
         },
     };
 
-    attendance_relay.on_event(&event1).unwrap();
+    attendance_relay.on_event(&event1).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Respond to initial SendRoomMessage with message_id
@@ -1028,7 +1028,7 @@ async fn test_attendance_relay_multiple_updates() {
         },
     };
 
-    attendance_relay.on_event(&event2).unwrap();
+    attendance_relay.on_event(&event2).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Should get EditMessage with Alice and Bob
@@ -1072,7 +1072,7 @@ async fn test_attendance_relay_multiple_updates() {
         },
     };
 
-    attendance_relay.on_event(&event3).unwrap();
+    attendance_relay.on_event(&event3).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Should get EditMessage with Alice, Bob, and Charlie
@@ -1110,7 +1110,7 @@ async fn test_attendance_relay_multiple_updates() {
         },
     };
 
-    attendance_relay.on_event(&event4).unwrap();
+    attendance_relay.on_event(&event4).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Should get EditMessage with only Bob and Charlie
@@ -1156,7 +1156,7 @@ async fn test_attendance_relay_session_end() {
         },
     };
 
-    attendance_relay.on_event(&event1).unwrap();
+    attendance_relay.on_event(&event1).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Drain the initial SendRoomMessage
@@ -1168,7 +1168,7 @@ async fn test_attendance_relay_session_end() {
         kind: EventKind::UserListUpdate { users: vec![] },
     };
 
-    attendance_relay.on_event(&event2).unwrap();
+    attendance_relay.on_event(&event2).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Without a real command handler, the middleware might not have
@@ -1257,7 +1257,7 @@ async fn test_attendance_relay_ignores_wrong_service() {
         },
     };
 
-    let result = attendance_relay.on_event(&event);
+    let result = attendance_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1295,7 +1295,7 @@ async fn test_attendance_relay_ignores_non_userlist_events() {
         },
     };
 
-    let result = attendance_relay.on_event(&event);
+    let result = attendance_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1343,7 +1343,7 @@ async fn test_attendance_relay_filters_self_user() {
         },
     };
 
-    let result = attendance_relay.on_event(&event);
+    let result = attendance_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -1399,7 +1399,7 @@ async fn test_attendance_relay_filters_inactive_users() {
         },
     };
 
-    let result = attendance_relay.on_event(&event);
+    let result = attendance_relay.on_event(&event).await;
     assert_ok!(&result);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -1446,7 +1446,7 @@ async fn test_attendance_relay_tracks_all_participants() {
         },
     };
 
-    attendance_relay.on_event(&event1).unwrap();
+    attendance_relay.on_event(&event1).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     cmd_rx.try_recv().unwrap(); // Drain
 
@@ -1473,7 +1473,7 @@ async fn test_attendance_relay_tracks_all_participants() {
         },
     };
 
-    attendance_relay.on_event(&event2).unwrap();
+    attendance_relay.on_event(&event2).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     cmd_rx.try_recv().unwrap(); // Drain
 
@@ -1491,7 +1491,7 @@ async fn test_attendance_relay_tracks_all_participants() {
         },
     };
 
-    attendance_relay.on_event(&event3).unwrap();
+    attendance_relay.on_event(&event3).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     cmd_rx.try_recv().unwrap(); // Drain
 
@@ -1501,7 +1501,7 @@ async fn test_attendance_relay_tracks_all_participants() {
         kind: EventKind::UserListUpdate { users: vec![] },
     };
 
-    attendance_relay.on_event(&event4).unwrap();
+    attendance_relay.on_event(&event4).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Drain all pending commands and find the summary
@@ -3429,8 +3429,8 @@ fn test_calendar_agenda_instantiates_from_config() {
     assert_eq!(middlewares.len(), 1);
 }
 
-#[test]
-fn test_calendar_agenda_empty_command_string_disables_the_command() {
+#[tokio::test]
+async fn test_calendar_agenda_empty_command_string_disables_the_command() {
     let (cmd_tx, _cmd_rx) = create_command_channel(10);
     let data_dir = TempDir::new().unwrap();
 
@@ -3481,7 +3481,7 @@ fn test_calendar_agenda_empty_command_string_disables_the_command() {
     };
 
     // A disabled command means the event is ignored and nothing is queued.
-    assert_matches!(calendar.on_event(&event), Ok(()));
+    assert_matches!(calendar.on_event(&event).await, Ok(()));
 }
 
 #[test]
@@ -3661,7 +3661,7 @@ async fn test_lychee_upload_ignores_wrong_service() {
     let lychee = make_lychee(cmd_tx, &[]);
 
     let event = lychee_image_event("mumble", "!room:example.com", false, None, None);
-    let result = lychee.on_event(&event);
+    let result = lychee.on_event(&event).await;
     assert_ok!(&result);
     assert!(result.is_ok());
     assert_no_command(&mut cmd_rx).await;
@@ -3673,7 +3673,7 @@ async fn test_lychee_upload_ignores_room_not_in_list() {
     let lychee = make_lychee(cmd_tx, &["!photos:example.com"]);
 
     let event = lychee_image_event("matrix", "!other:example.com", false, None, None);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3685,7 +3685,7 @@ async fn test_lychee_upload_all_rooms_when_list_empty() {
     // Missing image bytes trigger the failure notice, which proves the event
     // passed the room filter.
     let event = lychee_image_event("matrix", "!any:example.com", false, None, None);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     let (room_id, body, _) = recv_room_message(&mut cmd_rx).await;
     assert_eq!(room_id, "!any:example.com");
     assert_eq!(body, LYCHEE_FAILURE_MESSAGE);
@@ -3699,7 +3699,7 @@ async fn test_lychee_upload_respects_exclude_list() {
             .unwrap();
 
     let event = lychee_image_event("matrix", "!private:example.com", false, None, None);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3723,7 +3723,7 @@ async fn test_lychee_upload_ignores_self_images() {
     let lychee = make_lychee(cmd_tx, &[]);
 
     let event = lychee_image_event("matrix", "!room:example.com", true, None, None);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3743,7 +3743,7 @@ async fn test_lychee_upload_ignores_non_image_events() {
             is_self: false,
         },
     };
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3753,7 +3753,7 @@ async fn test_lychee_upload_ignores_video_mimetype() {
     let lychee = make_lychee(cmd_tx, &[]);
 
     let event = lychee_image_event("matrix", "!room:example.com", false, Some("video/mp4"), None);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3774,7 +3774,7 @@ async fn test_lychee_upload_sends_failure_message_when_image_data_missing() {
 
     let event =
         lychee_image_event("matrix", "!photos:example.com", false, Some("image/jpeg"), None);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
 
     let (room_id, body, markdown_body) = recv_room_message(&mut cmd_rx).await;
     assert_eq!(room_id, "!photos:example.com");
@@ -3797,7 +3797,7 @@ async fn test_lychee_upload_skips_oversize_photo() {
         EventKind::RoomImage { source_url, .. } => source_url.clone(),
         _ => unreachable!(),
     };
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
 
     let (_, body, _) = recv_room_message(&mut cmd_rx).await;
     assert_eq!(body, "too big (limit 0 MB)");
@@ -3806,7 +3806,7 @@ async fn test_lychee_upload_skips_oversize_photo() {
     // Oversize photos are recorded so a replay never re-notifies.
     let ledger: Vec<String> = store.get(LEDGER_KEY).await.unwrap_or_default();
     assert_eq!(ledger, vec![source_url]);
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3820,7 +3820,7 @@ async fn test_lychee_upload_allows_photo_at_limit() {
     let bytes: Arc<[u8]> = Arc::from(vec![0u8; 10]);
     let event =
         lychee_image_event("matrix", "!room:example.com", false, Some("image/png"), Some(bytes));
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
 
     let (_, body, _) = recv_room_message(&mut cmd_rx).await;
     assert_eq!(body, LYCHEE_FAILURE_MESSAGE);
@@ -3851,7 +3851,7 @@ async fn test_lychee_upload_skips_already_uploaded_source_url() {
             .unwrap();
 
     // Dedup runs before the missing-bytes path, so no failure notice either.
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
     assert_no_command(&mut cmd_rx).await;
 }
 
@@ -3863,7 +3863,7 @@ async fn test_lychee_upload_sends_failure_message_when_server_unreachable() {
     let bytes: Arc<[u8]> = Arc::from(b"not really a jpeg".to_vec());
     let event =
         lychee_image_event("matrix", "!room:example.com", false, Some("image/jpeg"), Some(bytes));
-    assert_ok!(lychee.on_event(&event));
+    assert_ok!(lychee.on_event(&event).await);
 
     let (room_id, body, _) = recv_room_message(&mut cmd_rx).await;
     assert_eq!(room_id, "!room:example.com");

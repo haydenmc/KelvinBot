@@ -28,7 +28,7 @@ async fn test_end_to_end_event_processing_pipeline() {
             Ok(())
         }
 
-        fn on_event(&self, _event: &Event) -> anyhow::Result<()> {
+        async fn on_event(&self, _event: &Event) -> anyhow::Result<()> {
             let mut count = self.count.lock().unwrap();
             *count += 1;
             Ok(())
@@ -105,7 +105,7 @@ async fn test_each_middleware_sees_events_in_order() {
             Ok(())
         }
 
-        fn on_event(&self, event: &Event) -> anyhow::Result<()> {
+        async fn on_event(&self, event: &Event) -> anyhow::Result<()> {
             if let EventKind::RoomMessage { body, .. } = &event.kind {
                 self.order.lock().unwrap().push((self.id, body.clone()));
             }

@@ -82,8 +82,8 @@ impl KanidmIdentity {
         })
     }
 
-    /// Spawn a DM reply. Used for all user-facing responses so `on_event` can
-    /// stay synchronous.
+    /// Spawn a DM reply. Used for all user-facing responses so `on_event`
+    /// returns without waiting for the send.
     fn reply(&self, service_id: ServiceId, user_id: String, body: String) {
         let cmd_tx = self.cmd_tx.clone();
         tokio::spawn(async move {
@@ -111,7 +111,7 @@ impl Middleware for KanidmIdentity {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<()> {
+    async fn on_event(&self, evt: &Event) -> Result<()> {
         let EventKind::DirectMessage { body, user_id, is_local_user, is_self, .. } = &evt.kind
         else {
             return Ok(());
