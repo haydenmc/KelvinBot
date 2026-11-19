@@ -9,6 +9,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::Sender};
@@ -27,6 +28,12 @@ const TIME_REACTIONS: [&str; 10] = [
     "9\u{fe0f}\u{20e3}",
     "\u{1f51f}",
 ];
+
+/// Store key under which the poll in progress is saved.
+const POLL_STATE_KEY: &str = "poll_state";
+
+/// How long to wait before trying again after the announcement fails to post.
+const ANNOUNCE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct Household {
@@ -141,7 +148,7 @@ pub struct WeeklyGatheringConfig {
 
 /// State of the finalization message, retained so the host's time pick can be
 /// applied and the message re-rendered in place.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FinalizedState {
     /// Date of the gathering this finalization is for.
     event_date: NaiveDate,
@@ -157,13 +164,17 @@ struct FinalizedState {
     host_display: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum GatheringPhase {
     Idle,
     Announced { event_date: NaiveDate, message_id: String },
     Finalized(FinalizedState),
 }
 
+/// The poll in progress. Saved to the store whenever it changes, so a restart
+/// part-way through a poll picks it up again instead of announcing a second
+/// time and losing the votes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct GatheringState {
     phase: GatheringPhase,
     virtual_votes: HashSet<String>,
@@ -423,6 +434,52 @@ impl WeeklyGathering {
         Some((user_id, chosen_unit.display_name.clone()))
     }
 
+    /// Saves the poll in progress. A failure is logged and otherwise ignored:
+    /// the poll carries on in memory and only a restart would lose it.
+    async fn save_state(&self) {
+        let state = self.state.lock().await;
+        if let Err(e) = self.store.set(POLL_STATE_KEY, &*state).await {
+            tracing::error!(error=%format!("{e:#}"), "failed to save poll state");
+        }
+    }
+
+    /// Picks up the poll that was in progress when the bot last stopped, if
+    /// it is still worth continuing.
+    async fn restore_state(&self) {
+        let Some(mut saved) = self.store.get::<GatheringState>(POLL_STATE_KEY).await else {
+            return;
+        };
+        if !self.still_current(&saved.phase, Local::now()) {
+            tracing::info!(phase=?saved.phase, "saved poll is out of date; starting afresh");
+            return;
+        }
+
+        // The configured time options may have changed since it was saved.
+        saved.time_votes.resize(self.config.event_time_options.len(), HashSet::new());
+
+        tracing::info!(phase=?saved.phase, "resuming saved poll");
+        *self.state.lock().await = saved;
+    }
+
+    /// Whether a saved phase still has its next step ahead of it (or only
+    /// just missed), as opposed to belonging to a gathering long past.
+    fn still_current(&self, phase: &GatheringPhase, now: DateTime<Local>) -> bool {
+        match phase {
+            GatheringPhase::Idle => true,
+            // An open poll is closed late if its day has not ended yet.
+            GatheringPhase::Announced { event_date, .. } => *event_date >= now.date_naive(),
+            // A finished poll matters until the following one opens.
+            GatheringPhase::Finalized(finalized) => {
+                let upcoming = next_event_date_from(
+                    now,
+                    self.config.event_day_of_week,
+                    self.config.finalize_time,
+                );
+                finalized.event_date + Duration::days(7) >= upcoming
+            }
+        }
+    }
+
     /// Post the announcement message and capture the message ID
     async fn post_announcement(&self, event_date: NaiveDate) -> Result<Option<String>> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -618,6 +675,7 @@ impl WeeklyGathering {
             let mut state = self.state.lock().await;
             state.phase = GatheringPhase::Finalized(finalized);
         }
+        self.save_state().await;
 
         // Persist the newly selected host so future weeks prefer someone else.
         // If the host is part of a household, update all members at the same timestamp.
@@ -677,10 +735,11 @@ impl WeeklyGathering {
 
     /// Process a reaction event
     async fn process_reaction(&self, reaction: ReactionEvent) {
-        let edit = {
+        let (edit, changed) = {
             let mut state = self.state.lock().await;
+            let before = state.clone();
 
-            match state.phase.clone() {
+            let edit = match state.phase.clone() {
                 GatheringPhase::Announced { message_id, .. } => {
                     self.process_vote_reaction(&mut state, &message_id, reaction);
                     None
@@ -689,8 +748,13 @@ impl WeeklyGathering {
                     self.process_pick_reaction(&mut state, &finalized, reaction)
                 }
                 GatheringPhase::Idle => None,
-            }
+            };
+            (edit, *state != before)
         };
+
+        if changed {
+            self.save_state().await;
+        }
 
         // Reflect a changed pick in the finalization message, outside the state lock.
         if let Some((message_id, body)) = edit {
@@ -922,6 +986,11 @@ impl Middleware for WeeklyGathering {
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         let mut reaction_rx = self.reaction_rx.lock().await;
 
+        self.restore_state().await;
+
+        // Set after an announcement fails to post, so it is not retried at once.
+        let mut announce_not_before: Option<DateTime<Local>> = None;
+
         tracing::info!(
             service_id=%self.config.service_id,
             room_id=%self.config.room_id,
@@ -957,6 +1026,11 @@ impl Middleware for WeeklyGathering {
                 }
             };
 
+            let next_action_time = match announce_not_before {
+                Some(not_before) if action_name == "announce" => next_action_time.max(not_before),
+                _ => next_action_time,
+            };
+
             let duration_until =
                 (next_action_time - now).to_std().unwrap_or(std::time::Duration::from_secs(1));
 
@@ -983,7 +1057,15 @@ impl Middleware for WeeklyGathering {
                             if let Ok(Some(message_id)) = self.post_announcement(event_date).await {
                                 let mut state = self.state.lock().await;
                                 state.phase = GatheringPhase::Announced { event_date, message_id };
+                                announce_not_before = None;
+                            } else {
+                                tracing::warn!(
+                                    retry_in_secs=%ANNOUNCE_RETRY_DELAY.as_secs(),
+                                    "announcement was not posted; will try again"
+                                );
+                                announce_not_before = Some(Local::now() + ANNOUNCE_RETRY_DELAY);
                             }
+                            self.save_state().await;
                         }
                         "finalize" => {
                             tracing::info!(event_date=%event_date, "posting weekly gathering finalization");
@@ -1065,5 +1147,177 @@ impl Middleware for WeeklyGathering {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc::{self, Receiver};
+    use tokio::time::Instant;
+
+    /// A gathering whose poll is open right now: it is held today, the poll
+    /// closes at the very end of the day, and it opened a day before that.
+    fn gathering(store: &Arc<PersistentStore>) -> (Arc<WeeklyGathering>, Receiver<Command>) {
+        let (cmd_tx, commands) = mpsc::channel(16);
+        let config = WeeklyGatheringConfig {
+            service_id: "chat".to_string(),
+            room_id: "room".to_string(),
+            event_day_of_week: Local::now().weekday(),
+            event_time_options: parse_event_times("19:00").unwrap(),
+            finalize_time: NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
+            poll_open_minutes: 24 * 60,
+            reaction_virtual: "V".to_string(),
+            reaction_in_person: "P".to_string(),
+            reaction_host: "H".to_string(),
+            announcement_message: "announcement".to_string(),
+            finalization_virtual_message: "virtual {virtual_count}-{in_person_count}".to_string(),
+            finalization_in_person_message: "in person {virtual_count}-{in_person_count}"
+                .to_string(),
+            finalization_no_votes_message: "no votes".to_string(),
+            time_prompt_message: String::new(),
+            households: Vec::new(),
+        };
+        let ctx = MiddlewareContext { cmd_tx, store: store.clone() };
+        (Arc::new(WeeklyGathering::new(ctx, config)), commands)
+    }
+
+    fn start(gathering: &Arc<WeeklyGathering>) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let (gathering, cancel) = (gathering.clone(), cancel.clone());
+            async move { gathering.run(cancel).await.unwrap() }
+        });
+        (cancel, task)
+    }
+
+    /// Waits for the next message the gathering posts, skipping reactions.
+    /// Returns its text and the channel to answer it on.
+    async fn next_message(
+        commands: &mut Receiver<Command>,
+    ) -> (String, tokio::sync::oneshot::Sender<Result<String>>) {
+        loop {
+            match commands.recv().await.expect("a command") {
+                Command::SendRoomMessage { body, response_tx, .. } => {
+                    return (body, response_tx.expect("a reply channel"));
+                }
+                Command::AddReaction { .. } => {}
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+    }
+
+    async fn vote(gathering: &WeeklyGathering, message_id: &str, key: &str, sender: &str) {
+        gathering
+            .process_reaction(ReactionEvent::Added {
+                target_event_id: message_id.to_string(),
+                key: key.to_string(),
+                sender_id: sender.to_string(),
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_during_the_poll_resumes_it_with_its_votes() {
+        let store = Arc::new(PersistentStore::in_memory());
+
+        // First run: the poll is announced and two people vote.
+        let (first, mut commands) = gathering(&store);
+        let (cancel, task) = start(&first);
+        let (text, reply) = next_message(&mut commands).await;
+        assert_eq!(text, "announcement");
+        reply.send(Ok("announcement-id".to_string())).unwrap();
+        cancel.cancel();
+        task.await.unwrap();
+        vote(&first, "announcement-id", "P", "@a:example.com").await;
+        vote(&first, "announcement-id", "P", "@b:example.com").await;
+        drop((first, commands));
+
+        // Second run, on the same store: no second announcement. The next
+        // thing posted is the result, counting the votes cast before.
+        let (second, mut commands) = gathering(&store);
+        let (cancel, task) = start(&second);
+        let (text, reply) = next_message(&mut commands).await;
+        assert_eq!(text, "in person 0-2");
+        reply.send(Ok("result-id".to_string())).unwrap();
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_after_the_result_does_not_announce_again() {
+        let store = Arc::new(PersistentStore::in_memory());
+
+        let (first, _commands) = gathering(&store);
+        first.set_finalized(Some("result-id".to_string()), HashSet::new()).await;
+        first.save_state().await;
+
+        let (second, _commands) = gathering(&store);
+        second.restore_state().await;
+
+        let phase = second.state.lock().await.phase.clone();
+        assert!(matches!(phase, GatheringPhase::Finalized(_)), "got: {phase:?}");
+    }
+
+    #[tokio::test]
+    async fn saved_poll_for_a_gathering_long_past_is_discarded() {
+        let today = Local::now().date_naive();
+        let announced = |days_ago| GatheringPhase::Announced {
+            event_date: today - Duration::days(days_ago),
+            message_id: "announcement-id".to_string(),
+        };
+        let finalized = |days_ago| {
+            GatheringPhase::Finalized(FinalizedState {
+                event_date: today - Duration::days(days_ago),
+                message_id: None,
+                pickers: HashSet::new(),
+                selected_time: None,
+                virtual_count: 0,
+                in_person_count: 0,
+                host_display: String::new(),
+            })
+        };
+        let store = Arc::new(PersistentStore::in_memory());
+        let (gathering, _commands) = gathering(&store);
+        let now = Local::now();
+
+        assert!(gathering.still_current(&announced(0), now), "today's open poll");
+        assert!(!gathering.still_current(&announced(3), now), "a poll from days ago");
+        // Today's gathering is the upcoming one, so last week's result is the
+        // most recent; anything older has been superseded.
+        assert!(gathering.still_current(&finalized(7), now), "last week's result");
+        assert!(!gathering.still_current(&finalized(14), now), "a result from two weeks ago");
+
+        // A stale poll in the store is ignored on startup.
+        gathering.state.lock().await.phase = announced(3);
+        gathering.save_state().await;
+        gathering.state.lock().await.phase = GatheringPhase::Idle;
+        gathering.restore_state().await;
+        assert_eq!(gathering.state.lock().await.phase, GatheringPhase::Idle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_announcement_is_retried_after_a_pause() {
+        let store = Arc::new(PersistentStore::in_memory());
+        let (gathering, mut commands) = gathering(&store);
+        let (cancel, task) = start(&gathering);
+
+        let (_, reply) = next_message(&mut commands).await;
+        reply.send(Err(anyhow::anyhow!("room unavailable"))).unwrap();
+        let failed_at = Instant::now();
+
+        let (text, reply) = next_message(&mut commands).await;
+        assert_eq!(text, "announcement");
+        let waited = failed_at.elapsed();
+        // The wait is computed from the wall clock, so allow a little slack.
+        assert!(
+            waited >= ANNOUNCE_RETRY_DELAY - std::time::Duration::from_secs(1)
+                && waited <= ANNOUNCE_RETRY_DELAY,
+            "retried after {waited:?}"
+        );
+
+        reply.send(Ok("announcement-id".to_string())).unwrap();
+        cancel.cancel();
+        task.await.unwrap();
     }
 }
