@@ -22,13 +22,6 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-#[derive(Debug, Clone, Copy)]
-pub enum Verdict {
-    Continue,
-    #[allow(dead_code)]
-    Stop, // This will be used eventually.
-}
-
 /// Per-middleware context passed to every middleware constructor.
 ///
 /// Bundles the shared command sender and a dedicated persistent store so that
@@ -48,7 +41,7 @@ pub trait Middleware: Send + Sync {
     }
 
     async fn run(&self, cancel: CancellationToken) -> Result<()>;
-    fn on_event(&self, event: &Event) -> Result<Verdict>;
+    fn on_event(&self, event: &Event) -> Result<()>;
 }
 
 /// Countdown intervals used when `COUNTDOWN_DAYS` is not configured.

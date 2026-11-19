@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,7 +28,7 @@ impl Middleware for Echo {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<Verdict> {
+    fn on_event(&self, evt: &Event) -> Result<()> {
         // Only handle message events
         let (body, is_self) = match &evt.kind {
             EventKind::DirectMessage { body, is_self, .. } => (body, *is_self),
@@ -36,12 +36,12 @@ impl Middleware for Echo {
             EventKind::UserListUpdate { .. }
             | EventKind::ReactionAdded { .. }
             | EventKind::ReactionRemoved { .. }
-            | EventKind::RoomImage { .. } => return Ok(Verdict::Continue),
+            | EventKind::RoomImage { .. } => return Ok(()),
         };
 
         // Ignore messages from self to prevent infinite recursion
         if is_self {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         // Build the prefix with a trailing space
@@ -101,6 +101,6 @@ impl Middleware for Echo {
             tracing::info!(echo_content=%echo_content, "processed echo command");
         }
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }

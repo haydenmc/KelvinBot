@@ -1,7 +1,7 @@
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 use anyhow::{Context, Result, anyhow};
@@ -302,7 +302,7 @@ impl Middleware for CalendarAgenda {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<Verdict> {
+    fn on_event(&self, evt: &Event) -> Result<()> {
         if self.matches_command(evt) {
             // Use try_send so a full queue can't block the event pipeline.
             if let Err(e) = self.query_tx.try_send(()) {
@@ -310,7 +310,7 @@ impl Middleware for CalendarAgenda {
             }
         }
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 

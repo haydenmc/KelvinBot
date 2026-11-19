@@ -2,7 +2,7 @@ use crate::core::{
     bus::Command,
     config::ExponentialBackoff,
     event::Event,
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 use anyhow::{Context, Result};
@@ -490,8 +490,8 @@ impl Middleware for EzStreamAnnounce {
         self.websocket_loop(cancel).await
     }
 
-    fn on_event(&self, _event: &Event) -> Result<Verdict> {
+    fn on_event(&self, _event: &Event) -> Result<()> {
         // This middleware doesn't react to events, only to WebSocket notifications
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }

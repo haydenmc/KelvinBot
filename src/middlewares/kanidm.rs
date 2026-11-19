@@ -25,7 +25,7 @@ use url::Url;
 use crate::core::{
     bus::Command,
     event::{Event, EventKind},
-    middleware::{Middleware, MiddlewareContext, Verdict},
+    middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
 
@@ -111,15 +111,15 @@ impl Middleware for KanidmIdentity {
         Ok(())
     }
 
-    fn on_event(&self, evt: &Event) -> Result<Verdict> {
+    fn on_event(&self, evt: &Event) -> Result<()> {
         let EventKind::DirectMessage { body, user_id, is_local_user, is_self, .. } = &evt.kind
         else {
-            return Ok(Verdict::Continue);
+            return Ok(());
         };
 
         // Never react to our own messages.
         if *is_self {
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         let body = body.trim();
@@ -143,11 +143,11 @@ impl Middleware for KanidmIdentity {
                             self.command_invite
                         ),
                     );
-                    return Ok(Verdict::Continue);
+                    return Ok(());
                 }
             }
         } else {
-            return Ok(Verdict::Continue);
+            return Ok(());
         };
 
         // Both commands are limited to users on this homeserver.
@@ -158,7 +158,7 @@ impl Middleware for KanidmIdentity {
                 user_id.clone(),
                 "Identity commands can only be used by users on this server.".to_string(),
             );
-            return Ok(Verdict::Continue);
+            return Ok(());
         }
 
         let api = self.api.clone();
@@ -219,7 +219,7 @@ impl Middleware for KanidmIdentity {
             }
         });
 
-        Ok(Verdict::Continue)
+        Ok(())
     }
 }
 
