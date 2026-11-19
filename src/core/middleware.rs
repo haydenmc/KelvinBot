@@ -290,6 +290,7 @@ pub fn instantiate_middleware_from_config(
 
                 Arc::new(EzStreamAnnounce::new(
                     make_ctx()?,
+                    config.reconnection.clone(),
                     websocket_url.clone(),
                     stream_url_template.clone(),
                     start_message_template.clone(),
