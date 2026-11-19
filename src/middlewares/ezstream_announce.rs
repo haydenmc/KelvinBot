@@ -187,19 +187,6 @@ impl EzStreamAnnounce {
         channel_id: String,
         channel_name: String,
     ) -> Result<()> {
-        // EzStream reports "live" once, when a stream starts. A second report
-        // for a channel we still think is live therefore means a new stream,
-        // whose predecessor ended without us hearing of it (the notification
-        // was dropped, or arrived while we were disconnected). Close out the
-        // old announcement rather than leave it saying "live" forever.
-        if let Some(previous) = active_streams.remove(&channel_id) {
-            tracing::warn!(
-                channel_id=%channel_id,
-                "stream started again without a reported end; closing the earlier announcement"
-            );
-            self.finish_stream(&channel_id, previous).await;
-        }
-
         tracing::info!(
             channel_id=%channel_id,
             channel_name=%channel_name,
@@ -253,7 +240,9 @@ impl EzStreamAnnounce {
             }
         }
 
-        // Track this stream so its announcements can be edited when it ends
+        // Track this stream so its announcements can be edited when it ends.
+        // If the channel was already recorded as live (its end was missed),
+        // this replaces the record and the earlier announcement is left as is.
         active_streams.insert(
             channel_id.clone(),
             ActiveStream { name: channel_name, start_time: Utc::now(), message_ids },
@@ -278,18 +267,12 @@ impl EzStreamAnnounce {
             return Ok(());
         };
 
-        self.finish_stream(&channel_id, stream).await;
-        Ok(())
-    }
-
-    /// Edits a stream's announcements to say that it has ended.
-    async fn finish_stream(&self, channel_id: &str, stream: ActiveStream) {
         let duration = Utc::now() - stream.start_time;
 
         let message_body = self.format_message(
             &self.end_message_template,
             &stream.name,
-            channel_id,
+            &channel_id,
             Some(duration),
         );
 
@@ -318,6 +301,8 @@ impl EzStreamAnnounce {
                 );
             }
         }
+
+        Ok(())
     }
 
     /// Handles notifications one at a time, in the order EzStream sent them,
@@ -804,7 +789,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn second_start_closes_the_earlier_announcement() {
+    async fn second_start_is_announced_again() {
         let (middleware, mut commands) = middleware();
         let (queue, queued) = mpsc::channel(8);
         // The end of the first stream never arrives.
@@ -815,7 +800,7 @@ mod tests {
 
         let chat = async {
             answer_announcement(&mut commands, "msg-1").await;
-            assert_eq!(expect_edit(&mut commands).await.0, "msg-1");
+            // The earlier announcement is left alone; the new one is tracked.
             answer_announcement(&mut commands, "msg-2").await;
             assert_eq!(expect_edit(&mut commands).await.0, "msg-2");
         };
