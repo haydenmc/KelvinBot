@@ -572,6 +572,19 @@ KELVIN__<SECTION>__<SUBSECTION>__<KEY>=<VALUE>
 KELVIN__DATA_DIRECTORY=./data  # Default: ./data
 ```
 
+Holds the Matrix encryption store and each middleware's saved state. Keep it on persistent
+storage: if it is lost, the bot's Matrix device has to be verified again. The Docker image
+defaults to `/data`; see [Docker](#docker).
+
+### Time Zone
+```bash
+TZ=America/Los_Angeles  # Default: the system time zone (UTC in a container)
+```
+
+Scheduled posts (weekly gathering, calendar agenda, movie showtimes) use the bot's local time
+zone. Set `TZ` to an [IANA time zone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+so they go out at the intended local time and follow daylight saving changes.
+
 ### Example: Multi-Service Setup with Middlewares
 ```bash
 # Data directory
@@ -629,7 +642,9 @@ docker pull ghcr.io/haydenmc/kelvinbot:latest
 docker run -d \
   --name kelvinbot \
   --env-file .env \
-  -v $(pwd)/data:/app/data \
+  -e KELVIN__DATA_DIRECTORY=/data \
+  -e TZ=America/Los_Angeles \
+  -v $(pwd)/data:/data \
   ghcr.io/haydenmc/kelvinbot:latest
 
 # Or with individual environment variables
@@ -637,7 +652,7 @@ docker run -d \
   --name kelvinbot \
   -e KELVIN__SERVICES__dummy__KIND=dummy \
   -e KELVIN__SERVICES__dummy__INTERVAL_MS=5000 \
-  -v $(pwd)/data:/app/data \
+  -v $(pwd)/data:/data \
   ghcr.io/haydenmc/kelvinbot:latest
 
 # View logs
@@ -647,6 +662,11 @@ docker logs kelvinbot
 docker stop kelvinbot && docker rm kelvinbot
 ```
 
+The image keeps its state in `/data`, so that is where persistent storage must be mounted.
+`-e KELVIN__DATA_DIRECTORY=/data` is there because an `.env` copied from `.env.example` sets a
+relative path, which inside the container would point outside the mounted directory. The
+container runs as a non-root user, so the host directory must be writable by it.
+
 ### Docker Compose
 ```yaml
 version: '3.8'
@@ -654,10 +674,15 @@ services:
   kelvinbot:
     image: ghcr.io/haydenmc/kelvinbot:latest
     env_file: .env
+    environment:
+      KELVIN__DATA_DIRECTORY: /data
+      TZ: America/Los_Angeles
     volumes:
-      - ./data:/app/data
+      - ./data:/data
     restart: unless-stopped
 ```
+
+See `docker-compose.example.yml` for a fuller example with resource limits and a health check.
 
 ## Testing
 

@@ -5,8 +5,17 @@ services:
     image: ghcr.io/haydenmc/kelvinbot:latest
     container_name: kelvinbot
     env_file: .env
+    environment:
+      # Where the bot keeps its state inside the container. Set here so it
+      # always matches the volume below, whatever .env says.
+      KELVIN__DATA_DIRECTORY: /data
+      # Local time zone for scheduled posts (weekly gathering, calendar agenda,
+      # movie showtimes). Without it the bot runs on UTC.
+      # TZ: America/Los_Angeles
     volumes:
-      - ./data:/app/data
+      # Holds the Matrix encryption keys and middleware state. Losing it means
+      # re-verifying the bot's Matrix device.
+      - ./data:/data
     restart: unless-stopped
     # Uncomment and modify if you need to expose ports
     # ports:
