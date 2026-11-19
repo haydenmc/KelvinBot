@@ -696,6 +696,7 @@ impl WeeklyGathering {
         if let Some((message_id, body)) = edit {
             let command = Command::EditMessage {
                 service_id: ServiceId(self.config.service_id.clone()),
+                room_id: self.config.room_id.clone(),
                 message_id,
                 new_body: body.clone(),
                 new_markdown_body: Some(body),

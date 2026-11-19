@@ -279,6 +279,7 @@ async fn handle_session_update(
 
         let command = Command::EditMessage {
             service_id: destination.service_id,
+            room_id: destination.room_id,
             message_id: message_id.clone(),
             new_body: body.clone(),
             new_markdown_body: Some(body),
@@ -349,6 +350,7 @@ async fn handle_session_end(
 
         let command = Command::EditMessage {
             service_id: destination.service_id.clone(),
+            room_id: destination.room_id.clone(),
             message_id: message_id.clone(),
             new_body: edit_body.clone(),
             new_markdown_body: Some(edit_body),

@@ -949,8 +949,9 @@ async fn test_attendance_relay_session_update_with_edit() {
     // Now we should get an EditMessage command (not SendRoomMessage)
     let cmd = cmd_rx.recv().await.unwrap();
     match cmd {
-        Command::EditMessage { service_id, message_id, new_body, .. } => {
+        Command::EditMessage { service_id, room_id, message_id, new_body, .. } => {
             assert_eq!(service_id.0, "matrix");
+            assert_eq!(room_id, "!test:example.com");
             assert_eq!(message_id, "msg_123");
             assert!(new_body.contains("Active participants:"));
             assert!(new_body.contains("- Alice"));
@@ -2684,7 +2685,8 @@ async fn test_host_pick_edits_finalization_message() {
 
     assert_eq!(middleware.get_selected_time().await, Some(1));
     match cmd_rx.try_recv().expect("expected an edit command") {
-        Command::EditMessage { message_id, new_body, .. } => {
+        Command::EditMessage { room_id, message_id, new_body, .. } => {
+            assert_eq!(room_id, "!test:example.com");
             assert_eq!(message_id, "final1");
             assert!(
                 new_body.contains("IN-PERSON at ") && new_body.contains(" at 8:00pm"),

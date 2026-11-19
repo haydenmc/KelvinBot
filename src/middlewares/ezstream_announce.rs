@@ -237,6 +237,7 @@ impl EzStreamAnnounce {
         for ((service_id, room_id), message_id) in stream.message_ids {
             let command = Command::EditMessage {
                 service_id: ServiceId(service_id.clone()),
+                room_id: room_id.clone(),
                 message_id,
                 new_body: message_body.clone(),
                 new_markdown_body: Some(message_body.clone()),

@@ -75,6 +75,7 @@ mod command_debug {
     fn edit_bodies_are_redacted() {
         assert_redacted(Command::EditMessage {
             service_id: service_id(),
+            room_id: "!room:example.org".to_string(),
             message_id: "$event".to_string(),
             new_body: SECRET.to_string(),
             new_markdown_body: Some(SECRET.to_string()),
