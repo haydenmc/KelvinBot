@@ -238,25 +238,51 @@ const SERVICE_COMMAND_QUEUE_CAPACITY: usize = 256;
 ///
 /// Each service has its own queue and dispatcher task, so a slow
 /// `handle_command` only delays later commands for that same service; the bus
-/// keeps routing events and other services' commands meanwhile.
+/// keeps routing events and other services' commands meanwhile. It stops once
+/// the bus has closed the queue and every command in it has been handled.
 async fn dispatch_commands(
     service_id: ServiceId,
     service: Arc<dyn Service>,
     mut commands: Receiver<Command>,
-    cancel: CancellationToken,
 ) {
-    loop {
-        let command = tokio::select! {
-            _ = cancel.cancelled() => return,
-            maybe_command = commands.recv() => match maybe_command {
-                Some(command) => command,
-                None => return,
-            },
-        };
-
+    while let Some(command) = commands.recv().await {
         if let Err(e) = service.handle_command(command).await {
             tracing::error!(service_id=%service_id, error=format!("{e:#}"), "failed to handle command");
         }
+    }
+}
+
+/// Hands a command to its service's queue without waiting, so a busy service
+/// can never stall the bus. Dropping the command also drops any `response_tx`,
+/// which tells a waiting sender that it failed.
+fn route_command(command_queues: &HashMap<ServiceId, Sender<Command>>, cmd: Command) {
+    let Some(queue) = command_queues.get(cmd.service_id()) else {
+        tracing::warn!(service_id=%cmd.service_id(), "command sent to unknown service");
+        return;
+    };
+    match queue.try_send(cmd) {
+        Ok(()) => {}
+        Err(TrySendError::Full(cmd)) => {
+            tracing::error!(service_id=%cmd.service_id(), command=?cmd, "service command queue is full; dropping command");
+        }
+        Err(TrySendError::Closed(cmd)) => {
+            tracing::error!(service_id=%cmd.service_id(), command=?cmd, "service command dispatcher has stopped; dropping command");
+        }
+    }
+}
+
+/// Runs one middleware's `run` until it returns, and logs how it ended.
+async fn run_middleware(middleware: Arc<dyn Middleware>, cancel: CancellationToken) {
+    let name = middleware.name();
+    match middleware.run(cancel.clone()).await {
+        Ok(()) if cancel.is_cancelled() => {
+            tracing::info!(middleware=%name, "middleware exited during shutdown");
+        }
+        // Middleware tasks are expected to run until shutdown. Log loudly if
+        // one exits early so a silently dead middleware is visible rather
+        // than discovered by missing behaviour.
+        Ok(()) => tracing::warn!(middleware=%name, "middleware task exited unexpectedly"),
+        Err(e) => tracing::error!(middleware=%name, error=%e, "middleware task failed"),
     }
 }
 
@@ -300,20 +326,24 @@ struct Inbox {
     events: Sender<Arc<Event>>,
 }
 
-/// Checks the exit of a task that is meant to run until shutdown.
-///
-/// Returns an error if it panicked, or ended while the bus was still running.
-fn ensure_stopped_by_shutdown(
-    task: &str,
-    joined: Result<(), tokio::task::JoinError>,
-    cancel: &CancellationToken,
-) -> anyhow::Result<()> {
+/// Describes the exit of a task that should have kept running until shutdown.
+fn ended_early(task: &str, joined: Result<(), tokio::task::JoinError>) -> anyhow::Error {
     match joined {
-        Ok(()) if cancel.is_cancelled() => Ok(()),
-        Ok(()) => Err(anyhow::anyhow!("{task} stopped unexpectedly")),
-        Err(e) => Err(anyhow::Error::new(e).context(format!("{task} panicked or was aborted"))),
+        Ok(()) => anyhow::anyhow!("{task} stopped unexpectedly"),
+        Err(e) => anyhow::Error::new(e).context(format!("{task} panicked or was aborted")),
     }
 }
+
+/// Logs a task that panicked while being stopped.
+fn log_if_panicked(kind: &str, joined: Result<(), tokio::task::JoinError>) {
+    if let Err(e) = joined {
+        tracing::warn!(kind, error=%e, "task panicked or was aborted during shutdown");
+    }
+}
+
+/// How long each stage of shutdown may take by default. With three stages the
+/// worst case stays under Docker's 10-second stop timeout.
+const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 pub struct Bus {
     // Receive events from services
@@ -332,6 +362,9 @@ pub struct Bus {
 
     // Backoff settings applied to each service's restarts
     reconnect_config: ReconnectionConfig,
+
+    // How long each stage of shutdown may take before its tasks are aborted
+    shutdown_grace: Duration,
 }
 
 impl Bus {
@@ -349,7 +382,15 @@ impl Bus {
             service_middlewares,
             standalone_middlewares: Vec::new(),
             reconnect_config,
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
         }
+    }
+
+    /// Sets how long each stage of shutdown (middlewares, then command
+    /// dispatchers, then services) may take before its tasks are aborted.
+    pub fn with_shutdown_grace(mut self, per_stage: Duration) -> Self {
+        self.shutdown_grace = per_stage;
+        self
     }
 
     /// Also starts these middlewares, even if no service's pipeline includes
@@ -365,6 +406,12 @@ impl Bus {
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) -> anyhow::Result<()> {
+        // The bus stops its tasks in stages (see `shut_down`), so each group
+        // has its own token rather than a child of `cancel`. Dispatchers have
+        // none: they stop once their queue is closed and empty.
+        let middleware_cancel = CancellationToken::new();
+        let service_cancel = CancellationToken::new();
+
         // Start all services with supervision
         info!("starting services with supervision...");
         let mut service_tasks: JoinSet<()> = JoinSet::new();
@@ -374,7 +421,7 @@ impl Bus {
                 service_id.clone(),
                 service.clone(),
                 self.reconnect_config.clone(),
-                cancel.child_token(),
+                service_cancel.clone(),
             ));
         }
 
@@ -385,17 +432,12 @@ impl Bus {
         for (service_id, service) in &self.services {
             let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(SERVICE_COMMAND_QUEUE_CAPACITY);
             command_queues.insert(service_id.clone(), queue_tx);
-            dispatch_tasks.spawn(dispatch_commands(
-                service_id.clone(),
-                service.clone(),
-                queue_rx,
-                cancel.child_token(),
-            ));
+            dispatch_tasks.spawn(dispatch_commands(service_id.clone(), service.clone(), queue_rx));
         }
 
         // Run every middleware once, however many pipelines it appears in.
         info!("starting middlewares...");
-        let mut middleware_tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
+        let mut middleware_tasks: JoinSet<()> = JoinSet::new();
         let mut running: Vec<&Arc<dyn Middleware>> = Vec::new();
 
         let all_middlewares =
@@ -405,12 +447,7 @@ impl Bus {
                 continue;
             }
             running.push(middleware);
-
-            middleware_tasks.spawn({
-                let middleware = middleware.clone();
-                let cancel = cancel.child_token();
-                async move { (middleware.name(), middleware.run(cancel).await) }
-            });
+            middleware_tasks.spawn(run_middleware(middleware.clone(), middleware_cancel.clone()));
         }
 
         // Give each middleware that appears in a pipeline one inbox and one
@@ -432,7 +469,7 @@ impl Bus {
                         delivery_tasks.spawn(deliver_events(
                             middleware.clone(),
                             inbox_rx,
-                            cancel.child_token(),
+                            middleware_cancel.clone(),
                         ));
                         let inbox = Inbox { middleware: middleware.name(), events };
                         inboxes.push((middleware, inbox.clone()));
@@ -446,48 +483,37 @@ impl Bus {
         // Begin command/event processing with service supervision
         info!("starting event bus...");
 
-        loop {
+        let outcome: anyhow::Result<()> = loop {
             tokio::select! {
-                // Supervisors, dispatchers and event delivery tasks only return
-                // on shutdown. If one ends any other way, a service is no
-                // longer restarted or no longer receives commands, or a
-                // middleware no longer receives events, so stop the bus (and
-                // with it the process) rather than carry on half-working.
+                // Supervisors, dispatchers and event delivery tasks are only
+                // stopped by `shut_down`, after this loop. If one ends here, a
+                // service is no longer restarted or no longer receives
+                // commands, or a middleware no longer receives events, so stop
+                // the bus (and with it the process) rather than carry on
+                // half-working.
                 Some(joined) = service_tasks.join_next() => {
-                    ensure_stopped_by_shutdown("service supervisor", joined, &cancel)?;
+                    break Err(ended_early("service supervisor", joined));
                 }
                 Some(joined) = dispatch_tasks.join_next() => {
-                    ensure_stopped_by_shutdown("command dispatcher", joined, &cancel)?;
+                    break Err(ended_early("command dispatcher", joined));
                 }
                 Some(joined) = delivery_tasks.join_next() => {
-                    ensure_stopped_by_shutdown("middleware event delivery", joined, &cancel)?;
+                    break Err(ended_early("middleware event delivery", joined));
                 }
-                // Middleware tasks are expected to run until shutdown. Log
-                // loudly if one exits early so a silently dead middleware is
-                // visible rather than discovered by missing behaviour.
+                // A middleware's `run` ending early is tolerated (it has
+                // already logged why), but a panic is at least made visible.
                 Some(joined) = middleware_tasks.join_next() => {
-                    match joined {
-                        Ok((name, Ok(()))) if cancel.is_cancelled() => {
-                            tracing::info!(middleware=%name, "middleware exited during shutdown");
-                        }
-                        Ok((name, Ok(()))) => {
-                            tracing::warn!(middleware=%name, "middleware task exited unexpectedly");
-                        }
-                        Ok((name, Err(e))) => {
-                            tracing::error!(middleware=%name, error=%e, "middleware task failed");
-                        }
-                        Err(e) => {
-                            tracing::error!(error=%e, "middleware task panicked or was aborted");
-                        }
+                    if let Err(e) = joined {
+                        tracing::error!(error=%e, "middleware task panicked or was aborted");
                     }
                 }
                 _ = cancel.cancelled() => {
                     info!("shutdown signal received");
-                    break;
+                    break Ok(());
                 }
                 maybe_evt = self.evt_rx.recv() => {
                     info!("event received");
-                    let Some(evt) = maybe_evt else { break };
+                    let Some(evt) = maybe_evt else { break Ok(()) };
 
                     // Copy the event into the inbox of each middleware in this
                     // service's pipeline, in pipeline order and without
@@ -511,30 +537,89 @@ impl Bus {
                 }
                 maybe_cmd = self.cmd_rx.recv() => {
                     info!("command received");
-                    let Some(cmd) = maybe_cmd else { break };
-
-                    // Hand the command to its service's queue without waiting,
-                    // so a busy service can never stall the bus. Dropping the
-                    // command also drops any `response_tx`, which tells a
-                    // waiting sender that it failed.
-                    let Some(queue) = command_queues.get(cmd.service_id()) else {
-                        tracing::warn!(service_id=%cmd.service_id(), "command sent to unknown service");
-                        continue;
-                    };
-                    match queue.try_send(cmd) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(cmd)) => {
-                            tracing::error!(service_id=%cmd.service_id(), command=?cmd, "service command queue is full; dropping command");
-                        }
-                        Err(TrySendError::Closed(cmd)) => {
-                            tracing::error!(service_id=%cmd.service_id(), command=?cmd, "service command dispatcher has stopped; dropping command");
-                        }
-                    }
+                    let Some(cmd) = maybe_cmd else { break Ok(()) };
+                    route_command(&command_queues, cmd);
                 }
             }
+        };
+
+        if let Err(e) = &outcome {
+            tracing::error!(error = format!("{e:#}"), "event bus failed; shutting down");
         }
+
+        // Stop everything in dependency order, each stage with its own time
+        // limit, so work in flight can finish while its dependencies are
+        // still up. Events arriving meanwhile are read and discarded, so no
+        // service is left blocked trying to emit one.
+        //
+        // 1. Middlewares finish the event they are handling and return from
+        //    `run`. Commands they send while doing so are still routed.
+        info!("stopping middlewares...");
+        middleware_cancel.cancel();
+        let middlewares_stopped = tokio::time::timeout(self.shutdown_grace, async {
+            while !(middleware_tasks.is_empty() && delivery_tasks.is_empty()) {
+                tokio::select! {
+                    Some(joined) = middleware_tasks.join_next() => log_if_panicked("middleware", joined),
+                    Some(joined) = delivery_tasks.join_next() => log_if_panicked("middleware event delivery", joined),
+                    Some(cmd) = self.cmd_rx.recv() => route_command(&command_queues, cmd),
+                    Some(_) = self.evt_rx.recv() => {}
+                    else => break,
+                }
+            }
+        })
+        .await;
+        if middlewares_stopped.is_err() {
+            tracing::warn!(
+                middleware_tasks = middleware_tasks.len(),
+                delivery_tasks = delivery_tasks.len(),
+                "middlewares did not stop in time; aborting them"
+            );
+            middleware_tasks.abort_all();
+            delivery_tasks.abort_all();
+        }
+
+        // 2. Dispatchers deliver every command already sent, then stop when
+        //    their queues are closed and empty. Services are still running.
+        info!("delivering remaining commands...");
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            route_command(&command_queues, cmd);
+        }
+        drop(command_queues);
+        self.stop_tasks("command dispatcher", &mut dispatch_tasks).await;
+
+        // 3. Services disconnect.
+        info!("stopping services...");
+        service_cancel.cancel();
+        self.stop_tasks("service", &mut service_tasks).await;
+
         info!("exited event bus");
-        Ok(())
+        outcome
+    }
+
+    /// Waits up to the shutdown grace period for `tasks` to finish, then
+    /// aborts any that are left. Incoming events are discarded meanwhile.
+    async fn stop_tasks(&mut self, kind: &str, tasks: &mut JoinSet<()>) {
+        let stopped = tokio::time::timeout(self.shutdown_grace, async {
+            loop {
+                tokio::select! {
+                    joined = tasks.join_next() => match joined {
+                        Some(joined) => log_if_panicked(kind, joined),
+                        None => break,
+                    },
+                    Some(_) = self.evt_rx.recv() => {}
+                }
+            }
+        })
+        .await;
+
+        if stopped.is_err() {
+            tracing::warn!(
+                kind,
+                remaining = tasks.len(),
+                "tasks did not stop in time; aborting them"
+            );
+            tasks.abort_all();
+        }
     }
 }
 

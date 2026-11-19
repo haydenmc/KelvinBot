@@ -181,7 +181,9 @@ async fn commands_beyond_a_full_queue_are_dropped_and_their_senders_told() {
     let services: HashMap<ServiceId, Arc<dyn Service>> =
         HashMap::from([(id.clone(), service as _)]);
 
-    let mut bus = Bus::new(evt_rx, cmd_rx, services, HashMap::new(), ReconnectionConfig::default());
+    // It never finishes its command either, so shutdown has to give up on it.
+    let mut bus = Bus::new(evt_rx, cmd_rx, services, HashMap::new(), ReconnectionConfig::default())
+        .with_shutdown_grace(Duration::from_millis(50));
     let cancel = CancellationToken::new();
     let bus_handle = tokio::spawn({
         let cancel = cancel.clone();
