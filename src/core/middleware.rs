@@ -20,7 +20,6 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 /// Per-middleware context passed to every middleware constructor.
 ///
@@ -410,10 +409,7 @@ pub fn instantiate_middleware_from_config(
                 .map_err(|e| anyhow::anyhow!("{} for middleware '{}'", e, name))?;
                 Arc::new(middleware)
             }
-            MiddlewareKind::Unknown => {
-                warn!(middleware_name=%name, "unknown middleware kind, skipping");
-                continue;
-            }
+            MiddlewareKind::Unknown => bail!("middleware '{name}' has an unrecognised KIND"),
         };
         middlewares.insert(name.clone(), middleware);
     }

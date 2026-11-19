@@ -24,7 +24,7 @@ Tests individual components in isolation, organized by module:
 #### `unit/config.rs`
 - TOML configuration parsing
 - Service configuration validation
-- Unknown service type handling
+- Unknown service and middleware kinds, and out-of-range reconnection settings, are rejected
 
 #### `unit/bus.rs`
 - Channel creation utilities

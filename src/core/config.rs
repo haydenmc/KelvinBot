@@ -263,6 +263,27 @@ pub struct Config {
     pub reconnection: ReconnectionConfig,
 }
 
+impl Config {
+    /// Checks the parts of the configuration that deserialization accepts but
+    /// the bot cannot run with, so that a mistake stops startup instead of
+    /// producing a bot with pieces missing.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (name, service) in &self.services {
+            if matches!(service.kind, ServiceKind::Unknown) {
+                anyhow::bail!(
+                    "service '{name}' has an unrecognised KIND (expected dummy, matrix or mumble)"
+                );
+            }
+        }
+        for (name, middleware) in &self.middlewares {
+            if matches!(middleware.kind, MiddlewareKind::Unknown) {
+                anyhow::bail!("middleware '{name}' has an unrecognised KIND");
+            }
+        }
+        self.reconnection.validate()
+    }
+}
+
 fn default_data_directory() -> PathBuf {
     PathBuf::from("./data")
 }
@@ -355,6 +376,36 @@ pub struct ReconnectionConfig {
     pub multiplier: f64,
     #[serde(default = "default_jitter_factor")]
     pub jitter_factor: f64,
+}
+
+impl ReconnectionConfig {
+    /// Rejects values that would make restarts spin, never back off, or panic
+    /// when the delay is computed.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.initial_delay.is_zero() {
+            anyhow::bail!("reconnection initial_delay must be greater than zero");
+        }
+        if self.max_delay < self.initial_delay {
+            anyhow::bail!(
+                "reconnection max_delay ({:?}) must not be less than initial_delay ({:?})",
+                self.max_delay,
+                self.initial_delay
+            );
+        }
+        if !(self.multiplier.is_finite() && self.multiplier >= 1.0) {
+            anyhow::bail!(
+                "reconnection multiplier must be a number of at least 1, got {}",
+                self.multiplier
+            );
+        }
+        if !(0.0..=1.0).contains(&self.jitter_factor) {
+            anyhow::bail!(
+                "reconnection jitter_factor must be between 0 and 1, got {}",
+                self.jitter_factor
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for ReconnectionConfig {
@@ -471,5 +522,7 @@ pub fn load_from_env() -> anyhow::Result<Config> {
     let cfg = config::Config::builder()
         .add_source(config::Environment::with_prefix(ENV_PREFIX).separator(ENV_SEPARATOR))
         .build()?;
-    Ok(cfg.try_deserialize()?)
+    let cfg: Config = cfg.try_deserialize()?;
+    cfg.validate()?;
+    Ok(cfg)
 }

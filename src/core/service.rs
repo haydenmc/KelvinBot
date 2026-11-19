@@ -1,10 +1,9 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
 
 use crate::{
     core::{
@@ -61,7 +60,7 @@ pub async fn instantiate_services_from_config(
                 verification_device_id,
                 max_image_size_bytes,
             } => {
-                match MatrixService::create(
+                let svc = MatrixService::create(
                     service_id.clone(),
                     homeserver_url.clone(),
                     MatrixUserId(user_id.clone()),
@@ -74,17 +73,11 @@ pub async fn instantiate_services_from_config(
                     *max_image_size_bytes,
                 )
                 .await
-                {
-                    Ok(svc) => {
-                        services.insert(service_id, Arc::new(svc));
-                    }
-                    Err(e) => {
-                        error!(id=%id, error=%e, "could not instantiate matrix service");
-                    }
-                }
+                .with_context(|| format!("could not instantiate matrix service '{id}'"))?;
+                services.insert(service_id, Arc::new(svc));
             }
             ServiceKind::Mumble { hostname, port, username, password, accept_invalid_certs } => {
-                match MumbleService::create(
+                let svc = MumbleService::create(
                     service_id.clone(),
                     hostname.clone(),
                     *port,
@@ -94,16 +87,10 @@ pub async fn instantiate_services_from_config(
                     evt_tx.clone(),
                 )
                 .await
-                {
-                    Ok(svc) => {
-                        services.insert(service_id, Arc::new(svc));
-                    }
-                    Err(e) => {
-                        error!(id=%id, error=%e, "could not instantiate mumble service");
-                    }
-                }
+                .with_context(|| format!("could not instantiate mumble service '{id}'"))?;
+                services.insert(service_id, Arc::new(svc));
             }
-            _ => error!(id=%id, "unknown service kind, skipping"),
+            ServiceKind::Unknown => bail!("service '{id}' has an unrecognised KIND"),
         }
     }
     Ok(services)
