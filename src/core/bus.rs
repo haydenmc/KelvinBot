@@ -260,6 +260,21 @@ async fn dispatch_commands(
     }
 }
 
+/// Checks the exit of a task that is meant to run until shutdown.
+///
+/// Returns an error if it panicked, or ended while the bus was still running.
+fn ensure_stopped_by_shutdown(
+    task: &str,
+    joined: Result<(), tokio::task::JoinError>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    match joined {
+        Ok(()) if cancel.is_cancelled() => Ok(()),
+        Ok(()) => Err(anyhow::anyhow!("{task} stopped unexpectedly")),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("{task} panicked or was aborted"))),
+    }
+}
+
 pub struct Bus {
     // Receive events from services
     evt_rx: Receiver<Event>,
@@ -345,18 +360,15 @@ impl Bus {
 
         loop {
             tokio::select! {
-                // Supervisors restart their own service and only return on
-                // shutdown, so anything else here means one has died.
+                // Supervisors and dispatchers only return on shutdown. If one
+                // ends any other way its service is no longer restarted or no
+                // longer receives commands, so stop the bus (and with it the
+                // process) rather than carry on half-working.
                 Some(joined) = service_tasks.join_next() => {
-                    if let Err(e) = joined {
-                        tracing::error!(error=%e, "service supervisor panicked or was aborted; its service will not be restarted");
-                    }
+                    ensure_stopped_by_shutdown("service supervisor", joined, &cancel)?;
                 }
-                // Dispatchers also run until shutdown.
                 Some(joined) = dispatch_tasks.join_next() => {
-                    if let Err(e) = joined {
-                        tracing::error!(error=%e, "command dispatcher panicked or was aborted; its service will no longer receive commands");
-                    }
+                    ensure_stopped_by_shutdown("command dispatcher", joined, &cancel)?;
                 }
                 // Middleware tasks are expected to run until shutdown. Log
                 // loudly if one exits early so a silently dead middleware is

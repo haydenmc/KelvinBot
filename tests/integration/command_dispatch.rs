@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 const PROMPT: Duration = Duration::from_secs(2);
 
 /// Handles a command only once the test grants it a permit, then reports the
-/// command's body.
+/// command's body. A body of "panic" makes the handler panic instead.
 struct GatedService {
     permits: Semaphore,
     handled_tx: mpsc::UnboundedSender<String>,
@@ -44,6 +44,7 @@ impl Service for GatedService {
     async fn handle_command(&self, command: Command) -> anyhow::Result<()> {
         self.permits.acquire().await?.forget();
         if let Command::SendRoomMessage { body, .. } = command {
+            assert_ne!(body, "panic", "handler panic (test)");
             let _ = self.handled_tx.send(body);
         }
         Ok(())
@@ -210,4 +211,27 @@ async fn commands_beyond_a_full_queue_are_dropped_and_their_senders_told() {
 
     cancel.cancel();
     assert_ok!(tokio::time::timeout(PROMPT, bus_handle).await.expect("prompt shutdown").unwrap());
+}
+
+#[tokio::test]
+async fn panic_while_handling_a_command_stops_the_bus_with_an_error() {
+    let (cmd_tx, cmd_rx) = create_command_channel(10);
+    let (_evt_tx, evt_rx) = create_event_channel(10);
+
+    let id = ServiceId("svc".to_string());
+    let (service, _handled) = GatedService::new(Semaphore::MAX_PERMITS);
+    let services: HashMap<ServiceId, Arc<dyn Service>> =
+        HashMap::from([(id.clone(), service as _)]);
+
+    let mut bus = Bus::new(evt_rx, cmd_rx, services, HashMap::new(), ReconnectionConfig::default());
+    let bus_handle = tokio::spawn(async move { bus.run(CancellationToken::new()).await });
+
+    cmd_tx.send(room_message(&id, "panic")).await.unwrap();
+
+    let result = tokio::time::timeout(PROMPT, bus_handle)
+        .await
+        .expect("the bus should stop promptly")
+        .expect("the bus task itself should not panic");
+    let err = result.expect_err("a dead dispatcher is fatal");
+    assert!(format!("{err:#}").contains("command dispatcher panicked"), "got: {err:#}");
 }
