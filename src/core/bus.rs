@@ -69,8 +69,6 @@ impl std::fmt::Debug for Redacted<'_> {
     }
 }
 
-// Implemented manually so message text is redacted (see `Redacted`) and
-// because oneshot::Sender has no useful Debug output.
 impl Command {
     /// The service this command is addressed to.
     pub fn service_id(&self) -> &ServiceId {
@@ -85,6 +83,8 @@ impl Command {
     }
 }
 
+// Implemented manually so message text is redacted (see `Redacted`) and
+// because oneshot::Sender has no useful Debug output.
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
