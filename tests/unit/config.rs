@@ -1,6 +1,7 @@
 use assert_matches::assert_matches;
-use kelvin_bot::core::config::{Config, MiddlewareKind, ServiceKind};
+use kelvin_bot::core::config::{Config, MiddlewareKind, ReconnectionConfig, ServiceKind};
 use secrecy::ExposeSecret;
+use std::time::Duration;
 
 #[test]
 fn test_config_serde_dummy_service() {
@@ -36,6 +37,79 @@ fn test_config_unknown_service_type() {
 
     // Unknown service types should deserialize as Unknown variant
     assert_matches!(&unknown_service.kind, ServiceKind::Unknown);
+
+    // ...which validation then rejects, naming the service.
+    let err = config.validate().expect_err("an unknown kind should not validate");
+    assert!(format!("{err:#}").contains("unknown_service"), "got: {err:#}");
+}
+
+#[test]
+fn test_config_unknown_middleware_kind_is_rejected() {
+    let config_str = r#"
+        [services.dummy1]
+        kind = "dummy"
+
+        [middlewares.typo]
+        kind = "ecoh"
+        "#;
+
+    let config: Config = toml::from_str(config_str).expect("Failed to parse config");
+
+    let err = config.validate().expect_err("an unknown kind should not validate");
+    assert!(format!("{err:#}").contains("middleware 'typo'"), "got: {err:#}");
+}
+
+#[test]
+fn test_config_with_known_kinds_validates() {
+    let config_str = r#"
+        [services.dummy1]
+        kind = "dummy"
+
+        [middlewares.log]
+        kind = "logger"
+        "#;
+
+    let config: Config = toml::from_str(config_str).expect("Failed to parse config");
+
+    config.validate().expect("a well-formed config should validate");
+}
+
+#[test]
+fn test_default_reconnection_config_validates() {
+    ReconnectionConfig::default().validate().expect("defaults should validate");
+}
+
+#[test]
+fn test_reconnection_config_rejects_out_of_range_values() {
+    type Change = fn(&mut ReconnectionConfig);
+
+    let with = |change: Change| {
+        let mut config = ReconnectionConfig::default();
+        change(&mut config);
+        config.validate().map_err(|e| format!("{e:#}"))
+    };
+
+    let cases: [(Change, &str); 8] = [
+        (|c| c.initial_delay = Duration::ZERO, "initial_delay"),
+        (|c| c.max_delay = c.initial_delay / 2, "max_delay"),
+        (|c| c.multiplier = 0.5, "multiplier"),
+        (|c| c.multiplier = -2.0, "multiplier"),
+        (|c| c.multiplier = f64::NAN, "multiplier"),
+        // A negative jitter used to panic when the delay was computed.
+        (|c| c.jitter_factor = -0.1, "jitter_factor"),
+        (|c| c.jitter_factor = 1.5, "jitter_factor"),
+        (|c| c.jitter_factor = f64::NAN, "jitter_factor"),
+    ];
+    for (change, field) in cases {
+        let err = with(change).expect_err("out-of-range value should be rejected");
+        assert!(err.contains(field), "expected an error about {field}, got: {err}");
+    }
+
+    // The boundaries themselves are allowed.
+    assert!(with(|c| c.multiplier = 1.0).is_ok());
+    assert!(with(|c| c.jitter_factor = 0.0).is_ok());
+    assert!(with(|c| c.jitter_factor = 1.0).is_ok());
+    assert!(with(|c| c.max_delay = c.initial_delay).is_ok());
 }
 
 #[test]

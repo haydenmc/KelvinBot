@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 #[tokio::test]
-async fn test_unknown_service_kind_handling() {
+async fn test_unknown_service_kind_is_rejected() {
     let config_str = r#"
         [services.unknown_service]
         kind = "unknown_type"
@@ -17,16 +17,18 @@ async fn test_unknown_service_kind_handling() {
     let config: Config = toml::from_str(config_str).expect("Failed to parse config");
     let (evt_tx, _evt_rx) = create_event_channel(10);
 
-    let services = instantiate_services_from_config(&config, &evt_tx)
-        .await
-        .expect("Failed to instantiate services");
+    // An unknown service type stops startup rather than being skipped.
+    let err = config.validate().expect_err("validation should reject an unknown kind");
+    assert!(format!("{err:#}").contains("unknown_service"), "got: {err:#}");
 
-    // Unknown service types should be skipped
-    assert_eq!(services.len(), 0);
+    let Err(err) = instantiate_services_from_config(&config, &evt_tx).await else {
+        panic!("instantiation should reject an unknown kind");
+    };
+    assert!(format!("{err:#}").contains("unknown_service"), "got: {err:#}");
 }
 
 #[tokio::test]
-async fn test_configuration_with_mixed_service_types() {
+async fn test_one_unknown_service_rejects_the_whole_configuration() {
     let mut services = HashMap::new();
 
     // Add a valid dummy service
@@ -49,16 +51,12 @@ async fn test_configuration_with_mixed_service_types() {
     };
 
     let (evt_tx, _evt_rx) = create_event_channel(10);
-    let instantiated_services = instantiate_services_from_config(&config, &evt_tx)
-        .await
-        .expect("Failed to instantiate services");
-
-    // Only the valid dummy service should be instantiated
-    assert_eq!(instantiated_services.len(), 1);
-    assert!(
-        instantiated_services
-            .contains_key(&kelvin_bot::core::service::ServiceId("dummy1".to_string()))
-    );
+    // The valid service is not started on its own: a bot missing a configured
+    // service is worse than one that refuses to start.
+    let Err(err) = instantiate_services_from_config(&config, &evt_tx).await else {
+        panic!("instantiation should reject an unknown kind");
+    };
+    assert!(format!("{err:#}").contains("unknown1"), "got: {err:#}");
 }
 
 #[test]
