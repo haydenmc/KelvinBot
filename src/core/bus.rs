@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -128,19 +128,91 @@ impl std::fmt::Debug for Command {
     }
 }
 
-struct ServiceState {
-    backoff: ExponentialBackoff,
-    attempt_count: u32,
-    connection_start: Instant,
-}
+/// A service that stays up at least this long is considered recovered, so its
+/// next failure starts again from the initial backoff delay.
+const STABLE_RUN: Duration = Duration::from_secs(30);
 
-impl ServiceState {
-    fn new(reconnect_config: ReconnectionConfig) -> Self {
-        Self {
-            backoff: ExponentialBackoff::new(reconnect_config),
-            attempt_count: 0,
-            connection_start: Instant::now(),
+/// Runs one service until shutdown, restarting it whenever it stops.
+///
+/// Each service has its own supervisor task, so one service waiting out its
+/// backoff never delays the bus or the other services. The service itself
+/// runs in a nested task so that a panic is caught and treated like any other
+/// exit instead of taking the supervisor down with it.
+async fn supervise_service(
+    service_id: ServiceId,
+    service: Arc<dyn Service>,
+    reconnect_config: ReconnectionConfig,
+    cancel: CancellationToken,
+) {
+    let mut backoff = ExponentialBackoff::new(reconnect_config);
+    let mut attempt_count: u32 = 0;
+
+    loop {
+        let started = Instant::now();
+
+        // A one-task JoinSet rather than a bare `tokio::spawn`: dropping it
+        // aborts the service if this supervisor is itself aborted.
+        let mut run = JoinSet::new();
+        run.spawn({
+            let service = service.clone();
+            let cancel = cancel.clone();
+            async move { service.run(cancel).await }
+        });
+        let outcome = run.join_next().await.expect("exactly one task was spawned");
+
+        if cancel.is_cancelled() {
+            tracing::info!(service_id=%service_id, "service exited during shutdown");
+            return;
         }
+
+        if started.elapsed() > STABLE_RUN && attempt_count > 0 {
+            tracing::info!(
+                service_id=%service_id,
+                total_attempts=%attempt_count,
+                "service recovered after previous failures"
+            );
+            backoff.reset();
+            attempt_count = 0;
+        }
+        attempt_count += 1;
+
+        match outcome {
+            Ok(Ok(())) => tracing::warn!(
+                service_id=%service_id,
+                attempt=%attempt_count,
+                "service exited unexpectedly, will restart"
+            ),
+            Ok(Err(e)) => tracing::error!(
+                service_id=%service_id,
+                attempt=%attempt_count,
+                error=format!("{e:#}"),
+                "service failed, will restart"
+            ),
+            Err(e) => tracing::error!(
+                service_id=%service_id,
+                attempt=%attempt_count,
+                error=%e,
+                "service panicked, will restart"
+            ),
+        }
+
+        let delay = backoff.next_delay();
+        tracing::info!(
+            service_id=%service_id,
+            attempt=%attempt_count,
+            delay_secs=%delay.as_secs(),
+            "waiting before restart"
+        );
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(service_id=%service_id, "cancellation during backoff, not restarting");
+                return;
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+
+        tracing::info!(service_id=%service_id, "restarting service");
     }
 }
 
@@ -156,8 +228,8 @@ pub struct Bus {
     // Per-service middleware pipelines
     service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
 
-    // Per-service state tracking for reconnection
-    service_state: HashMap<ServiceId, ServiceState>,
+    // Backoff settings applied to each service's restarts
+    reconnect_config: ReconnectionConfig,
 }
 
 impl Bus {
@@ -168,34 +240,21 @@ impl Bus {
         service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
         reconnect_config: ReconnectionConfig,
     ) -> Self {
-        // Initialize state for each service
-        let service_state = services
-            .keys()
-            .map(|id| (id.clone(), ServiceState::new(reconnect_config.clone())))
-            .collect();
-
-        Self { evt_rx, cmd_rx, services, service_middlewares, service_state }
+        Self { evt_rx, cmd_rx, services, service_middlewares, reconnect_config }
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) -> anyhow::Result<()> {
         // Start all services with supervision
         info!("starting services with supervision...");
-        let mut service_tasks: JoinSet<(ServiceId, anyhow::Result<()>)> = JoinSet::new();
+        let mut service_tasks: JoinSet<()> = JoinSet::new();
 
         for (service_id, service) in &self.services {
-            let child_token = cancel.child_token();
-            let service_clone = service.clone();
-            let id = service_id.clone();
-
-            service_tasks.spawn(async move {
-                let result = service_clone.run(child_token).await;
-                (id, result)
-            });
-
-            // Track connection start time
-            if let Some(state) = self.service_state.get_mut(service_id) {
-                state.connection_start = Instant::now();
-            }
+            service_tasks.spawn(supervise_service(
+                service_id.clone(),
+                service.clone(),
+                self.reconnect_config.clone(),
+                cancel.child_token(),
+            ));
         }
 
         // Start all middlewares (collect unique instances across all services)
@@ -227,76 +286,11 @@ impl Bus {
 
         loop {
             tokio::select! {
-                // Wait for any service task to complete
-                Some(Ok((completed_service_id, _result))) = service_tasks.join_next() => {
-                    if cancel.is_cancelled() {
-                        // Graceful shutdown - don't restart
-                        tracing::info!(service_id=%completed_service_id, "service exited during shutdown");
-                    } else {
-                        // Service exited unexpectedly - apply backoff and restart
-                        let state = self.service_state.get_mut(&completed_service_id);
-
-                        if let Some(state) = state {
-                            // If service ran successfully for >30s, consider it a success and reset backoff
-                            let was_long_running = state.connection_start.elapsed().as_secs() > 30;
-
-                            if was_long_running && state.attempt_count > 0 {
-                                // Service recovered - reset backoff and attempts
-                                tracing::info!(
-                                    service_id=%completed_service_id,
-                                    total_attempts=%state.attempt_count,
-                                    "service recovered after previous failures"
-                                );
-                                state.backoff.reset();
-                                state.attempt_count = 0;
-                            }
-
-                            // Increment attempt counter
-                            state.attempt_count += 1;
-
-                            tracing::warn!(
-                                service_id=%completed_service_id,
-                                attempt=%state.attempt_count,
-                                "service exited unexpectedly, will reconnect"
-                            );
-
-                            // Calculate backoff delay
-                            let delay = state.backoff.next_delay();
-
-                            tracing::info!(
-                                service_id=%completed_service_id,
-                                attempt=%state.attempt_count,
-                                delay_secs=%delay.as_secs(),
-                                "waiting before restart"
-                            );
-
-                            // Sleep with cancellation support
-                            tokio::select! {
-                                _ = cancel.cancelled() => {
-                                    tracing::info!(service_id=%completed_service_id, "cancellation during backoff, not restarting");
-                                }
-                                _ = tokio::time::sleep(delay) => {
-                                    // Restart the service
-                                    if let Some(service) = self.services.get(&completed_service_id) {
-                                        let child_token = cancel.child_token();
-                                        let service_clone = service.clone();
-                                        let id = completed_service_id.clone();
-
-                                        service_tasks.spawn(async move {
-                                            let result = service_clone.run(child_token).await;
-                                            (id, result)
-                                        });
-
-                                        // Update connection start time
-                                        if let Some(state) = self.service_state.get_mut(&completed_service_id) {
-                                            state.connection_start = Instant::now();
-                                        }
-
-                                        tracing::info!(service_id=%completed_service_id, "service restarted");
-                                    }
-                                }
-                            }
-                        }
+                // Supervisors restart their own service and only return on
+                // shutdown, so anything else here means one has died.
+                Some(joined) = service_tasks.join_next() => {
+                    if let Err(e) = joined {
+                        tracing::error!(error=%e, "service supervisor panicked or was aborted; its service will not be restarted");
                     }
                 }
                 // Middleware tasks are expected to run until shutdown. Log
