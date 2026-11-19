@@ -260,6 +260,46 @@ async fn dispatch_commands(
     }
 }
 
+/// How many events may wait for one middleware before new ones are dropped.
+const MIDDLEWARE_INBOX_CAPACITY: usize = 1024;
+
+/// Feeds one middleware its events, one at a time and in arrival order.
+///
+/// Each middleware has its own inbox and delivery task, so a middleware that
+/// is slow, or whose `on_event` fails, affects neither the bus nor the other
+/// middlewares. A failure is logged and the next event is delivered as usual.
+async fn deliver_events(
+    middleware: Arc<dyn Middleware>,
+    mut inbox: Receiver<Arc<Event>>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let event = tokio::select! {
+            _ = cancel.cancelled() => return,
+            maybe_event = inbox.recv() => match maybe_event {
+                Some(event) => event,
+                None => return,
+            },
+        };
+
+        if let Err(e) = middleware.on_event(&event) {
+            tracing::error!(
+                middleware=%middleware.name(),
+                service_id=%event.service_id,
+                error=format!("{e:#}"),
+                "middleware failed to handle event"
+            );
+        }
+    }
+}
+
+/// A middleware's inbox, as seen from the bus.
+#[derive(Clone)]
+struct Inbox {
+    middleware: &'static str,
+    events: Sender<Arc<Event>>,
+}
+
 /// Checks the exit of a task that is meant to run until shutdown.
 ///
 /// Returns an error if it panicked, or ended while the bus was still running.
@@ -287,6 +327,9 @@ pub struct Bus {
     // Per-service middleware pipelines
     service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
 
+    // Middlewares to start whether or not any service routes events to them
+    standalone_middlewares: Vec<Arc<dyn Middleware>>,
+
     // Backoff settings applied to each service's restarts
     reconnect_config: ReconnectionConfig,
 }
@@ -299,7 +342,26 @@ impl Bus {
         service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>>,
         reconnect_config: ReconnectionConfig,
     ) -> Self {
-        Self { evt_rx, cmd_rx, services, service_middlewares, reconnect_config }
+        Self {
+            evt_rx,
+            cmd_rx,
+            services,
+            service_middlewares,
+            standalone_middlewares: Vec::new(),
+            reconnect_config,
+        }
+    }
+
+    /// Also starts these middlewares, even if no service's pipeline includes
+    /// them. A middleware that only works on its own schedule or connection
+    /// (and sends commands) needs no events, but still needs to be run.
+    /// Instances already in a pipeline are started once, not twice.
+    pub fn with_middlewares(
+        mut self,
+        middlewares: impl IntoIterator<Item = Arc<dyn Middleware>>,
+    ) -> Self {
+        self.standalone_middlewares.extend(middlewares);
+        self
     }
 
     pub async fn run(&mut self, cancel: CancellationToken) -> anyhow::Result<()> {
@@ -331,27 +393,53 @@ impl Bus {
             ));
         }
 
-        // Start all middlewares (collect unique instances across all services)
+        // Run every middleware once, however many pipelines it appears in.
         info!("starting middlewares...");
         let mut middleware_tasks: JoinSet<(&'static str, anyhow::Result<()>)> = JoinSet::new();
-        let mut started_middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
+        let mut running: Vec<&Arc<dyn Middleware>> = Vec::new();
 
-        for pipeline in self.service_middlewares.values() {
+        let all_middlewares =
+            self.service_middlewares.values().flatten().chain(&self.standalone_middlewares);
+        for middleware in all_middlewares {
+            if running.iter().any(|seen| Arc::ptr_eq(seen, middleware)) {
+                continue;
+            }
+            running.push(middleware);
+
+            middleware_tasks.spawn({
+                let middleware = middleware.clone();
+                let cancel = cancel.child_token();
+                async move { (middleware.name(), middleware.run(cancel).await) }
+            });
+        }
+
+        // Give each middleware that appears in a pipeline one inbox and one
+        // delivery task, and record each service's pipeline as the inboxes to
+        // copy its events into.
+        let mut delivery_tasks: JoinSet<()> = JoinSet::new();
+        let mut inboxes: Vec<(&Arc<dyn Middleware>, Inbox)> = Vec::new();
+        let mut pipelines: HashMap<&ServiceId, Vec<Inbox>> = HashMap::new();
+
+        for (service_id, pipeline) in &self.service_middlewares {
+            let pipeline_inboxes = pipelines.entry(service_id).or_default();
             for middleware in pipeline {
-                // Use Arc::ptr_eq to track unique instances
-                let already_started =
-                    started_middlewares.iter().any(|started| Arc::ptr_eq(started, middleware));
-
-                if !already_started {
-                    started_middlewares.push(middleware.clone());
-                    let child_token = cancel.child_token();
-                    let middleware_clone = middleware.clone();
-                    middleware_tasks.spawn(async move {
-                        let name = middleware_clone.name();
-                        let result = middleware_clone.run(child_token).await;
-                        (name, result)
-                    });
-                }
+                let existing = inboxes.iter().find(|(seen, _)| Arc::ptr_eq(seen, middleware));
+                let inbox = match existing {
+                    Some((_, inbox)) => inbox.clone(),
+                    None => {
+                        let (events, inbox_rx) =
+                            tokio::sync::mpsc::channel(MIDDLEWARE_INBOX_CAPACITY);
+                        delivery_tasks.spawn(deliver_events(
+                            middleware.clone(),
+                            inbox_rx,
+                            cancel.child_token(),
+                        ));
+                        let inbox = Inbox { middleware: middleware.name(), events };
+                        inboxes.push((middleware, inbox.clone()));
+                        inbox
+                    }
+                };
+                pipeline_inboxes.push(inbox);
             }
         }
 
@@ -360,15 +448,19 @@ impl Bus {
 
         loop {
             tokio::select! {
-                // Supervisors and dispatchers only return on shutdown. If one
-                // ends any other way its service is no longer restarted or no
-                // longer receives commands, so stop the bus (and with it the
-                // process) rather than carry on half-working.
+                // Supervisors, dispatchers and event delivery tasks only return
+                // on shutdown. If one ends any other way, a service is no
+                // longer restarted or no longer receives commands, or a
+                // middleware no longer receives events, so stop the bus (and
+                // with it the process) rather than carry on half-working.
                 Some(joined) = service_tasks.join_next() => {
                     ensure_stopped_by_shutdown("service supervisor", joined, &cancel)?;
                 }
                 Some(joined) = dispatch_tasks.join_next() => {
                     ensure_stopped_by_shutdown("command dispatcher", joined, &cancel)?;
+                }
+                Some(joined) = delivery_tasks.join_next() => {
+                    ensure_stopped_by_shutdown("middleware event delivery", joined, &cancel)?;
                 }
                 // Middleware tasks are expected to run until shutdown. Log
                 // loudly if one exits early so a silently dead middleware is
@@ -397,13 +489,24 @@ impl Bus {
                     info!("event received");
                     let Some(evt) = maybe_evt else { break };
 
-                    // Get the middleware pipeline for this service
-                    if let Some(pipeline) = self.service_middlewares.get(&evt.service_id) {
-                        for mw in pipeline {
-                            mw.on_event(&evt)?;
-                        }
-                    } else {
+                    // Copy the event into the inbox of each middleware in this
+                    // service's pipeline, in pipeline order and without
+                    // waiting, so a busy middleware can never stall the bus.
+                    let Some(pipeline) = pipelines.get(&evt.service_id) else {
                         tracing::debug!(service_id=%evt.service_id, "no middleware pipeline configured for service");
+                        continue;
+                    };
+                    let evt = Arc::new(evt);
+                    for inbox in pipeline {
+                        match inbox.events.try_send(evt.clone()) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                tracing::error!(middleware=%inbox.middleware, service_id=%evt.service_id, "middleware inbox is full; dropping event");
+                            }
+                            Err(TrySendError::Closed(_)) => {
+                                tracing::error!(middleware=%inbox.middleware, service_id=%evt.service_id, "middleware event delivery has stopped; dropping event");
+                            }
+                        }
                     }
                 }
                 maybe_cmd = self.cmd_rx.recv() => {
