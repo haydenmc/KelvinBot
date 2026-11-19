@@ -1,6 +1,6 @@
 use crate::core::{
     bus::Command,
-    config::ExponentialBackoff,
+    config::{ExponentialBackoff, ReconnectionConfig},
     event::Event,
     middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
@@ -8,17 +8,18 @@ use crate::core::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc::Sender};
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Bytes,
-    tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
+    tungstenite::Error as WsError, tungstenite::client::IntoClientRequest,
+    tungstenite::protocol::Message,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +29,18 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Maximum time to wait for any frame (including pong replies) before the
 /// connection is considered dead and torn down for reconnection.
 const READ_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Maximum time to wait for the TCP, TLS and WebSocket handshakes together.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum time to spend sending a close frame on shutdown.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A connection that stays up at least this long is considered healthy, so the
+/// next reconnection starts again from the initial backoff delay. Longer than
+/// `READ_TIMEOUT`, so a server that accepts connections but never speaks does
+/// not count.
+const STABLE_CONNECTION: Duration = Duration::from_secs(120);
 
 /// TCP keepalive settings applied to the underlying socket. These keep NAT and
 /// conntrack entries fresh and let the kernel detect a dead peer even if no
@@ -73,11 +86,40 @@ impl StreamState {
     }
 }
 
+/// Decides how long to wait before each reconnection attempt.
+struct Reconnect {
+    backoff: ExponentialBackoff,
+    /// Consecutive attempts that did not produce a stable connection.
+    failures: u32,
+}
+
+impl Reconnect {
+    fn new(config: ReconnectionConfig) -> Self {
+        Self { backoff: ExponentialBackoff::new(config), failures: 0 }
+    }
+
+    /// The delay to wait after a connection attempt ends. `connected_for` is
+    /// how long the connection was up, or `None` if it was never established.
+    ///
+    /// The delay grows while attempts keep failing or connections keep
+    /// dropping early, and starts over once a connection has proved stable,
+    /// however it ended.
+    fn delay_after(&mut self, connected_for: Option<Duration>) -> Duration {
+        if connected_for.is_some_and(|up| up >= STABLE_CONNECTION) {
+            self.backoff.reset();
+            self.failures = 0;
+        }
+        self.failures += 1;
+        self.backoff.next_delay()
+    }
+}
+
 pub struct EzStreamAnnounce {
     cmd_tx: Sender<Command>,
     websocket_url: String,
     stream_url_template: String,
     start_message_template: String,
+    reconnection: ReconnectionConfig,
     end_message_template: String,
     destinations: Vec<DestinationConfig>,
     state: Arc<Mutex<StreamState>>,
@@ -86,6 +128,7 @@ pub struct EzStreamAnnounce {
 impl EzStreamAnnounce {
     pub fn new(
         ctx: MiddlewareContext,
+        reconnection: ReconnectionConfig,
         websocket_url: String,
         stream_url_template: String,
         start_message_template: String,
@@ -94,6 +137,7 @@ impl EzStreamAnnounce {
     ) -> Self {
         Self {
             cmd_tx: ctx.cmd_tx,
+            reconnection,
             websocket_url,
             stream_url_template,
             start_message_template,
@@ -273,9 +317,7 @@ impl EzStreamAnnounce {
 
     // Main WebSocket connection loop with reconnection
     async fn websocket_loop(&self, cancel: CancellationToken) -> Result<()> {
-        let reconnect_config = crate::core::config::ReconnectionConfig::default();
-        let mut backoff = ExponentialBackoff::new(reconnect_config);
-        let mut attempt = 0u32;
+        let mut reconnect = Reconnect::new(self.reconnection.clone());
 
         loop {
             if cancel.is_cancelled() {
@@ -283,24 +325,29 @@ impl EzStreamAnnounce {
                 return Ok(());
             }
 
-            attempt += 1;
             tracing::info!(
-                attempt=%attempt,
+                failures=%reconnect.failures,
                 url=%self.websocket_url,
                 "connecting to EzStream WebSocket"
             );
 
-            match self.connect_and_process(cancel.clone()).await {
-                Ok(_) => {
-                    tracing::info!("EzStream WebSocket connection closed gracefully");
-                    // If connection lasted long enough, reset backoff
-                    if attempt > 1 {
-                        backoff.reset();
-                        attempt = 0;
+            // How long the connection was up, if it was established at all.
+            let mut connected_for = None;
+            match self.connect(&cancel).await {
+                Ok(Some(ws_stream)) => {
+                    let connected_at = Instant::now();
+                    match self.process_connection(ws_stream, cancel.clone()).await {
+                        Ok(()) => tracing::info!("EzStream WebSocket connection closed"),
+                        Err(e) => {
+                            tracing::error!(error=%format!("{e:#}"), "EzStream WebSocket connection lost")
+                        }
                     }
+                    connected_for = Some(connected_at.elapsed());
                 }
+                // Cancelled while connecting.
+                Ok(None) => return Ok(()),
                 Err(e) => {
-                    tracing::error!(error=%e, "EzStream WebSocket connection failed");
+                    tracing::error!(error=%format!("{e:#}"), "EzStream WebSocket connection failed")
                 }
             }
 
@@ -315,11 +362,10 @@ impl EzStreamAnnounce {
                 return Ok(());
             }
 
-            // Calculate backoff delay
-            let delay = backoff.next_delay();
+            let delay = reconnect.delay_after(connected_for);
             tracing::info!(
-                attempt=%attempt,
-                delay_secs=%delay.as_secs(),
+                failures=%reconnect.failures,
+                delay_secs=%delay.as_secs_f64(),
                 "waiting before reconnection attempt"
             );
 
@@ -336,8 +382,11 @@ impl EzStreamAnnounce {
         }
     }
 
-    // Connect to WebSocket and process messages
-    async fn connect_and_process(&self, cancel: CancellationToken) -> Result<()> {
+    /// Opens the WebSocket connection. Returns `None` if cancelled first.
+    async fn connect(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<Option<WebSocketStream<MaybeTlsStream<TcpStream>>>> {
         // Build WebSocket request with subprotocol
         // We need to create a properly formed client request
         let mut request = self
@@ -349,9 +398,20 @@ impl EzStreamAnnounce {
         // Add the subprotocol header
         request.headers_mut().insert("Sec-WebSocket-Protocol", "stream-updates".parse().unwrap());
 
-        let (ws_stream, response) = connect_async(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("WebSocket connection failed: {}", e))?;
+        // Bounded, because a server that accepts the TCP connection and then
+        // never completes the handshake would otherwise hold us here forever.
+        let connecting = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request));
+        let (ws_stream, response) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            connected = connecting => connected
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "WebSocket connection not established within {}s",
+                        CONNECT_TIMEOUT.as_secs()
+                    )
+                })?
+                .context("WebSocket connection failed")?,
+        };
 
         tracing::info!(
             status = ?response.status(),
@@ -362,6 +422,15 @@ impl EzStreamAnnounce {
             tracing::warn!(error=%e, "failed to enable TCP keepalive on WebSocket socket");
         }
 
+        Ok(Some(ws_stream))
+    }
+
+    /// Processes one established connection until it closes, fails, goes
+    /// silent for `READ_TIMEOUT`, or `cancel` fires.
+    async fn process_connection<S>(&self, ws_stream: S, cancel: CancellationToken) -> Result<()>
+    where
+        S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
+    {
         let (mut write, mut read) = ws_stream.split();
 
         let mut ping_interval = tokio::time::interval(PING_INTERVAL);
@@ -370,30 +439,39 @@ impl EzStreamAnnounce {
         // is sent after a full interval.
         ping_interval.tick().await;
 
+        // When the connection is given up on. Pushed back by every frame that
+        // arrives, and by nothing else: it must outlive the iterations of this
+        // loop, or the ping tick (which is more frequent) would keep restarting
+        // the wait and it could never expire.
+        let mut read_deadline = Instant::now() + READ_TIMEOUT;
+        let silent = || {
+            anyhow::anyhow!(
+                "no WebSocket frames received in {}s; assuming connection is dead",
+                READ_TIMEOUT.as_secs()
+            )
+        };
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!("closing WebSocket connection");
-                    let _ = write.send(Message::Close(None)).await;
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.send(Message::Close(None))).await;
                     break;
                 }
+                _ = tokio::time::sleep_until(read_deadline) => return Err(silent()),
                 _ = ping_interval.tick() => {
                     tracing::debug!("sending ping");
-                    write
-                        .send(Message::Ping(Bytes::new()))
+                    // A dead peer can also stop accepting writes, so the send
+                    // is held to the same deadline.
+                    tokio::time::timeout_at(read_deadline, write.send(Message::Ping(Bytes::new())))
                         .await
+                        .map_err(|_| silent())?
                         .context("failed to send WebSocket ping")?;
                 }
-                msg = tokio::time::timeout(READ_TIMEOUT, read.next()) => {
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            anyhow::bail!(
-                                "no WebSocket frames received in {}s; assuming connection is dead",
-                                READ_TIMEOUT.as_secs()
-                            );
-                        }
-                    };
+                msg = read.next() => {
+                    if matches!(msg, Some(Ok(_))) {
+                        read_deadline = Instant::now() + READ_TIMEOUT;
+                    }
 
                     match msg {
                         Some(Ok(Message::Text(text))) => {
@@ -404,6 +482,7 @@ impl EzStreamAnnounce {
                                     // Spawn task to handle notification asynchronously
                                     let self_clone = Self {
                                         cmd_tx: self.cmd_tx.clone(),
+                                        reconnection: self.reconnection.clone(),
                                         websocket_url: self.websocket_url.clone(),
                                         stream_url_template: self.stream_url_template.clone(),
                                         start_message_template: self.start_message_template.clone(),
@@ -494,5 +573,144 @@ impl Middleware for EzStreamAnnounce {
     async fn on_event(&self, _event: &Event) -> Result<()> {
         // This middleware doesn't react to events, only to WebSocket notifications
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::PersistentStore;
+    use tokio::io::DuplexStream;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    fn middleware() -> (EzStreamAnnounce, mpsc::Receiver<Command>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(16);
+        let ctx = MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) };
+        let middleware = EzStreamAnnounce::new(
+            ctx,
+            ReconnectionConfig::default(),
+            "ws://unused".to_string(),
+            "https://example.com/{{name}}".to_string(),
+            "{{name}} is live".to_string(),
+            "{{name}} was live for {{duration}}".to_string(),
+            Vec::new(),
+        );
+        (middleware, cmd_rx)
+    }
+
+    /// Both ends of a WebSocket over an in-memory pipe, with no handshake.
+    async fn websocket_pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        (
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+            WebSocketStream::from_raw_socket(server, Role::Server, None).await,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_connection_is_given_up_on_after_the_read_timeout() {
+        let (middleware, _commands) = middleware();
+        // The server end stays open but is never read, so no pong comes back.
+        let (client, _server) = websocket_pair().await;
+
+        let started = Instant::now();
+        let result = middleware.process_connection(client, CancellationToken::new()).await;
+
+        let err = result.expect_err("a silent connection should be reported as dead");
+        assert!(format!("{err:#}").contains("no WebSocket frames received"), "got: {err:#}");
+        assert_eq!(started.elapsed(), READ_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_that_answers_pings_stays_up() {
+        let (middleware, _commands) = middleware();
+        let (client, mut server) = websocket_pair().await;
+        // Reading is enough for the server end to answer pings with pongs.
+        tokio::spawn(async move { while server.next().await.is_some() {} });
+
+        let cancel = CancellationToken::new();
+        let stop_later = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::time::sleep(READ_TIMEOUT * 10).await;
+                cancel.cancel();
+            }
+        });
+
+        let started = Instant::now();
+        let result = middleware.process_connection(client, cancel).await;
+
+        result.expect("the connection should last until cancelled");
+        assert!(started.elapsed() >= READ_TIMEOUT * 10, "ended after {:?}", started.elapsed());
+        stop_later.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_is_measured_from_the_last_frame() {
+        let (middleware, _commands) = middleware();
+        let (client, mut server) = websocket_pair().await;
+
+        // One frame part-way through, then nothing (and no pongs, since the
+        // server end is never read).
+        let quiet_after = Duration::from_secs(50);
+        let server_task = tokio::spawn(async move {
+            tokio::time::sleep(quiet_after).await;
+            server.send(Message::Text("not a notification".into())).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let started = Instant::now();
+        let result = middleware.process_connection(client, CancellationToken::new()).await;
+
+        assert!(result.is_err());
+        assert_eq!(started.elapsed(), quiet_after + READ_TIMEOUT);
+        server_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_from_the_server_ends_the_connection_cleanly() {
+        let (middleware, _commands) = middleware();
+        let (client, mut server) = websocket_pair().await;
+        server.send(Message::Close(None)).await.unwrap();
+
+        let result = middleware.process_connection(client, CancellationToken::new()).await;
+
+        result.expect("a server close is not an error");
+    }
+
+    fn steady_backoff() -> Reconnect {
+        Reconnect::new(ReconnectionConfig {
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(60),
+            multiplier: 2.0,
+            jitter_factor: 0.0,
+        })
+    }
+
+    #[test]
+    fn delay_grows_while_connections_fail_or_drop_early() {
+        let mut reconnect = steady_backoff();
+
+        assert_eq!(reconnect.delay_after(None), Duration::from_secs(1));
+        assert_eq!(reconnect.delay_after(None), Duration::from_secs(2));
+        // Connected, but dropped again straight away: still backing off.
+        assert_eq!(reconnect.delay_after(Some(Duration::from_secs(5))), Duration::from_secs(4));
+        // Accepted and then silent until the read timeout: likewise.
+        assert_eq!(reconnect.delay_after(Some(READ_TIMEOUT)), Duration::from_secs(8));
+        assert_eq!(reconnect.failures, 4);
+    }
+
+    #[test]
+    fn delay_starts_over_after_a_stable_connection() {
+        let mut reconnect = steady_backoff();
+        for _ in 0..5 {
+            reconnect.delay_after(None);
+        }
+
+        // However the stable connection ended, the next wait is the initial one.
+        assert_eq!(reconnect.delay_after(Some(STABLE_CONNECTION)), Duration::from_secs(1));
+        assert_eq!(reconnect.failures, 1);
+        assert_eq!(reconnect.delay_after(None), Duration::from_secs(2));
     }
 }
