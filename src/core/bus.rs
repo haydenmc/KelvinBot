@@ -36,6 +36,8 @@ pub enum Command {
     },
     EditMessage {
         service_id: ServiceId,
+        /// The room the message was sent to.
+        room_id: String,
         message_id: String,
         new_body: String,
         new_markdown_body: Option<String>,
@@ -119,9 +121,16 @@ impl std::fmt::Debug for Command {
                 .field("markdown_body", &markdown_body.as_deref().map(Redacted))
                 .field("response_tx", &"<Option<oneshot::Sender>>")
                 .finish(),
-            Command::EditMessage { service_id, message_id, new_body, new_markdown_body } => f
+            Command::EditMessage {
+                service_id,
+                room_id,
+                message_id,
+                new_body,
+                new_markdown_body,
+            } => f
                 .debug_struct("EditMessage")
                 .field("service_id", service_id)
+                .field("room_id", room_id)
                 .field("message_id", message_id)
                 .field("new_body", &Redacted(new_body))
                 .field("new_markdown_body", &new_markdown_body.as_deref().map(Redacted))

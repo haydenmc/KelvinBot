@@ -913,8 +913,17 @@ impl Service for MatrixService {
                     let _ = tx.send(result);
                 }
             }
-            Command::EditMessage { message_id, new_body, new_markdown_body, .. } => {
-                info!(service=%self.id, message_id=%message_id, "editing message");
+            Command::EditMessage { room_id, message_id, new_body, new_markdown_body, .. } => {
+                info!(service=%self.id, room_id=%room_id, message_id=%message_id, "editing message");
+
+                // Parse the room ID
+                let room_id = match RoomId::parse(&room_id) {
+                    Ok(rid) => rid,
+                    Err(e) => {
+                        error!(room_id=%room_id, error=%e, "invalid room ID");
+                        return Ok(());
+                    }
+                };
 
                 // Parse the event ID
                 use matrix_sdk::ruma::EventId;
@@ -926,21 +935,7 @@ impl Service for MatrixService {
                     }
                 };
 
-                // Find the room containing this event
-                // We need to search through all joined rooms to find which one contains this event
-                let rooms = self.client.rooms();
-                let mut found_room = None;
-                for room in rooms {
-                    if room.state() == RoomState::Joined {
-                        // Try to get the event from this room
-                        if room.event(&event_id, None).await.is_ok() {
-                            found_room = Some(room);
-                            break;
-                        }
-                    }
-                }
-
-                if let Some(room) = found_room {
+                if let Some(room) = self.client.get_room(&room_id) {
                     // Create the new message content
                     let new_content = if let Some(markdown) = new_markdown_body {
                         RoomMessageEventContent::new(MessageType::Text(
@@ -966,7 +961,7 @@ impl Service for MatrixService {
                         debug!("message edited successfully");
                     }
                 } else {
-                    warn!(message_id=%message_id, "could not find room containing message");
+                    warn!(room_id=%room_id, message_id=%message_id, "cannot edit message: room not found");
                 }
             }
             Command::SendRoomImage { .. } => {
