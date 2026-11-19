@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use tokio::task::JoinHandle;
@@ -9,11 +10,26 @@ use tracing_subscriber::{EnvFilter, fmt};
 use kelvin_bot::core::{bus, config::load_from_env, middleware, service};
 
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> ExitCode {
     init_tracing();
 
     info!("starting...");
 
+    // Report failures once, through the logger, rather than returning them
+    // from `main` (which would print them a second time in a different format).
+    match run().await {
+        Ok(()) => {
+            info!("goodbye");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            error!(error = format!("{e:#}"), "exiting with failure");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     info!("loading configuration...");
     let cfg = load_from_env()?;
 
@@ -53,13 +69,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // Register signal handlers before waiting so a failure surfaces at startup.
     let shutdown = shutdown_signal()?;
 
-    if let Err(e) = run_until_shutdown(bus_task, shutdown, cancel_all).await {
-        error!(error = format!("{e:#}"), "exiting with failure");
-        return Err(e);
-    }
-
-    info!("goodbye");
-    Ok(())
+    run_until_shutdown(bus_task, shutdown, cancel_all).await
 }
 
 /// Waits for either a shutdown signal or the bus task ending.
