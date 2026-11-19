@@ -27,6 +27,7 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     procps \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
@@ -55,7 +56,9 @@ USER kelvinbot
 # Set working directory
 WORKDIR /app
 
-# Set default data directory
+# Default data directory: the volume declared above. Mount persistent storage
+# at /data, and do not override this with a relative path (it would resolve
+# under /app, outside the volume).
 ENV KELVIN__DATA_DIRECTORY=/data
 
 # Expose any ports if needed (currently none)
