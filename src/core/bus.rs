@@ -170,7 +170,10 @@ async fn supervise_service(
         let mut run = JoinSet::new();
         run.spawn({
             let service = service.clone();
-            let cancel = cancel.clone();
+            // A child token, so a service that cancels its own token (to stop
+            // its helper tasks, say) cannot stop the other services or make
+            // this supervisor think the bus is shutting down.
+            let cancel = cancel.child_token();
             async move { service.run(cancel).await }
         });
         let outcome = run.join_next().await.expect("exactly one task was spawned");

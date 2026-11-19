@@ -5,6 +5,7 @@ use matrix_sdk::{
     Client, Room, RoomMemberships, RoomState,
     config::SyncSettings,
     encryption::{self, EncryptionSettings},
+    event_handler::EventHandlerDropGuard,
     ruma::{
         RoomId, UserId,
         events::{
@@ -322,9 +323,17 @@ impl MatrixService {
         }
     }
 
-    async fn setup_event_handlers(&self) -> anyhow::Result<()> {
+    /// Registers the handlers that turn Matrix events into bus events.
+    ///
+    /// The handlers stay registered only while the returned guards are alive.
+    /// `run` holds them for its own duration, so a restarted `run` registers a
+    /// fresh set instead of adding a second one that would emit every event
+    /// twice.
+    fn setup_event_handlers(&self) -> Vec<EventHandlerDropGuard> {
+        let mut handles = Vec::new();
+
         // Handle room invites
-        self.client.add_event_handler(
+        handles.push(self.client.add_event_handler(
             |event: StrippedRoomMemberEvent, room: Room, client: Client| async move {
                 info!("Received room invite for room: {}", room.room_id());
                 if let Some(user_id) = client.user_id() {
@@ -369,32 +378,34 @@ impl MatrixService {
                     warn!("Client user_id is None, cannot process invite");
                 }
             },
-        );
+        ));
         // Handle room membership changes to detect when bot becomes the only member
         let bot_user_id =
             self.client.user_id().expect("client should have user_id after login").to_owned();
-        self.client.add_event_handler(|_event: SyncRoomMemberEvent, room: Room| async move {
-            // Check if the bot is now the only member in the room
-            if room.state() == RoomState::Joined
-                && let Ok(members) = room.members(RoomMemberships::ACTIVE).await
-                && members.len() == 1
-                && members.iter().any(|m| m.user_id() == bot_user_id)
-            {
-                info!(room_id=%room.room_id(), "detected bot as only member, leaving room");
-                if let Err(e) = room.leave().await {
-                    error!(room_id=%room.room_id(), error=%e, "failed to leave empty room");
-                } else {
-                    debug!(room_id=%room.room_id(), "successfully left empty room");
+        handles.push(self.client.add_event_handler(
+            |_event: SyncRoomMemberEvent, room: Room| async move {
+                // Check if the bot is now the only member in the room
+                if room.state() == RoomState::Joined
+                    && let Ok(members) = room.members(RoomMemberships::ACTIVE).await
+                    && members.len() == 1
+                    && members.iter().any(|m| m.user_id() == bot_user_id)
+                {
+                    info!(room_id=%room.room_id(), "detected bot as only member, leaving room");
+                    if let Err(e) = room.leave().await {
+                        error!(room_id=%room.room_id(), error=%e, "failed to leave empty room");
+                    } else {
+                        debug!(room_id=%room.room_id(), "successfully left empty room");
+                    }
                 }
-            }
-        });
+            },
+        ));
         // Handle room messages
         let service_id = self.id.clone();
         let evt_tx = self.evt_tx.clone();
         let bot_user_id_for_handler =
             self.client.user_id().expect("client should have user_id after login").to_owned();
         let max_image_size_bytes = self.max_image_size_bytes;
-        self.client.add_event_handler(
+        handles.push(self.client.add_event_handler(
             move |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| {
                 let service_id = service_id.clone();
                 let evt_tx = evt_tx.clone();
@@ -535,7 +546,7 @@ impl MatrixService {
                     }
                 }
             },
-        );
+        ));
 
         // Handle reactions
         let service_id = self.id.clone();
@@ -543,55 +554,60 @@ impl MatrixService {
         let reaction_registry = self.reaction_registry.clone();
         let bot_user_id_for_reactions =
             self.client.user_id().expect("client should have user_id after login").to_owned();
-        self.client.add_event_handler(move |event: OriginalSyncReactionEvent, room: Room| {
-            let service_id = service_id.clone();
-            let evt_tx = evt_tx.clone();
-            let reaction_registry = reaction_registry.clone();
-            let bot_user_id = bot_user_id_for_reactions.clone();
-            async move {
-                if room.state() != RoomState::Joined {
-                    return;
+        handles.push(self.client.add_event_handler(
+            move |event: OriginalSyncReactionEvent, room: Room| {
+                let service_id = service_id.clone();
+                let evt_tx = evt_tx.clone();
+                let reaction_registry = reaction_registry.clone();
+                let bot_user_id = bot_user_id_for_reactions.clone();
+                async move {
+                    if room.state() != RoomState::Joined {
+                        return;
+                    }
+
+                    let reaction_event_id = event.event_id.to_string();
+                    let target_event_id = event.content.relates_to.event_id.to_string();
+                    let key = event.content.relates_to.key.clone();
+                    let sender_id = event.sender.to_string();
+                    let is_self = event.sender == bot_user_id;
+
+                    // Store reaction info for later lookup on redaction
+                    {
+                        let mut registry = reaction_registry.lock().await;
+                        registry.insert(
+                            reaction_event_id.clone(),
+                            ReactionInfo {
+                                target_event_id: target_event_id.clone(),
+                                key: key.clone(),
+                            },
+                        );
+                    }
+
+                    // Get sender display name
+                    let sender_display_name = room
+                        .get_member(&event.sender)
+                        .await
+                        .ok()
+                        .and_then(|m| m)
+                        .and_then(|m| m.display_name().map(|s| s.to_string()));
+
+                    let evt = Event {
+                        service_id,
+                        kind: EventKind::ReactionAdded {
+                            room_id: room.room_id().to_string(),
+                            event_id: reaction_event_id,
+                            target_event_id,
+                            key,
+                            sender_id,
+                            sender_display_name,
+                            is_self,
+                        },
+                    };
+
+                    let _ = evt_tx.send(evt).await;
                 }
-
-                let reaction_event_id = event.event_id.to_string();
-                let target_event_id = event.content.relates_to.event_id.to_string();
-                let key = event.content.relates_to.key.clone();
-                let sender_id = event.sender.to_string();
-                let is_self = event.sender == bot_user_id;
-
-                // Store reaction info for later lookup on redaction
-                {
-                    let mut registry = reaction_registry.lock().await;
-                    registry.insert(
-                        reaction_event_id.clone(),
-                        ReactionInfo { target_event_id: target_event_id.clone(), key: key.clone() },
-                    );
-                }
-
-                // Get sender display name
-                let sender_display_name = room
-                    .get_member(&event.sender)
-                    .await
-                    .ok()
-                    .and_then(|m| m)
-                    .and_then(|m| m.display_name().map(|s| s.to_string()));
-
-                let evt = Event {
-                    service_id,
-                    kind: EventKind::ReactionAdded {
-                        room_id: room.room_id().to_string(),
-                        event_id: reaction_event_id,
-                        target_event_id,
-                        key,
-                        sender_id,
-                        sender_display_name,
-                        is_self,
-                    },
-                };
-
-                let _ = evt_tx.send(evt).await;
-            }
-        });
+            },
+        ));
 
         // Handle redactions (for reaction removal)
         let service_id = self.id.clone();
@@ -599,50 +615,52 @@ impl MatrixService {
         let reaction_registry = self.reaction_registry.clone();
         let bot_user_id_for_redactions =
             self.client.user_id().expect("client should have user_id after login").to_owned();
-        self.client.add_event_handler(move |event: OriginalSyncRoomRedactionEvent, room: Room| {
-            let service_id = service_id.clone();
-            let evt_tx = evt_tx.clone();
-            let reaction_registry = reaction_registry.clone();
-            let bot_user_id = bot_user_id_for_redactions.clone();
-            async move {
-                if room.state() != RoomState::Joined {
-                    return;
-                }
+        handles.push(self.client.add_event_handler(
+            move |event: OriginalSyncRoomRedactionEvent, room: Room| {
+                let service_id = service_id.clone();
+                let evt_tx = evt_tx.clone();
+                let reaction_registry = reaction_registry.clone();
+                let bot_user_id = bot_user_id_for_redactions.clone();
+                async move {
+                    if room.state() != RoomState::Joined {
+                        return;
+                    }
 
-                // The redacts field is Option in room version 11+
-                let Some(redacted_event_id) = event.redacts else {
-                    return;
-                };
-                let redacted_event_id = redacted_event_id.to_string();
-                let sender_id = event.sender.to_string();
-                let is_self = event.sender == bot_user_id;
+                    // The redacts field is Option in room version 11+
+                    let Some(redacted_event_id) = event.redacts else {
+                        return;
+                    };
+                    let redacted_event_id = redacted_event_id.to_string();
+                    let sender_id = event.sender.to_string();
+                    let is_self = event.sender == bot_user_id;
 
-                // Check if this redaction is for a reaction we tracked
-                let reaction_info = {
-                    let mut registry = reaction_registry.lock().await;
-                    registry.remove(&redacted_event_id)
-                };
-
-                // Only emit ReactionRemoved if we found a tracked reaction
-                if let Some(info) = reaction_info {
-                    let evt = Event {
-                        service_id,
-                        kind: EventKind::ReactionRemoved {
-                            room_id: room.room_id().to_string(),
-                            event_id: redacted_event_id,
-                            target_event_id: Some(info.target_event_id),
-                            key: Some(info.key),
-                            sender_id,
-                            is_self,
-                        },
+                    // Check if this redaction is for a reaction we tracked
+                    let reaction_info = {
+                        let mut registry = reaction_registry.lock().await;
+                        registry.remove(&redacted_event_id)
                     };
 
-                    let _ = evt_tx.send(evt).await;
-                }
-            }
-        });
+                    // Only emit ReactionRemoved if we found a tracked reaction
+                    if let Some(info) = reaction_info {
+                        let evt = Event {
+                            service_id,
+                            kind: EventKind::ReactionRemoved {
+                                room_id: room.room_id().to_string(),
+                                event_id: redacted_event_id,
+                                target_event_id: Some(info.target_event_id),
+                                key: Some(info.key),
+                                sender_id,
+                                is_self,
+                            },
+                        };
 
-        Ok(())
+                        let _ = evt_tx.send(evt).await;
+                    }
+                }
+            },
+        ));
+
+        handles.into_iter().map(|handle| self.client.event_handler_drop_guard(handle)).collect()
     }
 }
 #[async_trait::async_trait]
@@ -651,21 +669,26 @@ impl Service for MatrixService {
         info!(service_id=%self.id, homeserver_url=%self.client.homeserver(), user_id=%self.user_id,
             "starting matrix service");
 
-        // Attempt to authenticate
-        match self
-            .client
-            .matrix_auth()
-            .login_username(self.user_id.to_string(), self.password.expose_secret())
-            .device_id(&self.device_id)
-            .send()
-            .await
-        {
-            Ok(_) => {
-                info!("login successful");
-            }
-            Err(e) => {
-                error!(error=%e, "login error");
-                bail!("login error")
+        // Authenticate, unless an earlier `run` on this client already did: the
+        // session outlives `run`, and logging in twice on one client panics.
+        if self.client.matrix_auth().logged_in() {
+            info!("already logged in; reusing the existing session");
+        } else {
+            match self
+                .client
+                .matrix_auth()
+                .login_username(self.user_id.to_string(), self.password.expose_secret())
+                .device_id(&self.device_id)
+                .send()
+                .await
+            {
+                Ok(_) => {
+                    info!("login successful");
+                }
+                Err(e) => {
+                    error!(error=%e, "login error");
+                    bail!("login error")
+                }
             }
         }
 
@@ -679,12 +702,15 @@ impl Service for MatrixService {
         // never bulk-upload old photos.
         self.client.sync_once(SyncSettings::default()).await?;
 
-        // Set up event handlers before encryption setup so verification events are processed
-        self.setup_event_handlers().await?;
+        // Set up event handlers before encryption setup so verification events are processed.
+        // They are removed again when `run` returns.
+        let _event_handlers = self.setup_event_handlers();
 
         // Spawn sync task in background so verification events can be processed
         let client_for_sync = self.client.clone();
         let cancel_for_sync = cancel.child_token();
+        // Stops the background sync however `run` returns, including on an error.
+        let _stop_sync = cancel_for_sync.clone().drop_guard();
         let sync_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -705,7 +731,6 @@ impl Service for MatrixService {
         // Set up encryption with verification (sync running in background)
         if let Err(e) = self.setup_encryption().await {
             error!(error=%e, "failed to set up encryption");
-            cancel.cancel(); // Stop background sync
             bail!("failed to set up encryption")
         }
 
