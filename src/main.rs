@@ -61,6 +61,7 @@ async fn run() -> Result<()> {
     let bus_task = tokio::spawn({
         async move {
             bus::Bus::new(evt_rx, cmd_rx, services, service_middlewares, reconnect_config)
+                .with_middlewares(all_middlewares.into_values())
                 .run(bus_cancel)
                 .await
         }

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use kelvin_bot::core::{
     bus::{Bus, create_command_channel, create_event_channel},
     config::ReconnectionConfig,
-    event::Event,
+    event::{Event, EventKind},
     middleware::Middleware,
     service::ServiceId,
 };
@@ -90,12 +90,12 @@ async fn test_end_to_end_event_processing_pipeline() {
 }
 
 #[tokio::test]
-async fn test_middleware_pipeline_order() {
-    // Create middlewares that track processing order
+async fn test_each_middleware_sees_events_in_order() {
+    // Create middlewares that record which events they saw, in order
     #[derive(Debug)]
     struct OrderTrackingMiddleware {
         id: &'static str,
-        order: Arc<Mutex<Vec<&'static str>>>,
+        order: Arc<Mutex<Vec<(&'static str, String)>>>,
     }
 
     #[async_trait]
@@ -105,8 +105,10 @@ async fn test_middleware_pipeline_order() {
             Ok(())
         }
 
-        fn on_event(&self, _event: &Event) -> anyhow::Result<()> {
-            self.order.lock().unwrap().push(self.id);
+        fn on_event(&self, event: &Event) -> anyhow::Result<()> {
+            if let EventKind::RoomMessage { body, .. } = &event.kind {
+                self.order.lock().unwrap().push((self.id, body.clone()));
+            }
             Ok(())
         }
     }
@@ -132,7 +134,7 @@ async fn test_middleware_pipeline_order() {
         Arc::new(mock_service) as Arc<dyn kelvin_bot::core::service::Service>,
     );
 
-    // Create middleware pipeline for our service: first -> second -> third
+    // Create middleware pipeline for our service: first, second, third
     let mut service_middlewares: HashMap<ServiceId, Vec<Arc<dyn Middleware>>> = HashMap::new();
     service_middlewares.insert(
         service_id,
@@ -165,8 +167,17 @@ async fn test_middleware_pipeline_order() {
     cancel_token.cancel();
     assert_ok!(bus_handle.await.unwrap());
 
-    // Each of the 3 events visits every middleware, in pipeline order.
+    // Middlewares handle events independently of one another, so only the
+    // order within each middleware is defined: every one sees all 3 events,
+    // in the order they were sent.
     let final_order = order_tracker.lock().unwrap();
-    let expected: Vec<&str> = ["first", "second", "third"].repeat(3);
-    assert_eq!(*final_order, expected);
+    let expected = ["test message 0", "test message 1", "test message 2"];
+    for id in ["first", "second", "third"] {
+        let seen: Vec<&str> = final_order
+            .iter()
+            .filter(|(seen_by, _)| *seen_by == id)
+            .map(|(_, body)| body.as_str())
+            .collect();
+        assert_eq!(seen, expected, "events seen by the {id} middleware");
+    }
 }
