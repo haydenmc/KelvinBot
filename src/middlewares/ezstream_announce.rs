@@ -11,10 +11,9 @@ use chrono::{DateTime, Utc};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc::Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Bytes,
@@ -75,16 +74,13 @@ struct ActiveStream {
     message_ids: HashMap<(String, String), String>,
 }
 
-// Shared state for tracking active streams
-struct StreamState {
-    active_streams: HashMap<String, ActiveStream>, // channel_id -> stream info
-}
+/// Streams that have been announced and not yet seen to end, by channel ID.
+type ActiveStreams = HashMap<String, ActiveStream>;
 
-impl StreamState {
-    fn new() -> Self {
-        Self { active_streams: HashMap::new() }
-    }
-}
+/// How many notifications may wait to be handled. They are handled one at a
+/// time, and each waits on the services it announces to, so a stuck service
+/// can cause a backlog; beyond this, new notifications are dropped.
+const NOTIFICATION_QUEUE_CAPACITY: usize = 64;
 
 /// Decides how long to wait before each reconnection attempt.
 struct Reconnect {
@@ -122,7 +118,6 @@ pub struct EzStreamAnnounce {
     reconnection: ReconnectionConfig,
     end_message_template: String,
     destinations: Vec<DestinationConfig>,
-    state: Arc<Mutex<StreamState>>,
 }
 
 impl EzStreamAnnounce {
@@ -143,7 +138,6 @@ impl EzStreamAnnounce {
             start_message_template,
             end_message_template,
             destinations,
-            state: Arc::new(Mutex::new(StreamState::new())),
         }
     }
 
@@ -187,7 +181,12 @@ impl EzStreamAnnounce {
     }
 
     // Handle stream going live
-    async fn handle_stream_start(&self, channel_id: String, channel_name: String) -> Result<()> {
+    async fn handle_stream_start(
+        &self,
+        active_streams: &mut ActiveStreams,
+        channel_id: String,
+        channel_name: String,
+    ) -> Result<()> {
         tracing::info!(
             channel_id=%channel_id,
             channel_name=%channel_name,
@@ -197,9 +196,7 @@ impl EzStreamAnnounce {
         let message_body =
             self.format_message(&self.start_message_template, &channel_name, &channel_id, None);
 
-        // Send announcements to all configured destinations. This is done
-        // before taking the state lock so that a slow or stuck service
-        // cannot block every other notification behind the mutex.
+        // Send announcements to all configured destinations.
         let mut message_ids = HashMap::new();
         for dest in &self.destinations {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -243,9 +240,10 @@ impl EzStreamAnnounce {
             }
         }
 
-        // Track this stream in state
-        let mut state = self.state.lock().await;
-        state.active_streams.insert(
+        // Track this stream so its announcements can be edited when it ends.
+        // If the channel was already recorded as live (its end was missed),
+        // this replaces the record and the earlier announcement is left as is.
+        active_streams.insert(
             channel_id.clone(),
             ActiveStream { name: channel_name, start_time: Utc::now(), message_ids },
         );
@@ -254,13 +252,14 @@ impl EzStreamAnnounce {
     }
 
     // Handle stream going offline
-    async fn handle_stream_end(&self, channel_id: String) -> Result<()> {
+    async fn handle_stream_end(
+        &self,
+        active_streams: &mut ActiveStreams,
+        channel_id: String,
+    ) -> Result<()> {
         tracing::info!(channel_id=%channel_id, "stream ended");
 
-        // Remove stream from active list and get its info, releasing the
-        // lock before issuing any commands to the bus.
-        let removed = self.state.lock().await.active_streams.remove(&channel_id);
-        let Some(stream) = removed else {
+        let Some(stream) = active_streams.remove(&channel_id) else {
             tracing::warn!(
                 channel_id=%channel_id,
                 "received stream end notification for unknown stream"
@@ -306,17 +305,36 @@ impl EzStreamAnnounce {
         Ok(())
     }
 
-    // Process a notification from EzStream
-    async fn handle_notification(&self, notification: ChannelNotification) -> Result<()> {
-        if notification.is_live {
-            self.handle_stream_start(notification.id, notification.name).await
-        } else {
-            self.handle_stream_end(notification.id).await
+    /// Handles notifications one at a time, in the order EzStream sent them,
+    /// until the queue is closed and empty.
+    ///
+    /// Handling them in order is what makes an end that closely follows a
+    /// start find the announcement it has to edit. It runs apart from the
+    /// connection so that waiting on a slow service never stalls the
+    /// WebSocket, and it owns the record of live streams, which therefore
+    /// carries over from one connection to the next.
+    async fn handle_notifications(&self, mut notifications: Receiver<ChannelNotification>) {
+        let mut active_streams = ActiveStreams::new();
+
+        while let Some(notification) = notifications.recv().await {
+            let handled = if notification.is_live {
+                self.handle_stream_start(&mut active_streams, notification.id, notification.name)
+                    .await
+            } else {
+                self.handle_stream_end(&mut active_streams, notification.id).await
+            };
+            if let Err(e) = handled {
+                tracing::error!(error=%e, "failed to handle notification");
+            }
         }
     }
 
     // Main WebSocket connection loop with reconnection
-    async fn websocket_loop(&self, cancel: CancellationToken) -> Result<()> {
+    async fn websocket_loop(
+        &self,
+        cancel: CancellationToken,
+        notifications: Sender<ChannelNotification>,
+    ) -> Result<()> {
         let mut reconnect = Reconnect::new(self.reconnection.clone());
 
         loop {
@@ -336,7 +354,7 @@ impl EzStreamAnnounce {
             match self.connect(&cancel).await {
                 Ok(Some(ws_stream)) => {
                     let connected_at = Instant::now();
-                    match self.process_connection(ws_stream, cancel.clone()).await {
+                    match self.process_connection(ws_stream, cancel.clone(), &notifications).await {
                         Ok(()) => tracing::info!("EzStream WebSocket connection closed"),
                         Err(e) => {
                             tracing::error!(error=%format!("{e:#}"), "EzStream WebSocket connection lost")
@@ -349,13 +367,6 @@ impl EzStreamAnnounce {
                 Err(e) => {
                     tracing::error!(error=%format!("{e:#}"), "EzStream WebSocket connection failed")
                 }
-            }
-
-            // Clear state after disconnection
-            {
-                let mut state = self.state.lock().await;
-                state.active_streams.clear();
-                tracing::info!("cleared stream state after disconnection");
             }
 
             if cancel.is_cancelled() {
@@ -426,8 +437,14 @@ impl EzStreamAnnounce {
     }
 
     /// Processes one established connection until it closes, fails, goes
-    /// silent for `READ_TIMEOUT`, or `cancel` fires.
-    async fn process_connection<S>(&self, ws_stream: S, cancel: CancellationToken) -> Result<()>
+    /// silent for `READ_TIMEOUT`, or `cancel` fires. Notifications it receives
+    /// are queued on `notifications` for `handle_notifications`.
+    async fn process_connection<S>(
+        &self,
+        ws_stream: S,
+        cancel: CancellationToken,
+        notifications: &Sender<ChannelNotification>,
+    ) -> Result<()>
     where
         S: Stream<Item = Result<Message, WsError>> + Sink<Message, Error = WsError> + Unpin,
     {
@@ -478,24 +495,18 @@ impl EzStreamAnnounce {
                             tracing::debug!(message=%text, "received WebSocket message");
 
                             match serde_json::from_str::<ChannelNotification>(&text) {
-                                Ok(notification) => {
-                                    // Spawn task to handle notification asynchronously
-                                    let self_clone = Self {
-                                        cmd_tx: self.cmd_tx.clone(),
-                                        reconnection: self.reconnection.clone(),
-                                        websocket_url: self.websocket_url.clone(),
-                                        stream_url_template: self.stream_url_template.clone(),
-                                        start_message_template: self.start_message_template.clone(),
-                                        end_message_template: self.end_message_template.clone(),
-                                        destinations: self.destinations.clone(),
-                                        state: self.state.clone(),
-                                    };
-                                    tokio::spawn(async move {
-                                        if let Err(e) = self_clone.handle_notification(notification).await {
-                                            tracing::error!(error=%e, "failed to handle notification");
-                                        }
-                                    });
-                                }
+                                Ok(notification) => match notifications.try_send(notification) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(dropped)) => tracing::error!(
+                                        channel_id=%dropped.id,
+                                        is_live=%dropped.is_live,
+                                        "notification backlog is full; dropping notification"
+                                    ),
+                                    // The handler only stops once every sender is gone.
+                                    Err(TrySendError::Closed(_)) => {
+                                        anyhow::bail!("notification handler has stopped")
+                                    }
+                                },
                                 Err(e) => {
                                     tracing::error!(error=%e, text=%text, "failed to parse notification");
                                 }
@@ -567,7 +578,15 @@ impl Middleware for EzStreamAnnounce {
             "ezstream_announce middleware running"
         );
 
-        self.websocket_loop(cancel).await
+        let (notifications_tx, notifications_rx) = mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
+
+        // The sender moves into the connection side, so when that returns the
+        // queue closes and the handler finishes what is already queued.
+        let (connection, ()) = tokio::join!(
+            self.websocket_loop(cancel, notifications_tx),
+            self.handle_notifications(notifications_rx),
+        );
+        connection
     }
 
     async fn on_event(&self, _event: &Event) -> Result<()> {
@@ -580,6 +599,7 @@ impl Middleware for EzStreamAnnounce {
 mod tests {
     use super::*;
     use crate::store::PersistentStore;
+    use std::sync::Arc;
     use tokio::io::DuplexStream;
     use tokio::sync::mpsc;
     use tokio_tungstenite::tungstenite::protocol::Role;
@@ -594,9 +614,43 @@ mod tests {
             "https://example.com/{{name}}".to_string(),
             "{{name}} is live".to_string(),
             "{{name}} was live for {{duration}}".to_string(),
-            Vec::new(),
+            vec![DestinationConfig { service_id: "chat".to_string(), room_id: "room".to_string() }],
         );
         (middleware, cmd_rx)
+    }
+
+    /// A notification queue for tests that send no notifications.
+    fn unread_queue() -> Sender<ChannelNotification> {
+        mpsc::channel(1).0
+    }
+
+    fn notification(id: &str, is_live: bool) -> ChannelNotification {
+        ChannelNotification { id: id.to_string(), name: "Cam".to_string(), is_live }
+    }
+
+    fn notification_frame(id: &str, is_live: bool) -> Message {
+        Message::Text(format!(r#"{{"Id":"{id}","Name":"Cam","IsLive":{is_live}}}"#).into())
+    }
+
+    /// Takes the next command, which must be an announcement, and answers it
+    /// with `message_id`. Returns the announcement text.
+    async fn answer_announcement(commands: &mut Receiver<Command>, message_id: &str) -> String {
+        match commands.recv().await.expect("an announcement") {
+            Command::SendRoomMessage { body, response_tx, .. } => {
+                response_tx.expect("a reply channel").send(Ok(message_id.to_string())).unwrap();
+                body
+            }
+            other => panic!("expected an announcement, got {other:?}"),
+        }
+    }
+
+    /// Takes the next command, which must be an edit. Returns the ID of the
+    /// edited message and its new text.
+    async fn expect_edit(commands: &mut Receiver<Command>) -> (String, String) {
+        match commands.recv().await.expect("an edit") {
+            Command::EditMessage { message_id, new_body, .. } => (message_id, new_body),
+            other => panic!("expected an edit, got {other:?}"),
+        }
     }
 
     /// Both ends of a WebSocket over an in-memory pipe, with no handshake.
@@ -615,7 +669,8 @@ mod tests {
         let (client, _server) = websocket_pair().await;
 
         let started = Instant::now();
-        let result = middleware.process_connection(client, CancellationToken::new()).await;
+        let result =
+            middleware.process_connection(client, CancellationToken::new(), &unread_queue()).await;
 
         let err = result.expect_err("a silent connection should be reported as dead");
         assert!(format!("{err:#}").contains("no WebSocket frames received"), "got: {err:#}");
@@ -639,7 +694,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = middleware.process_connection(client, cancel).await;
+        let result = middleware.process_connection(client, cancel, &unread_queue()).await;
 
         result.expect("the connection should last until cancelled");
         assert!(started.elapsed() >= READ_TIMEOUT * 10, "ended after {:?}", started.elapsed());
@@ -661,7 +716,8 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = middleware.process_connection(client, CancellationToken::new()).await;
+        let result =
+            middleware.process_connection(client, CancellationToken::new(), &unread_queue()).await;
 
         assert!(result.is_err());
         assert_eq!(started.elapsed(), quiet_after + READ_TIMEOUT);
@@ -674,9 +730,141 @@ mod tests {
         let (client, mut server) = websocket_pair().await;
         server.send(Message::Close(None)).await.unwrap();
 
-        let result = middleware.process_connection(client, CancellationToken::new()).await;
+        let result =
+            middleware.process_connection(client, CancellationToken::new(), &unread_queue()).await;
 
         result.expect("a server close is not an error");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_waits_for_the_start_it_follows() {
+        let (middleware, mut commands) = middleware();
+        let (queue, queued) = mpsc::channel(8);
+        queue.send(notification("c1", true)).await.unwrap();
+        queue.send(notification("c1", false)).await.unwrap();
+        drop(queue);
+
+        let chat = async {
+            // The service is slow to confirm the announcement. The end must
+            // not be handled in the meantime, or it would find nothing to edit.
+            let announcement = commands.recv().await.expect("an announcement");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert!(commands.try_recv().is_err(), "nothing else is sent while waiting");
+
+            let Command::SendRoomMessage { response_tx, .. } = announcement else {
+                panic!("expected an announcement, got {announcement:?}");
+            };
+            response_tx.unwrap().send(Ok("msg-1".to_string())).unwrap();
+
+            let (edited, text) = expect_edit(&mut commands).await;
+            assert_eq!(edited, "msg-1");
+            assert!(text.starts_with("Cam was live for"), "got: {text}");
+        };
+        tokio::join!(middleware.handle_notifications(queued), chat);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_is_remembered_across_a_reconnect() {
+        let (middleware, mut commands) = middleware();
+        let (queue, queued) = mpsc::channel(8);
+
+        let connections = async {
+            // The stream starts on one connection and ends on the next.
+            for is_live in [true, false] {
+                let (client, mut server) = websocket_pair().await;
+                server.send(notification_frame("c1", is_live)).await.unwrap();
+                server.send(Message::Close(None)).await.unwrap();
+                middleware
+                    .process_connection(client, CancellationToken::new(), &queue)
+                    .await
+                    .unwrap();
+            }
+            drop(queue);
+        };
+        let chat = async {
+            assert_eq!(answer_announcement(&mut commands, "msg-1").await, "Cam is live");
+            assert_eq!(expect_edit(&mut commands).await.0, "msg-1");
+        };
+        tokio::join!(middleware.handle_notifications(queued), connections, chat);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn second_start_is_announced_again() {
+        let (middleware, mut commands) = middleware();
+        let (queue, queued) = mpsc::channel(8);
+        // The end of the first stream never arrives.
+        queue.send(notification("c1", true)).await.unwrap();
+        queue.send(notification("c1", true)).await.unwrap();
+        queue.send(notification("c1", false)).await.unwrap();
+        drop(queue);
+
+        let chat = async {
+            answer_announcement(&mut commands, "msg-1").await;
+            // The earlier announcement is left alone; the new one is tracked.
+            answer_announcement(&mut commands, "msg-2").await;
+            assert_eq!(expect_edit(&mut commands).await.0, "msg-2");
+        };
+        tokio::join!(middleware.handle_notifications(queued), chat);
+
+        assert!(commands.try_recv().is_err(), "no further commands");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_an_unknown_stream_sends_nothing() {
+        let (middleware, mut commands) = middleware();
+        let (queue, queued) = mpsc::channel(8);
+        queue.send(notification("never-announced", false)).await.unwrap();
+        drop(queue);
+
+        middleware.handle_notifications(queued).await;
+
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_backlog_drops_notifications_without_stalling_the_connection() {
+        let (middleware, _commands) = middleware();
+        // Room for one notification, and nothing handling them.
+        let (queue, mut queued) = mpsc::channel(1);
+
+        let (client, mut server) = websocket_pair().await;
+        for channel in ["c1", "c2", "c3"] {
+            server.send(notification_frame(channel, true)).await.unwrap();
+        }
+        server.send(Message::Close(None)).await.unwrap();
+
+        middleware.process_connection(client, CancellationToken::new(), &queue).await.unwrap();
+
+        assert_eq!(queued.try_recv().unwrap().id, "c1");
+        assert!(queued.try_recv().is_err(), "the rest were dropped");
+    }
+
+    #[tokio::test]
+    async fn run_stops_when_cancelled() {
+        let (cmd_tx, _commands) = mpsc::channel(16);
+        let ctx = MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) };
+        // Nothing listens here, so every connection attempt fails.
+        let middleware = EzStreamAnnounce::new(
+            ctx,
+            ReconnectionConfig::default(),
+            "ws://127.0.0.1:1".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+        );
+
+        let cancel = CancellationToken::new();
+        let stop_soon = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(5), middleware.run(cancel.clone())),
+            stop_soon
+        );
+
+        result.expect("run should return promptly, handler included").unwrap();
     }
 
     fn steady_backoff() -> Reconnect {
