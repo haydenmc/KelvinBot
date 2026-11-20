@@ -28,6 +28,10 @@ const MAX_OCCURRENCES: u16 = 512;
 /// starts just outside the window still lands in the expansion.
 const EXPANSION_SLACK_DAYS: i64 = 1;
 
+/// How long to wait before trying the daily agenda again after the calendar
+/// could not be fetched.
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 pub struct CalendarAgendaConfig {
     pub service_id: String,
     pub room_id: String,
@@ -129,6 +133,24 @@ impl CalendarAgenda {
         }
     }
 
+    /// Whether the daily agenda should be posted now: today's post time has
+    /// passed and today's agenda has not gone out yet.
+    fn is_due(&self, now: DateTime<Local>, last_posted: Option<NaiveDate>) -> bool {
+        now.time() >= self.config.post_at_time
+            && last_posted.is_none_or(|last| last < now.date_naive())
+    }
+
+    /// When to wake next: for a pending retry if there is one, otherwise for
+    /// the next scheduled post.
+    fn next_wake(
+        &self,
+        now: DateTime<Local>,
+        retry_at: Option<DateTime<Local>>,
+    ) -> DateTime<Local> {
+        let scheduled = self.next_scheduled_time(now);
+        retry_at.map_or(scheduled, |retry_at| retry_at.min(scheduled))
+    }
+
     /// The next local datetime at which the daily agenda should be posted.
     fn next_scheduled_time(&self, now: DateTime<Local>) -> DateTime<Local> {
         let target_date = if now.time() < self.config.post_at_time {
@@ -182,12 +204,19 @@ impl CalendarAgenda {
     /// Post the daily agenda for `today` and record that we did so. The
     /// last-posted date is recorded even when there was nothing to say, so an
     /// uneventful day isn't retried in a tight loop.
-    async fn post_daily_agenda(&self, today: NaiveDate) {
+    ///
+    /// Returns `false` if the agenda could not be built (the calendar was
+    /// unreachable, say), in which case nothing is recorded and the caller
+    /// should try again later.
+    async fn post_daily_agenda(&self, today: NaiveDate) -> bool {
         match self.build_message(today).await {
-            Ok(message) => self.deliver_daily_agenda(today, message).await,
+            Ok(message) => {
+                self.deliver_daily_agenda(today, message).await;
+                true
+            }
             Err(e) => {
-                // Leave last_posted_date alone so the next tick retries.
                 tracing::error!(error=%e, date=%today, "failed to build daily calendar agenda");
+                false
             }
         }
     }
@@ -255,19 +284,38 @@ impl Middleware for CalendarAgenda {
             "calendar_agenda middleware running"
         );
 
-        // Catch up if the bot was down (or restarted) past today's post time.
-        let now = Local::now();
-        let today = now.date_naive();
-        if now.time() >= self.config.post_at_time
-            && self.last_posted_date().await.is_none_or(|last| last < today)
-        {
-            tracing::info!(date=%today, "posting missed daily calendar agenda on startup");
-            self.post_daily_agenda(today).await;
-        }
+        // Kept in memory once loaded, so a store that cannot be written to
+        // does not make the same day's agenda go out again and again.
+        let mut last_posted = self.last_posted_date().await;
+        // Set while today's agenda is waiting to be tried again.
+        let mut retry_at: Option<DateTime<Local>> = None;
 
         loop {
             let now = Local::now();
-            let next_time = self.next_scheduled_time(now);
+            let today = now.date_naive();
+
+            // Covers the scheduled post, catching up after the bot was down
+            // past today's post time, and retrying after a failure.
+            if self.is_due(now, last_posted) {
+                if retry_at.is_none_or(|retry_at| now >= retry_at) {
+                    if self.post_daily_agenda(today).await {
+                        last_posted = Some(today);
+                        retry_at = None;
+                    } else {
+                        tracing::warn!(
+                            retry_in_secs=%RETRY_DELAY.as_secs(),
+                            "daily calendar agenda not posted; will try again"
+                        );
+                        retry_at = Some(now + RETRY_DELAY);
+                    }
+                    continue;
+                }
+            } else {
+                // Posted, or a new day began before a retry succeeded.
+                retry_at = None;
+            }
+
+            let next_time = self.next_wake(now, retry_at);
             let duration_until =
                 (next_time - now).to_std().unwrap_or(std::time::Duration::from_secs(0));
 
@@ -282,17 +330,7 @@ impl Middleware for CalendarAgenda {
                     tracing::info!("calendar_agenda middleware shutting down...");
                     break;
                 }
-                _ = tokio::time::sleep(duration_until) => {
-                    let today = Local::now().date_naive();
-                    if self.last_posted_date().await.is_some_and(|last| last >= today) {
-                        tracing::debug!(date=%today, "agenda already posted today; skipping");
-                        // Nudge past the scheduled instant so the next loop
-                        // iteration targets tomorrow rather than spinning.
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue;
-                    }
-                    self.post_daily_agenda(today).await;
-                }
+                _ = tokio::time::sleep(duration_until) => {}
                 Some(()) = query_rx.recv() => {
                     self.post_on_demand(Local::now().date_naive()).await;
                 }
@@ -557,6 +595,12 @@ pub fn expand(
             (EventTime::Timed(_), EventTime::Timed(end)) => Some(end.time()),
             _ => None,
         };
+        // A timed event shorter than a day belongs to the day it starts on,
+        // even if it runs past midnight (9 PM to 1 AM, say).
+        let within_a_day = matches!(
+            (event.start, event.end),
+            (EventTime::Timed(start), EventTime::Timed(end)) if end - start < Duration::days(1)
+        );
 
         let starts: Vec<EventTime> = match &event.recurrence {
             None => vec![event.start],
@@ -585,6 +629,7 @@ pub fn expand(
             // the day before it.
             let end_date = match event.end {
                 EventTime::AllDay(_) => start_date + span - Duration::days(1),
+                EventTime::Timed(_) if within_a_day => start_date,
                 EventTime::Timed(_) => start_date + span,
             }
             .max(start_date);
@@ -768,5 +813,114 @@ impl CalendarAgenda {
 
     pub fn test_config(&self) -> &CalendarAgendaConfig {
         &self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::PersistentStore;
+
+    fn config() -> CalendarAgendaConfig {
+        CalendarAgendaConfig {
+            service_id: "matrix".to_string(),
+            room_id: "!room:example.com".to_string(),
+            calendar_url: SecretString::from("https://calendar.example.com/feed.ics"),
+            calendar_link: None,
+            calendar_link_text: "View the full calendar".to_string(),
+            post_at_time: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
+            countdown_days: vec![30, 14],
+            reminder_days: vec![7, 1],
+            multi_day_min_days: 2,
+            heading_today: "Today".to_string(),
+            heading_reminders: "Coming up".to_string(),
+            heading_countdowns: "Countdowns".to_string(),
+            command_string: None,
+        }
+    }
+
+    fn agenda() -> CalendarAgenda {
+        let (cmd_tx, _commands) = tokio::sync::mpsc::channel(1);
+        let ctx = MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) };
+        CalendarAgenda::new(ctx, config())
+    }
+
+    fn date(day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 6, day).unwrap()
+    }
+
+    fn at(day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        local_datetime(date(day), NaiveTime::from_hms_opt(hour, minute, 0).unwrap())
+    }
+
+    fn timed_event(start: DateTime<Local>, end: DateTime<Local>) -> CalendarEvent {
+        CalendarEvent {
+            summary: "Party".to_string(),
+            location: None,
+            start: EventTime::Timed(start),
+            end: EventTime::Timed(end),
+            recurrence: None,
+        }
+    }
+
+    #[test]
+    fn evening_event_ending_after_midnight_is_a_single_day() {
+        let events = [timed_event(at(10, 21, 0), at(11, 1, 0))];
+
+        let occurrences = expand(&events, date(1), date(30));
+
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].start_date, date(10));
+        assert_eq!(occurrences[0].end_date, date(10));
+        assert_eq!(occurrences[0].span_days(), 1);
+    }
+
+    #[test]
+    fn overnight_event_is_reminded_about_and_not_counted_down_to() {
+        let events = [timed_event(at(10, 21, 0), at(11, 1, 0))];
+        let occurrences = expand(&events, date(1), date(30));
+
+        // A week ahead: a reminder interval. It is listed under reminders.
+        let week_before = build_agenda(&occurrences, date(3), &config()).expect("a reminder");
+        assert!(week_before.contains("Coming up"), "got: {week_before}");
+        assert!(!week_before.contains("Countdowns"), "got: {week_before}");
+
+        // On the day, it is not described as running "through" the next day.
+        let on_the_day = build_agenda(&occurrences, date(10), &config()).expect("today's agenda");
+        assert!(on_the_day.contains("9 PM – 1 AM — Party"), "got: {on_the_day}");
+        assert!(!on_the_day.contains("through"), "got: {on_the_day}");
+    }
+
+    #[test]
+    fn timed_event_of_a_day_or_longer_still_spans_its_days() {
+        let events = [timed_event(at(10, 21, 0), at(11, 22, 0))];
+
+        let occurrences = expand(&events, date(1), date(30));
+
+        assert_eq!(occurrences[0].end_date, date(11));
+        assert_eq!(occurrences[0].span_days(), 2);
+    }
+
+    #[test]
+    fn agenda_is_due_once_a_day_after_the_post_time() {
+        let agenda = agenda();
+
+        assert!(!agenda.is_due(at(10, 7, 59), None), "before the post time");
+        assert!(agenda.is_due(at(10, 8, 0), None), "at the post time");
+        assert!(agenda.is_due(at(10, 15, 0), Some(date(9))), "later, not yet posted today");
+        assert!(!agenda.is_due(at(10, 15, 0), Some(date(10))), "already posted today");
+        // After a day of failed attempts: yesterday's agenda is given up on.
+        assert!(!agenda.is_due(at(11, 0, 3), Some(date(9))), "a new day, before its post time");
+    }
+
+    #[test]
+    fn pending_retry_is_woken_for_before_the_next_scheduled_post() {
+        let agenda = agenda();
+        let now = at(10, 8, 0);
+
+        assert_eq!(agenda.next_wake(now, None), at(11, 8, 0));
+        assert_eq!(agenda.next_wake(now, Some(at(10, 8, 5))), at(10, 8, 5));
+        // A retry that would fall after the next scheduled post does not delay it.
+        assert_eq!(agenda.next_wake(now, Some(at(11, 9, 0))), at(11, 8, 0));
     }
 }
