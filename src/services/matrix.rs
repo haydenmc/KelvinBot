@@ -415,6 +415,14 @@ impl MatrixService {
                         return;
                     }
 
+                    // An edit arrives as a new message event that replaces an
+                    // earlier one. Passing it on would run commands a second
+                    // time and relay the edited text as a fresh message.
+                    if is_edit(&event.content) {
+                        debug!(event_id=%event.event_id, "ignoring message edit");
+                        return;
+                    }
+
                     let Ok(is_direct) = room.is_direct().await else {
                         warn!("could not determine if message was a direct message");
                         return;
@@ -1014,9 +1022,51 @@ impl Service for MatrixService {
     }
 }
 
+/// Whether a message event is an edit of an earlier message (`m.replace`),
+/// as opposed to a new message.
+fn is_edit(content: &RoomMessageEventContent) -> bool {
+    use matrix_sdk::ruma::events::room::message::Relation;
+    matches!(content.relates_to, Some(Relation::Replacement(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message_content(json: serde_json::Value) -> RoomMessageEventContent {
+        serde_json::from_value(json).expect("valid m.room.message content")
+    }
+
+    #[test]
+    fn edits_are_recognised() {
+        let edit = message_content(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "* !echo fixed typo",
+            "m.new_content": { "msgtype": "m.text", "body": "!echo fixed typo" },
+            "m.relates_to": { "rel_type": "m.replace", "event_id": "$original:example.com" },
+        }));
+        assert!(is_edit(&edit));
+    }
+
+    #[test]
+    fn new_messages_replies_and_thread_messages_are_not_edits() {
+        let plain = message_content(serde_json::json!({ "msgtype": "m.text", "body": "hello" }));
+        assert!(!is_edit(&plain));
+
+        let reply = message_content(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "hello back",
+            "m.relates_to": { "m.in_reply_to": { "event_id": "$original:example.com" } },
+        }));
+        assert!(!is_edit(&reply));
+
+        let threaded = message_content(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "in a thread",
+            "m.relates_to": { "rel_type": "m.thread", "event_id": "$root:example.com" },
+        }));
+        assert!(!is_edit(&threaded));
+    }
 
     #[test]
     fn image_cap_applies_to_known_sizes() {
