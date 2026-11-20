@@ -1,6 +1,11 @@
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use matrix_sdk::{
     Client, Room, RoomMemberships, RoomState,
     config::SyncSettings,
@@ -50,9 +55,47 @@ fn exceeds_image_cap(size: Option<u64>, max_image_size_bytes: u64) -> bool {
     size.is_some_and(|size| size > max_image_size_bytes)
 }
 
+/// How many reactions are remembered for matching against later removals.
+const REACTION_REGISTRY_CAPACITY: usize = 10_000;
+
+#[derive(Debug, Clone, PartialEq)]
 struct ReactionInfo {
     target_event_id: String,
     key: String,
+}
+
+/// Remembers recent reactions by event ID, so that when one is removed (which
+/// arrives as a bare redaction) we can say what it was a reaction to.
+///
+/// Holds at most `capacity` reactions; the oldest are forgotten first. A
+/// removal of a forgotten reaction is not reported.
+struct ReactionRegistry {
+    capacity: usize,
+    reactions: HashMap<String, ReactionInfo>,
+    /// Event IDs in the order they were added. May include IDs that have
+    /// since been removed; those are skipped over when making room.
+    order: VecDeque<String>,
+}
+
+impl ReactionRegistry {
+    fn new(capacity: usize) -> Self {
+        Self { capacity, reactions: HashMap::new(), order: VecDeque::new() }
+    }
+
+    fn insert(&mut self, reaction_event_id: String, info: ReactionInfo) {
+        if self.reactions.insert(reaction_event_id.clone(), info).is_none() {
+            self.order.push_back(reaction_event_id);
+        }
+        while self.order.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.reactions.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove(&mut self, reaction_event_id: &str) -> Option<ReactionInfo> {
+        self.reactions.remove(reaction_event_id)
+    }
 }
 
 pub struct MatrixService {
@@ -64,7 +107,7 @@ pub struct MatrixService {
     max_image_size_bytes: u64,
     evt_tx: tokio::sync::mpsc::Sender<Event>,
     client: Client,
-    reaction_registry: Arc<Mutex<HashMap<String, ReactionInfo>>>,
+    reaction_registry: Arc<Mutex<ReactionRegistry>>,
 }
 
 impl MatrixService {
@@ -98,7 +141,8 @@ impl MatrixService {
             .build()
             .await?;
 
-        let reaction_registry = Arc::new(Mutex::new(HashMap::new()));
+        let reaction_registry =
+            Arc::new(Mutex::new(ReactionRegistry::new(REACTION_REGISTRY_CAPACITY)));
 
         Ok(Self {
             id,
@@ -741,13 +785,23 @@ impl Service for MatrixService {
                 tokio::select! {
                     _ = cancel_for_sync.cancelled() => {
                         info!("background sync shutting down");
-                        break;
+                        return Ok(());
                     }
                     result = client_for_sync.sync(SyncSettings::default()) => {
-                        if let Err(e) = result {
-                            error!(error=%e, "background sync error");
-                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        let Err(e) = result else { continue };
+                        if session_is_dead(e.client_api_error_kind()) {
+                            // Retrying cannot help: every request on this
+                            // session will be refused the same way.
+                            return Err(anyhow::Error::new(e).context(
+                                "the homeserver no longer accepts this session; \
+                                 restart the bot to log in again",
+                            ));
                         }
+                        // Anything else (the network, the homeserver being
+                        // down) is retried here, resuming from the last sync
+                        // token so nothing sent in the meantime is missed.
+                        error!(error=%e, "background sync error");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     }
                 }
             }
@@ -770,10 +824,10 @@ impl Service for MatrixService {
                 info!(service=%self.id, "shutdown requested");
             }
             result = sync_handle => {
-                match result {
-                    Ok(_) => info!("sync task completed"),
-                    Err(e) => error!(error=%e, "sync task panicked"),
-                }
+                // Hand a sync that gave up to the supervisor, which reports
+                // it and retries with backoff.
+                result.context("sync task panicked")??;
+                info!("sync task completed");
             }
         }
         Ok(())
@@ -1039,6 +1093,22 @@ impl Service for MatrixService {
     }
 }
 
+use matrix_sdk::ruma::api::error::ErrorKind;
+
+/// Whether a failed request means the session itself is gone (logged out,
+/// token revoked, account disabled), as opposed to a failure that may pass.
+fn session_is_dead(kind: Option<&ErrorKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            ErrorKind::UnknownToken(_)
+                | ErrorKind::MissingToken
+                | ErrorKind::UserDeactivated
+                | ErrorKind::UserLocked
+        )
+    )
+}
+
 /// Whether a message event is an edit of an earlier message (`m.replace`),
 /// as opposed to a new message.
 fn is_edit(content: &RoomMessageEventContent) -> bool {
@@ -1062,6 +1132,60 @@ fn edited_text(content: &RoomMessageEventContent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reaction(target: &str) -> ReactionInfo {
+        ReactionInfo { target_event_id: target.to_string(), key: "+1".to_string() }
+    }
+
+    #[test]
+    fn registry_returns_a_reaction_once() {
+        let mut registry = ReactionRegistry::new(10);
+        registry.insert("r1".to_string(), reaction("m1"));
+
+        assert_eq!(registry.remove("r1"), Some(reaction("m1")));
+        assert_eq!(registry.remove("r1"), None);
+        assert_eq!(registry.remove("never-seen"), None);
+    }
+
+    #[test]
+    fn registry_forgets_the_oldest_reactions_when_full() {
+        let mut registry = ReactionRegistry::new(3);
+        for i in 1..=5 {
+            registry.insert(format!("r{i}"), reaction(&format!("m{i}")));
+        }
+
+        assert_eq!(registry.remove("r1"), None);
+        assert_eq!(registry.remove("r2"), None);
+        for i in 3..=5 {
+            assert_eq!(registry.remove(&format!("r{i}")), Some(reaction(&format!("m{i}"))));
+        }
+    }
+
+    #[test]
+    fn registry_stays_bounded_when_reactions_come_and_go() {
+        let mut registry = ReactionRegistry::new(3);
+        for i in 0..1000 {
+            let id = format!("r{i}");
+            registry.insert(id.clone(), reaction("m"));
+            registry.remove(&id);
+        }
+
+        assert!(registry.order.len() <= 3);
+        assert!(registry.reactions.is_empty());
+    }
+
+    #[test]
+    fn only_errors_that_end_the_session_stop_the_sync() {
+        assert!(session_is_dead(Some(&ErrorKind::UnknownToken(Default::default()))));
+        assert!(session_is_dead(Some(&ErrorKind::MissingToken)));
+        assert!(session_is_dead(Some(&ErrorKind::UserDeactivated)));
+        assert!(session_is_dead(Some(&ErrorKind::UserLocked)));
+
+        // Not a homeserver error at all (the network, say), or one that may pass.
+        assert!(!session_is_dead(None));
+        assert!(!session_is_dead(Some(&ErrorKind::Unknown)));
+        assert!(!session_is_dead(Some(&ErrorKind::Forbidden)));
+    }
 
     fn message_content(json: serde_json::Value) -> RoomMessageEventContent {
         serde_json::from_value(json).expect("valid m.room.message content")
