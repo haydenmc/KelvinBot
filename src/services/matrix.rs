@@ -386,6 +386,17 @@ impl MatrixService {
         }
     }
 
+    /// Accepts invites that are still pending from before this run: ones that
+    /// arrived while the bot was not running, or whose join failed. The live
+    /// invite handler only sees invites that arrive while it is registered.
+    async fn accept_pending_invites(&self) {
+        for room in self.client.invited_rooms() {
+            info!(room_id=%room.room_id(), "found a pending invite");
+            let is_direct = room.is_direct().await.unwrap_or(false);
+            accept_invite(&room, is_direct).await;
+        }
+    }
+
     async fn cleanup_empty_rooms(&self) {
         info!("checking for empty rooms to leave");
         let rooms = self.client.rooms();
@@ -405,48 +416,12 @@ impl MatrixService {
 
         // Handle room invites
         handles.push(self.client.add_event_handler(
-            |event: StrippedRoomMemberEvent, room: Room, client: Client| async move {
-                info!("Received room invite for room: {}", room.room_id());
-                if let Some(user_id) = client.user_id() {
-                    if event.state_key == user_id
-                        && event.content.membership == MembershipState::Invite
-                    {
-                        let bot_server = user_id.server_name();
-                        if let Some(room_server) = room.room_id().server_name() {
-                            if bot_server == room_server {
-                                match room.join().await {
-                                    Ok(_) => {
-                                        info!(room_id=%room.room_id(), "Successfully joined room");
-                                        // The SDK only reports a joined room as direct if it
-                                        // appears in the bot's own m.direct account data, which
-                                        // joining alone never updates. Honor the invite's flag so
-                                        // DMs and group DMs are classified correctly afterwards.
-                                        if event.content.is_direct == Some(true) {
-                                            match room.set_is_direct(true).await {
-                                                Ok(()) => info!(
-                                                    room_id=%room.room_id(),
-                                                    "marked invited room as direct"
-                                                ),
-                                                Err(e) => warn!(
-                                                    room_id=%room.room_id(),
-                                                    error=%e,
-                                                    "failed to mark invited room as direct"
-                                                ),
-                                            }
-                                        }
-                                    }
-                                    Err(e) => error!("Failed to accept invite: {}", e),
-                                }
-                            } else {
-                                info!(room_server=%room_server, bot_server=%bot_server,
-                                    "Ignoring room invite from different homeserver.")
-                            }
-                        } else {
-                            warn!("Room invite is missing server name");
-                        }
-                    }
-                } else {
-                    warn!("Client user_id is None, cannot process invite");
+            |event: StrippedRoomMemberEvent, room: Room| async move {
+                if event.state_key == room.own_user_id()
+                    && event.content.membership == MembershipState::Invite
+                {
+                    info!("Received room invite for room: {}", room.room_id());
+                    accept_invite(&room, event.content.is_direct == Some(true)).await;
                 }
             },
         ));
@@ -865,6 +840,11 @@ impl Service for MatrixService {
 
         info!("encryption setup complete, service ready");
 
+        // Done with the handlers registered and the sync running, so the recent
+        // messages of each room joined here are delivered like any others and
+        // whatever was asked while the invite sat unanswered gets a reply.
+        self.accept_pending_invites().await;
+
         // Clean up any rooms where the bot is the only member
         self.cleanup_empty_rooms().await;
 
@@ -1144,6 +1124,39 @@ impl Service for MatrixService {
 }
 
 use matrix_sdk::{ruma::api::error::ErrorKind, store::RoomLoadSettings};
+
+/// Joins a room the bot has been invited to, if the room is on the bot's own
+/// homeserver. `is_direct` is the invite's direct-message flag.
+async fn accept_invite(room: &Room, is_direct: bool) {
+    let bot_server = room.own_user_id().server_name();
+    let Some(room_server) = room.room_id().server_name() else {
+        warn!(room_id=%room.room_id(), "Room invite is missing server name");
+        return;
+    };
+    if bot_server != room_server {
+        info!(room_server=%room_server, bot_server=%bot_server,
+            "Ignoring room invite from different homeserver.");
+        return;
+    }
+
+    if let Err(e) = room.join().await {
+        error!(room_id=%room.room_id(), "Failed to accept invite: {}", e);
+        return;
+    }
+    info!(room_id=%room.room_id(), "Successfully joined room");
+
+    // The SDK only reports a joined room as direct if it appears in the bot's
+    // own m.direct account data, which joining alone never updates. Honor the
+    // invite's flag so DMs and group DMs are classified correctly afterwards.
+    if is_direct {
+        match room.set_is_direct(true).await {
+            Ok(()) => info!(room_id=%room.room_id(), "marked invited room as direct"),
+            Err(e) => {
+                warn!(room_id=%room.room_id(), error=%e, "failed to mark invited room as direct")
+            }
+        }
+    }
+}
 
 /// File, inside the service's storage directory, holding the saved session.
 const SESSION_FILE: &str = "session.json";
