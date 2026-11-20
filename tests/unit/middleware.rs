@@ -525,6 +525,71 @@ async fn test_chat_relay_forwards_message_with_correct_format() {
 }
 
 #[tokio::test]
+async fn test_chat_relay_marks_edited_messages_with_an_asterisk() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let chat_relay = ChatRelay::new(
+        make_ctx(cmd_tx),
+        ChatRelayConfig {
+            source_service_id: "matrix".to_string(),
+            source_room_id: None,
+            dest_service_id: "mumble".to_string(),
+            dest_room_id: "General".to_string(),
+            prefix_tag: "Matrix".to_string(),
+            thumbnail_max_width: 200,
+            thumbnail_max_height: 150,
+            thumbnail_jpeg_quality: 60,
+        },
+    );
+
+    let event = Event {
+        service_id: ServiceId("matrix".to_string()),
+        kind: EventKind::RoomMessageEdited {
+            room_id: "!general:matrix.org".to_string(),
+            body: "Hello everyone!".to_string(),
+            is_local_user: true,
+            sender_id: "@alice:matrix.org".to_string(),
+            sender_display_name: Some("Alice".to_string()),
+            is_self: false,
+        },
+    };
+
+    chat_relay.on_event(&event).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    match cmd_rx.try_recv().expect("the edit should be relayed") {
+        Command::SendRoomMessage { service_id, room_id, body, .. } => {
+            assert_eq!(service_id.0, "mumble");
+            assert_eq!(room_id, "General");
+            assert_eq!(body, "[Matrix] Alice: * Hello everyone!");
+        }
+        other => panic!("Expected SendRoomMessage command, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_echo_does_not_run_a_command_from_an_edited_message() {
+    let (cmd_tx, mut cmd_rx) = create_command_channel(10);
+    let echo = Echo::new(make_ctx(cmd_tx), "!echo".to_string());
+
+    let event = Event {
+        service_id: ServiceId("matrix".to_string()),
+        kind: EventKind::RoomMessageEdited {
+            room_id: "!general:matrix.org".to_string(),
+            body: "!echo hello".to_string(),
+            is_local_user: true,
+            sender_id: "@alice:matrix.org".to_string(),
+            sender_display_name: Some("Alice".to_string()),
+            is_self: false,
+        },
+    };
+
+    echo.on_event(&event).await.unwrap();
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    assert!(cmd_rx.try_recv().is_err(), "an edit must not run the command again");
+}
+
+#[tokio::test]
 async fn test_chat_relay_filters_bot_messages() {
     let (cmd_tx, mut cmd_rx) = create_command_channel(10);
     let chat_relay = ChatRelay::new(

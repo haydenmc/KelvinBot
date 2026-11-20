@@ -37,6 +37,17 @@ pub enum EventKind {
         sender_display_name: Option<String>,
         is_self: bool,
     },
+    /// A room message whose text was changed after it was sent. `body` is the
+    /// new text. Kept apart from `RoomMessage` so that an edit is never
+    /// mistaken for a new message (and a command in it run a second time).
+    RoomMessageEdited {
+        room_id: String,
+        body: String,
+        is_local_user: bool,
+        sender_id: String,
+        sender_display_name: Option<String>,
+        is_self: bool,
+    },
     UserListUpdate {
         users: Vec<User>,
     },
@@ -82,6 +93,9 @@ impl fmt::Display for Event {
             }
             EventKind::RoomMessage { room_id, body, .. } => {
                 write!(f, "[RM] {room_id}: {body}")
+            }
+            EventKind::RoomMessageEdited { room_id, body, .. } => {
+                write!(f, "[RM edit] {room_id}: {body}")
             }
             EventKind::UserListUpdate { users } => {
                 write!(f, "[UserList] {} users", users.len())

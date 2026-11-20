@@ -33,7 +33,8 @@ impl Middleware for Echo {
         let (body, is_self) = match &evt.kind {
             EventKind::DirectMessage { body, is_self, .. } => (body, *is_self),
             EventKind::RoomMessage { body, is_self, .. } => (body, *is_self),
-            EventKind::UserListUpdate { .. }
+            EventKind::RoomMessageEdited { .. }
+            | EventKind::UserListUpdate { .. }
             | EventKind::ReactionAdded { .. }
             | EventKind::ReactionRemoved { .. }
             | EventKind::RoomImage { .. } => return Ok(()),
@@ -65,7 +66,8 @@ impl Middleware for Echo {
                     markdown_body: None,
                     response_tx: Some(response_tx),
                 },
-                EventKind::UserListUpdate { .. }
+                EventKind::RoomMessageEdited { .. }
+                | EventKind::UserListUpdate { .. }
                 | EventKind::ReactionAdded { .. }
                 | EventKind::ReactionRemoved { .. }
                 | EventKind::RoomImage { .. } => unreachable!(),

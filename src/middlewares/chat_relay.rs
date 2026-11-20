@@ -315,6 +315,14 @@ impl Middleware for ChatRelay {
                 sender_display_name,
                 is_self,
                 ..
+            }
+            | EventKind::RoomMessageEdited {
+                room_id,
+                body,
+                sender_id,
+                sender_display_name,
+                is_self,
+                ..
             } => {
                 if let Some(ref expected_room) = self.source_room_id
                     && room_id != expected_room
@@ -326,11 +334,17 @@ impl Middleware for ChatRelay {
                     return Ok(());
                 }
 
+                // The destination may not be able to change the message it
+                // was sent before, so an edit is relayed as a new message,
+                // marked with an asterisk.
+                let is_edit = matches!(event.kind, EventKind::RoomMessageEdited { .. });
+                let body = if is_edit { format!("* {body}") } else { body.clone() };
+
                 let formatted_body = Self::format_relayed_message(
                     &self.prefix_tag,
                     sender_id,
                     sender_display_name.as_deref(),
-                    body,
+                    &body,
                 );
 
                 let cmd_tx = self.cmd_tx.clone();

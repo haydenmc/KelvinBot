@@ -415,14 +415,6 @@ impl MatrixService {
                         return;
                     }
 
-                    // An edit arrives as a new message event that replaces an
-                    // earlier one. Passing it on would run commands a second
-                    // time and relay the edited text as a fresh message.
-                    if is_edit(&event.content) {
-                        debug!(event_id=%event.event_id, "ignoring message edit");
-                        return;
-                    }
-
                     let Ok(is_direct) = room.is_direct().await else {
                         warn!("could not determine if message was a direct message");
                         return;
@@ -442,6 +434,31 @@ impl MatrixService {
 
                     let sender_id = event.sender.to_string();
                     let is_self = event.sender == bot_user_id_for_handler;
+
+                    // An edit arrives as a new message event that replaces an
+                    // earlier one. It is reported as an edit, never as a new
+                    // message, so that commands in it do not run a second time.
+                    if is_edit(&event.content) {
+                        match edited_text(&event.content) {
+                            Some(body) if !is_direct => {
+                                let event = Event {
+                                    service_id,
+                                    kind: EventKind::RoomMessageEdited {
+                                        room_id: room.room_id().to_string(),
+                                        body,
+                                        is_local_user,
+                                        sender_id,
+                                        sender_display_name,
+                                        is_self,
+                                    },
+                                };
+                                let _ = evt_tx.send(event).await;
+                            }
+                            // Edits in direct chats, and of anything but text.
+                            _ => debug!(event_id=%event.event_id, "ignoring message edit"),
+                        }
+                        return;
+                    }
 
                     match event.content.msgtype {
                         MessageType::Text(text_content) => match is_direct {
@@ -1029,6 +1046,19 @@ fn is_edit(content: &RoomMessageEventContent) -> bool {
     matches!(content.relates_to, Some(Relation::Replacement(_)))
 }
 
+/// The new text of an edited text message; `None` if this is not an edit, or
+/// the edited message is not text.
+fn edited_text(content: &RoomMessageEventContent) -> Option<String> {
+    use matrix_sdk::ruma::events::room::message::Relation;
+    match &content.relates_to {
+        Some(Relation::Replacement(replacement)) => match &replacement.new_content.msgtype {
+            MessageType::Text(text) => Some(text.body.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,12 +1076,15 @@ mod tests {
             "m.relates_to": { "rel_type": "m.replace", "event_id": "$original:example.com" },
         }));
         assert!(is_edit(&edit));
+        // The new text, not the "* ..." fallback that older clients display.
+        assert_eq!(edited_text(&edit).as_deref(), Some("!echo fixed typo"));
     }
 
     #[test]
     fn new_messages_replies_and_thread_messages_are_not_edits() {
         let plain = message_content(serde_json::json!({ "msgtype": "m.text", "body": "hello" }));
         assert!(!is_edit(&plain));
+        assert_eq!(edited_text(&plain), None);
 
         let reply = message_content(serde_json::json!({
             "msgtype": "m.text",
