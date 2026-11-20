@@ -10,10 +10,11 @@ use mumble_protocol_2x::control::msgs::{
 use mumble_protocol_2x::control::{ClientControlCodec, ControlPacket};
 use mumble_protocol_2x::{Clientbound, Serverbound};
 use secrecy::{ExposeSecret, SecretString};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, interval};
 use tokio_native_tls::TlsStream;
 use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +27,29 @@ use crate::core::service::{Service, ServiceId};
 const VERSION_MAJOR: u16 = 1;
 const VERSION_MINOR: u8 = 5;
 const VERSION_PATCH: u8 = 0;
+
+/// How often a ping is sent to the server, which answers each one.
+const PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Maximum time without receiving anything (ping replies included) before the
+/// connection is considered dead. Three missed ping replies.
+const READ_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Maximum time to wait for the TCP and TLS handshakes and for the opening
+/// messages to be sent.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The client version in the legacy format: one byte each for minor and patch
+/// below a 16-bit major.
+fn version_v1(major: u16, minor: u8, patch: u8) -> u32 {
+    (u32::from(major) << 16) | (u32::from(minor) << 8) | u32::from(patch)
+}
+
+/// The client version in the current format: 16 bits each for major, minor
+/// and patch, above 16 unused bits.
+fn version_v2(major: u16, minor: u8, patch: u8) -> u64 {
+    (u64::from(major) << 48) | (u64::from(minor) << 32) | (u64::from(patch) << 16)
+}
 
 /// Escape the characters that are significant in HTML text and attribute
 /// values.
@@ -184,15 +208,15 @@ impl MumbleService {
         Ok(framed)
     }
 
-    async fn authenticate(
-        &self,
-        stream: &mut Framed<TlsStream<TcpStream>, ClientControlCodec>,
-    ) -> Result<()> {
+    async fn authenticate<T>(&self, stream: &mut Framed<T, ClientControlCodec>) -> Result<()>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
         info!(username=%self.username, "authenticating");
 
         let mut version = Version::default();
-        version.set_version_v1(VERSION_MAJOR as u32);
-        version.set_version_v2(VERSION_MINOR as u64);
+        version.set_version_v1(version_v1(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH));
+        version.set_version_v2(version_v2(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH));
         version.set_release(format!("{}.{}.{}", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH));
         version.set_os("KelvinBot".to_string());
         version.set_os_version(env!("CARGO_PKG_VERSION").to_string());
@@ -424,23 +448,34 @@ impl MumbleService {
     }
 }
 
-#[async_trait::async_trait]
-impl Service for MumbleService {
-    async fn run(&self, cancel: CancellationToken) -> Result<()> {
-        info!(id=%self.id, "mumble service starting");
-
-        // Reset state on each run (important for reconnections after disconnect)
-        *self.state.lock().await = MumbleState::new();
-
-        let mut stream = self.connect().await?;
-        self.authenticate(&mut stream).await?;
-
+impl MumbleService {
+    /// Runs an established, authenticated connection until it fails, goes
+    /// silent for `READ_TIMEOUT`, or `cancel` fires.
+    async fn process<T>(
+        &self,
+        mut stream: Framed<T, ClientControlCodec>,
+        cancel: CancellationToken,
+    ) -> Result<()>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
         let (send_tx, mut send_rx) = mpsc::channel::<ControlPacket<Serverbound>>(32);
         *self.msg_tx.lock().await = Some(send_tx);
 
-        // Send periodic pings to keep connection alive (every 15 seconds)
-        let mut ping_interval = interval(Duration::from_secs(15));
+        // Send periodic pings to keep connection alive
+        let mut ping_interval = interval(PING_INTERVAL);
         ping_interval.tick().await; // First tick completes immediately
+
+        // When the connection is given up on. Pushed back by every packet
+        // received; the server answers our pings, so a healthy connection is
+        // never silent for long.
+        let mut read_deadline = Instant::now() + READ_TIMEOUT;
+        let silent = || {
+            anyhow!(
+                "nothing received from mumble server in {}s; assuming connection is dead",
+                READ_TIMEOUT.as_secs()
+            )
+        };
 
         loop {
             tokio::select! {
@@ -448,6 +483,7 @@ impl Service for MumbleService {
                     info!(id=%self.id, "mumble service shutting down");
                     break;
                 }
+                _ = tokio::time::sleep_until(read_deadline) => return Err(silent()),
                 _ = ping_interval.tick() => {
                     // Send ping to keep connection alive
                     let timestamp = std::time::SystemTime::now()
@@ -459,7 +495,13 @@ impl Service for MumbleService {
                     ping.set_timestamp(timestamp);
 
                     debug!("sending keepalive ping");
-                    if let Err(e) = stream.send(ControlPacket::Ping(Box::new(ping))).await {
+                    // A dead peer can also stop accepting writes, so the send
+                    // is held to the same deadline.
+                    let sent = tokio::time::timeout_at(
+                        read_deadline,
+                        stream.send(ControlPacket::Ping(Box::new(ping))),
+                    );
+                    if let Err(e) = sent.await.map_err(|_| silent())? {
                         error!(error=%e, "failed to send keepalive ping");
                         return Err(e.into());
                     }
@@ -467,6 +509,7 @@ impl Service for MumbleService {
                 msg = stream.next() => {
                     match msg {
                         Some(Ok(packet)) => {
+                            read_deadline = Instant::now() + READ_TIMEOUT;
                             let mut state = self.state.lock().await;
                             match self.handle_control_packet(packet, &mut state).await {
                                 Ok(Some(response)) => {
@@ -504,6 +547,32 @@ impl Service for MumbleService {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Service for MumbleService {
+    async fn run(&self, cancel: CancellationToken) -> Result<()> {
+        info!(id=%self.id, "mumble service starting");
+
+        // Reset state on each run (important for reconnections after disconnect)
+        *self.state.lock().await = MumbleState::new();
+
+        // Bounded, because a server that accepts the connection and then
+        // stalls would otherwise hold us here forever.
+        let connecting = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            let mut stream = self.connect().await?;
+            self.authenticate(&mut stream).await?;
+            anyhow::Ok(stream)
+        });
+        let stream = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            connected = connecting => connected.map_err(|_| {
+                anyhow!("mumble connection not established within {}s", CONNECT_TIMEOUT.as_secs())
+            })??,
+        };
+
+        self.process(stream, cancel).await
     }
 
     async fn handle_command(&self, command: Command) -> Result<()> {
@@ -627,6 +696,87 @@ impl Service for MumbleService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mumble_protocol_2x::control::ServerControlCodec;
+    use tokio::io::DuplexStream;
+
+    #[test]
+    fn version_is_packed_the_way_mumble_expects() {
+        // 1.5.0
+        assert_eq!(version_v1(1, 5, 0), 0x0001_0500);
+        assert_eq!(version_v2(1, 5, 0), 0x0001_0005_0000_0000);
+        // Each part lands in its own field.
+        assert_eq!(version_v1(1, 2, 3), 0x0001_0203);
+        assert_eq!(version_v2(1, 2, 3), 0x0001_0002_0003_0000);
+    }
+
+    async fn service() -> MumbleService {
+        let (evt_tx, _events) = mpsc::channel(16);
+        MumbleService::create(
+            ServiceId("mumble".to_string()),
+            "mumble.example.com".to_string(),
+            64738,
+            "kelvin".to_string(),
+            SecretString::from(""),
+            false,
+            evt_tx,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The client and server ends of a Mumble control connection over an
+    /// in-memory pipe.
+    fn connection()
+    -> (Framed<DuplexStream, ClientControlCodec>, Framed<DuplexStream, ServerControlCodec>) {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        (
+            Framed::new(client, ClientControlCodec::new()),
+            Framed::new(server, ServerControlCodec::new()),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_connection_is_given_up_on() {
+        let service = service().await;
+        // The server end stays open but never answers a ping.
+        let (client, _server) = connection();
+
+        let started = Instant::now();
+        let result = service.process(client, CancellationToken::new()).await;
+
+        let err = result.expect_err("a silent connection should be reported as dead");
+        assert!(format!("{err:#}").contains("nothing received"), "got: {err:#}");
+        assert_eq!(started.elapsed(), READ_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_that_answers_pings_stays_up() {
+        let service = service().await;
+        let (client, mut server) = connection();
+        tokio::spawn(async move {
+            while let Some(Ok(packet)) = server.next().await {
+                if matches!(packet, ControlPacket::Ping(_)) {
+                    let _ = server.send(ControlPacket::Ping(Box::new(Ping::new()))).await;
+                }
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let stop_later = tokio::spawn({
+            let cancel = cancel.clone();
+            async move {
+                tokio::time::sleep(READ_TIMEOUT * 10).await;
+                cancel.cancel();
+            }
+        });
+
+        let started = Instant::now();
+        let result = service.process(client, cancel).await;
+
+        result.expect("the connection should last until cancelled");
+        assert!(started.elapsed() >= READ_TIMEOUT * 10, "ended after {:?}", started.elapsed());
+        stop_later.await.unwrap();
+    }
 
     #[test]
     fn escape_html_escapes_markup_characters() {
