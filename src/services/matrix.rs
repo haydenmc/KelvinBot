@@ -210,9 +210,18 @@ impl MatrixService {
             use matrix_sdk::ruma::OwnedDeviceId;
             let device_id: OwnedDeviceId = target_device_id.as_str().into();
 
+            let own_user_id = self.client.user_id().unwrap();
+
+            // Ask the homeserver for our account's current devices first. The
+            // lookup below only reads the local store, which on a new store
+            // may not have been filled in yet.
+            encryption
+                .request_user_identity(own_user_id)
+                .await
+                .context("fetching the account's device list")?;
+
             // Get the target device
-            let target_device =
-                encryption.get_device(self.client.user_id().unwrap(), &device_id).await?;
+            let target_device = encryption.get_device(own_user_id, &device_id).await?;
 
             if let Some(device) = target_device {
                 info!("found target device, requesting verification");
@@ -307,7 +316,19 @@ impl MatrixService {
                     }
                 }
             } else {
-                bail!("target device {} not found", target_device_id);
+                // Name the sessions that do exist: IDs are case-sensitive and
+                // must belong to the bot's own account.
+                let known: Vec<String> = encryption
+                    .get_user_devices(own_user_id)
+                    .await?
+                    .devices()
+                    .map(|d| d.device_id().to_string())
+                    .collect();
+                bail!(
+                    "target device {} not found among this account's devices: [{}]",
+                    target_device_id,
+                    known.join(", ")
+                );
             }
         } else {
             bail!("device needs verification but no verification_device_id configured");
@@ -838,7 +859,7 @@ impl Service for MatrixService {
 
         // Set up encryption with verification (sync running in background)
         if let Err(e) = self.setup_encryption().await {
-            error!(error=%e, "failed to set up encryption");
+            error!(error=%format!("{e:#}"), "failed to set up encryption");
             bail!("failed to set up encryption")
         }
 
