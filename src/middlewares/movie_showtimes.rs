@@ -4,11 +4,10 @@ use crate::core::{
     middleware::{Middleware, MiddlewareContext},
     service::ServiceId,
 };
+use crate::middlewares::calendar_agenda::local_datetime;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{
-    DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday,
-};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
@@ -146,9 +145,21 @@ impl MovieShowtimes {
         }
     }
 
+    /// The search text of a movie command: what follows the command word.
+    /// Empty when the command is given on its own, which asks for help.
+    /// `None` if `body` is not the command at all.
+    fn query_from<'a>(&self, body: &'a str) -> Option<&'a str> {
+        let rest = body.strip_prefix(self.command_string.as_str())?;
+        // "!movies" is a different word, not "!movie" followed by "s".
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            Some(rest.trim())
+        } else {
+            None
+        }
+    }
+
     /// Calculate the next scheduled time based on post_on_day_of_week and post_at_time
-    fn next_scheduled_time(&self) -> chrono::DateTime<Local> {
-        let now = Local::now();
+    fn next_scheduled_time(&self, now: chrono::DateTime<Local>) -> chrono::DateTime<Local> {
         let target_time = self.post_at_time;
 
         // Calculate days until next occurrence
@@ -177,9 +188,9 @@ impl MovieShowtimes {
 
         // Create target datetime
         let target_date = now.date_naive() + Duration::days(days_until_target as i64);
-        let target_datetime = target_date.and_time(target_time);
-
-        Local.from_local_datetime(&target_datetime).unwrap()
+        // Not every local time exists (clocks skip an hour in spring) and
+        // some happen twice; this settles both instead of panicking.
+        local_datetime(target_date, target_time)
     }
 
     /// Process API movies into grouped listings, applying theater priority filter
@@ -610,7 +621,7 @@ impl MovieShowtimes {
 impl Middleware for MovieShowtimes {
     async fn run(&self, cancel: CancellationToken) -> Result<()> {
         let mut query_rx = self.query_rx.lock().await;
-        let mut next_time = self.next_scheduled_time();
+        let mut next_time = self.next_scheduled_time(Local::now());
         let mut in_cooldown = false;
 
         tracing::info!(
@@ -638,7 +649,7 @@ impl Middleware for MovieShowtimes {
                     if in_cooldown {
                         // Cooldown finished, recalculate next scheduled time
                         in_cooldown = false;
-                        next_time = self.next_scheduled_time();
+                        next_time = self.next_scheduled_time(Local::now());
                         tracing::info!(
                             next_scheduled=%next_time.format("%Y-%m-%d %H:%M:%S %Z"),
                             "next scheduled post"
@@ -681,9 +692,8 @@ impl Middleware for MovieShowtimes {
         }
 
         // Check for movie command
-        let prefix = format!("{} ", self.command_string);
-        if let Some(query) = body.strip_prefix(&prefix) {
-            let query = query.trim().to_string();
+        if let Some(query) = self.query_from(body) {
+            let query = query.to_string();
 
             // Queue the query for async processing
             // Use try_send to avoid blocking if the channel is full
@@ -721,5 +731,92 @@ fn parse_runtime(duration: &str) -> Option<String> {
         Some(format!("{}m", minutes))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::PersistentStore;
+    use chrono::Timelike;
+
+    /// Posts on Fridays at 10:00.
+    fn showtimes() -> MovieShowtimes {
+        let (cmd_tx, _commands) = tokio::sync::mpsc::channel(1);
+        let ctx = MiddlewareContext { cmd_tx, store: Arc::new(PersistentStore::in_memory()) };
+        MovieShowtimes::new(
+            ctx,
+            "matrix".to_string(),
+            "!room:example.com".to_string(),
+            Weekday::Fri,
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            LatLng { lat: 0.0, lng: 0.0 },
+            10,
+            SecretString::from("key"),
+            None,
+            None,
+        )
+    }
+
+    /// 2026-06-05 is a Friday.
+    fn june(day: u32, hour: u32) -> chrono::DateTime<Local> {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 6, day).unwrap();
+        local_datetime(date, NaiveTime::from_hms_opt(hour, 0, 0).unwrap())
+    }
+
+    #[test]
+    fn next_post_is_the_coming_friday_at_the_post_time() {
+        let showtimes = showtimes();
+
+        assert_eq!(showtimes.next_scheduled_time(june(3, 12)), june(5, 10), "from Wednesday");
+        assert_eq!(showtimes.next_scheduled_time(june(5, 9)), june(5, 10), "earlier that day");
+        assert_eq!(showtimes.next_scheduled_time(june(5, 10)), june(12, 10), "at the post time");
+        assert_eq!(showtimes.next_scheduled_time(june(6, 12)), june(12, 10), "from Saturday");
+    }
+
+    #[test]
+    fn post_time_that_does_not_exist_is_moved_instead_of_panicking() {
+        // Whether 02:30 exists on a given day depends on the machine's time
+        // zone. Check every day of a year so that, wherever this runs, the
+        // spring-forward day is among them. (In a zone with no daylight
+        // saving, such as UTC, this only checks the ordinary case.)
+        let mut showtimes = showtimes();
+        showtimes.post_at_time = NaiveTime::from_hms_opt(2, 30, 0).unwrap();
+
+        let mut now = june(1, 0);
+        for _ in 0..366 {
+            for weekday in [Weekday::Sat, Weekday::Sun] {
+                showtimes.post_on_day_of_week = weekday;
+                let next = showtimes.next_scheduled_time(now);
+                assert!(next > now, "next post {next} should be after {now}");
+                assert!(next.hour() == 2 || next.hour() == 3, "got: {next}");
+            }
+            now += Duration::days(1);
+        }
+    }
+
+    #[test]
+    fn command_on_its_own_asks_for_help() {
+        let showtimes = showtimes();
+
+        assert_eq!(showtimes.query_from("!movie"), Some(""));
+        assert_eq!(showtimes.query_from("!movie   "), Some(""));
+    }
+
+    #[test]
+    fn command_with_text_is_a_search() {
+        let showtimes = showtimes();
+
+        assert_eq!(showtimes.query_from("!movie dune"), Some("dune"));
+        assert_eq!(showtimes.query_from("!movie  the  matrix "), Some("the  matrix"));
+    }
+
+    #[test]
+    fn other_messages_are_not_the_command() {
+        let showtimes = showtimes();
+
+        assert_eq!(showtimes.query_from("!movies dune"), None);
+        assert_eq!(showtimes.query_from("see !movie dune"), None);
+        assert_eq!(showtimes.query_from("hello"), None);
     }
 }

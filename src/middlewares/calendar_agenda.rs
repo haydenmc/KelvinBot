@@ -357,7 +357,7 @@ impl Middleware for CalendarAgenda {
 
 /// Resolve a local date and time, picking the earlier instant when a DST
 /// transition makes it ambiguous and the following hour when it doesn't exist.
-fn local_datetime(date: NaiveDate, time: NaiveTime) -> DateTime<Local> {
+pub(crate) fn local_datetime(date: NaiveDate, time: NaiveTime) -> DateTime<Local> {
     let naive = date.and_time(time);
     match Local.from_local_datetime(&naive) {
         chrono::LocalResult::Single(dt) => dt,
