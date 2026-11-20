@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,7 +13,7 @@ use matrix_sdk::{
     encryption::{self, EncryptionSettings},
     event_handler::EventHandlerDropGuard,
     ruma::{
-        RoomId, UserId,
+        OwnedRoomId, RoomId, UserId,
         events::{
             reaction::OriginalSyncReactionEvent,
             room::{
@@ -111,6 +111,7 @@ pub struct MatrixService {
     evt_tx: tokio::sync::mpsc::Sender<Event>,
     client: Client,
     reaction_registry: Arc<Mutex<ReactionRegistry>>,
+    direct_invites: DirectInvites,
 }
 
 impl MatrixService {
@@ -160,6 +161,7 @@ impl MatrixService {
             evt_tx,
             client,
             reaction_registry,
+            direct_invites: DirectInvites::default(),
         })
     }
 
@@ -342,7 +344,7 @@ impl MatrixService {
         for room in self.client.rooms() {
             if room.state() == RoomState::Joined {
                 // Check if it's a DM with this specific user
-                if let Ok(true) = room.is_direct().await
+                if let Ok(true) = self.direct_invites.is_direct(&room).await
                     && let Ok(members) = room.members(RoomMemberships::ACTIVE).await
                     && members.len() == 2
                     && members.iter().any(|m| m.user_id() == user_id)
@@ -386,6 +388,17 @@ impl MatrixService {
         }
     }
 
+    /// Accepts invites that are still pending from before this run: ones that
+    /// arrived while the bot was not running, or whose join failed. The live
+    /// invite handler only sees invites that arrive while it is registered.
+    async fn accept_pending_invites(&self) {
+        for room in self.client.invited_rooms() {
+            info!(room_id=%room.room_id(), "found a pending invite");
+            let is_direct = room.is_direct().await.unwrap_or(false);
+            accept_invite(&room, is_direct, &self.direct_invites).await;
+        }
+    }
+
     async fn cleanup_empty_rooms(&self) {
         info!("checking for empty rooms to leave");
         let rooms = self.client.rooms();
@@ -404,49 +417,18 @@ impl MatrixService {
         let mut handles = Vec::new();
 
         // Handle room invites
+        let direct_invites = self.direct_invites.clone();
         handles.push(self.client.add_event_handler(
-            |event: StrippedRoomMemberEvent, room: Room, client: Client| async move {
-                info!("Received room invite for room: {}", room.room_id());
-                if let Some(user_id) = client.user_id() {
-                    if event.state_key == user_id
+            move |event: StrippedRoomMemberEvent, room: Room| {
+                let direct_invites = direct_invites.clone();
+                async move {
+                    if event.state_key == room.own_user_id()
                         && event.content.membership == MembershipState::Invite
                     {
-                        let bot_server = user_id.server_name();
-                        if let Some(room_server) = room.room_id().server_name() {
-                            if bot_server == room_server {
-                                match room.join().await {
-                                    Ok(_) => {
-                                        info!(room_id=%room.room_id(), "Successfully joined room");
-                                        // The SDK only reports a joined room as direct if it
-                                        // appears in the bot's own m.direct account data, which
-                                        // joining alone never updates. Honor the invite's flag so
-                                        // DMs and group DMs are classified correctly afterwards.
-                                        if event.content.is_direct == Some(true) {
-                                            match room.set_is_direct(true).await {
-                                                Ok(()) => info!(
-                                                    room_id=%room.room_id(),
-                                                    "marked invited room as direct"
-                                                ),
-                                                Err(e) => warn!(
-                                                    room_id=%room.room_id(),
-                                                    error=%e,
-                                                    "failed to mark invited room as direct"
-                                                ),
-                                            }
-                                        }
-                                    }
-                                    Err(e) => error!("Failed to accept invite: {}", e),
-                                }
-                            } else {
-                                info!(room_server=%room_server, bot_server=%bot_server,
-                                    "Ignoring room invite from different homeserver.")
-                            }
-                        } else {
-                            warn!("Room invite is missing server name");
-                        }
+                        info!("Received room invite for room: {}", room.room_id());
+                        let is_direct = event.content.is_direct == Some(true);
+                        accept_invite(&room, is_direct, &direct_invites).await;
                     }
-                } else {
-                    warn!("Client user_id is None, cannot process invite");
                 }
             },
         ));
@@ -476,8 +458,10 @@ impl MatrixService {
         let bot_user_id_for_handler =
             self.client.user_id().expect("client should have user_id after login").to_owned();
         let max_image_size_bytes = self.max_image_size_bytes;
+        let direct_invites = self.direct_invites.clone();
         handles.push(self.client.add_event_handler(
             move |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| {
+                let direct_invites = direct_invites.clone();
                 let service_id = service_id.clone();
                 let evt_tx = evt_tx.clone();
                 let bot_user_id_for_handler = bot_user_id_for_handler.clone();
@@ -486,7 +470,7 @@ impl MatrixService {
                         return;
                     }
 
-                    let Ok(is_direct) = room.is_direct().await else {
+                    let Ok(is_direct) = direct_invites.is_direct(&room).await else {
                         warn!("could not determine if message was a direct message");
                         return;
                     };
@@ -865,6 +849,11 @@ impl Service for MatrixService {
 
         info!("encryption setup complete, service ready");
 
+        // Done with the handlers registered and the sync running, so the recent
+        // messages of each room joined here are delivered like any others and
+        // whatever was asked while the invite sat unanswered gets a reply.
+        self.accept_pending_invites().await;
+
         // Clean up any rooms where the bot is the only member
         self.cleanup_empty_rooms().await;
 
@@ -1145,6 +1134,77 @@ impl Service for MatrixService {
 
 use matrix_sdk::{ruma::api::error::ErrorKind, store::RoomLoadSettings};
 
+/// Rooms joined from a direct-message invite during this run.
+///
+/// The SDK only reports a joined room as direct once the bot's `m.direct`
+/// account data, updated after joining, has come back through the sync. The
+/// room's first messages usually arrive before that. Remembering the invite's
+/// flag here lets those be treated as direct messages straight away.
+#[derive(Clone, Default)]
+struct DirectInvites(Arc<std::sync::Mutex<HashSet<OwnedRoomId>>>);
+
+impl DirectInvites {
+    fn insert(&self, room_id: &RoomId) {
+        self.0.lock().unwrap().insert(room_id.to_owned());
+    }
+
+    fn remove(&self, room_id: &RoomId) {
+        self.0.lock().unwrap().remove(room_id);
+    }
+
+    fn contains(&self, room_id: &RoomId) -> bool {
+        self.0.lock().unwrap().contains(room_id)
+    }
+
+    /// Whether `room` is a direct-message room, by this run's invites or
+    /// otherwise by the SDK's own record.
+    async fn is_direct(&self, room: &Room) -> Result<bool, matrix_sdk::StoreError> {
+        if self.contains(room.room_id()) {
+            return Ok(true);
+        }
+        room.is_direct().await
+    }
+}
+
+/// Joins a room the bot has been invited to, if the room is on the bot's own
+/// homeserver. `is_direct` is the invite's direct-message flag.
+async fn accept_invite(room: &Room, is_direct: bool, direct_invites: &DirectInvites) {
+    let bot_server = room.own_user_id().server_name();
+    let Some(room_server) = room.room_id().server_name() else {
+        warn!(room_id=%room.room_id(), "Room invite is missing server name");
+        return;
+    };
+    if bot_server != room_server {
+        info!(room_server=%room_server, bot_server=%bot_server,
+            "Ignoring room invite from different homeserver.");
+        return;
+    }
+
+    // Recorded before joining: the room's messages can arrive as soon as the
+    // join goes through.
+    if is_direct {
+        direct_invites.insert(room.room_id());
+    }
+    if let Err(e) = room.join().await {
+        error!(room_id=%room.room_id(), "Failed to accept invite: {}", e);
+        direct_invites.remove(room.room_id());
+        return;
+    }
+    info!(room_id=%room.room_id(), "Successfully joined room");
+
+    // The SDK only reports a joined room as direct if it appears in the bot's
+    // own m.direct account data, which joining alone never updates. Honor the
+    // invite's flag so DMs and group DMs are classified correctly afterwards.
+    if is_direct {
+        match room.set_is_direct(true).await {
+            Ok(()) => info!(room_id=%room.room_id(), "marked invited room as direct"),
+            Err(e) => {
+                warn!(room_id=%room.room_id(), error=%e, "failed to mark invited room as direct")
+            }
+        }
+    }
+}
+
 /// File, inside the service's storage directory, holding the saved session.
 const SESSION_FILE: &str = "session.json";
 
@@ -1247,6 +1307,22 @@ fn edited_text(content: &RoomMessageEventContent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_invites_remember_and_forget_rooms() {
+        use matrix_sdk::ruma::room_id;
+        let invites = DirectInvites::default();
+        let room = room_id!("!dm:example.org");
+        assert!(!invites.contains(room));
+
+        invites.insert(room);
+        assert!(invites.contains(room));
+        assert!(invites.clone().contains(room), "clones share the same set");
+        assert!(!invites.contains(room_id!("!other:example.org")));
+
+        invites.remove(room);
+        assert!(!invites.contains(room));
+    }
 
     fn session(device_id: &str) -> MatrixSession {
         MatrixSession {
