@@ -90,6 +90,9 @@ pub struct CalendarEvent {
     /// Reconstructed `DTSTART`/`RRULE`/`RDATE`/`EXDATE` block, present only
     /// when the event actually recurs.
     pub recurrence: Option<String>,
+    /// Whether this is one rescheduled or edited instance of a recurring
+    /// event (it has a `RECURRENCE-ID`), not an event in its own right.
+    pub recurring_instance: bool,
 }
 
 /// One concrete instance of an event on the calendar.
@@ -406,9 +409,16 @@ pub fn normalize_calendar_url(url: &str) -> String {
 
 /// Parse an ICS document into events. Individual malformed `VEVENT`s are
 /// skipped rather than failing the whole feed.
+///
+/// A feed describes a change to one instance of a recurring event as a second
+/// `VEVENT` with the same `UID` and a `RECURRENCE-ID` naming the instance it
+/// replaces. That instance is removed from the series here, so it is not
+/// listed at its original time as well; the replacement stays as an event of
+/// its own. Cancelled events (`STATUS:CANCELLED`), whether a whole event or
+/// one such instance, are dropped.
 pub fn parse_calendar(body: &str) -> Result<Vec<CalendarEvent>> {
     let reader = ical::IcalParser::new(BufReader::new(body.as_bytes()));
-    let mut events = Vec::new();
+    let mut events: Vec<ParsedEvent> = Vec::new();
 
     for calendar in reader {
         let calendar = calendar.context("failed to parse calendar feed")?;
@@ -421,7 +431,32 @@ pub fn parse_calendar(body: &str) -> Result<Vec<CalendarEvent>> {
         }
     }
 
-    Ok(events)
+    // Take each replaced instance out of the series it belongs to.
+    let replaced: Vec<(String, String)> =
+        events.iter().filter_map(|e| Some((e.uid.clone()?, e.replaces.clone()?))).collect();
+    for (uid, exdate_line) in replaced {
+        let series = events
+            .iter_mut()
+            .filter(|e| e.replaces.is_none() && e.uid.as_deref() == Some(uid.as_str()));
+        for master in series {
+            if let Some(block) = &mut master.event.recurrence {
+                block.push('\n');
+                block.push_str(&exdate_line);
+            }
+        }
+    }
+
+    Ok(events.into_iter().filter(|e| !e.cancelled).map(|e| e.event).collect())
+}
+
+/// A `VEVENT` together with what is needed to relate it to others in the feed.
+struct ParsedEvent {
+    event: CalendarEvent,
+    uid: Option<String>,
+    /// For an instance of a recurring event: an `EXDATE` line that removes the
+    /// instance it replaces from the series.
+    replaces: Option<String>,
+    cancelled: bool,
 }
 
 /// Parameters attached to an ICS property, e.g. `TZID=America/Los_Angeles`.
@@ -446,7 +481,7 @@ fn param<'a>(params: Option<&'a IcsParams>, name: &str) -> Option<&'a str> {
         .map(|v| v.as_str())
 }
 
-fn parse_event(event: &IcalEvent) -> Result<Option<CalendarEvent>> {
+fn parse_event(event: &IcalEvent) -> Result<Option<ParsedEvent>> {
     let Some((dtstart_value, dtstart_params)) = property(event, "DTSTART") else {
         // No start: nothing we can schedule against (e.g. a bare VEVENT stub).
         return Ok(None);
@@ -475,13 +510,39 @@ fn parse_event(event: &IcalEvent) -> Result<Option<CalendarEvent>> {
     let location =
         property(event, "LOCATION").map(|(v, _)| unescape_ics_text(v)).filter(|s| !s.is_empty());
 
-    Ok(Some(CalendarEvent {
-        summary,
-        location,
-        start,
-        end,
-        recurrence: build_recurrence_block(event),
+    let replaces = recurrence_line(event, "RECURRENCE-ID", "EXDATE");
+    let cancelled =
+        property(event, "STATUS").is_some_and(|(v, _)| v.trim().eq_ignore_ascii_case("CANCELLED"));
+
+    Ok(Some(ParsedEvent {
+        event: CalendarEvent {
+            summary,
+            location,
+            start,
+            end,
+            recurrence: build_recurrence_block(event),
+            recurring_instance: replaces.is_some(),
+        },
+        uid: property(event, "UID").map(|(v, _)| v.to_string()),
+        replaces,
+        cancelled,
     }))
+}
+
+/// Renders the property `name` as a line for the `rrule` parser, under the
+/// name `as_name`. Only `TZID` and `VALUE` parameters are forwarded — `rrule`
+/// rejects parameters it doesn't recognize.
+fn recurrence_line(event: &IcalEvent, name: &str, as_name: &str) -> Option<String> {
+    let (value, params) = property(event, name)?;
+    let mut line = as_name.to_string();
+    for key in ["VALUE", "TZID"] {
+        if let Some(found) = param(params, key) {
+            line.push_str(&format!(";{key}={found}"));
+        }
+    }
+    line.push(':');
+    line.push_str(value);
+    Some(line)
 }
 
 /// Reconstruct the `DTSTART`/`RRULE`/`RDATE`/`EXDATE` lines the `rrule` crate
@@ -641,7 +702,7 @@ pub fn expand(
                 start_time: start.time(),
                 end_time,
                 end_date,
-                is_recurring: event.recurrence.is_some(),
+                is_recurring: event.recurrence.is_some() || event.recurring_instance,
             });
         }
     }
@@ -860,6 +921,7 @@ mod tests {
             start: EventTime::Timed(start),
             end: EventTime::Timed(end),
             recurrence: None,
+            recurring_instance: false,
         }
     }
 
@@ -922,5 +984,115 @@ mod tests {
         assert_eq!(agenda.next_wake(now, Some(at(10, 8, 5))), at(10, 8, 5));
         // A retry that would fall after the next scheduled post does not delay it.
         assert_eq!(agenda.next_wake(now, Some(at(11, 9, 0))), at(11, 8, 0));
+    }
+
+    fn feed(events: &[&str]) -> String {
+        let events: String = events
+            .iter()
+            .map(|lines| {
+                format!("BEGIN:VEVENT\r\n{}\r\nEND:VEVENT\r\n", lines.replace('\n', "\r\n"))
+            })
+            .collect();
+        format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n{events}END:VCALENDAR\r\n")
+    }
+
+    /// Start dates and summaries of everything in the feed during June 2026.
+    fn june(feed: &str) -> Vec<(NaiveDate, String)> {
+        let events = parse_calendar(feed).expect("the feed should parse");
+        let mut found: Vec<_> = expand(&events, date(1), date(30))
+            .into_iter()
+            .map(|o| (o.start_date, o.summary))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Every Monday in June 2026, all day.
+    const WEEKLY: &str = "UID:weekly\nSUMMARY:Weekly sync\nDTSTART;VALUE=DATE:20260601\n\
+                          DTEND;VALUE=DATE:20260602\nRRULE:FREQ=WEEKLY;COUNT=4";
+
+    #[test]
+    fn moved_instance_is_listed_once_at_its_new_time() {
+        let moved = "UID:weekly\nSUMMARY:Weekly sync (moved)\nRECURRENCE-ID;VALUE=DATE:20260608\n\
+                     DTSTART;VALUE=DATE:20260610\nDTEND;VALUE=DATE:20260611";
+
+        assert_eq!(
+            june(&feed(&[WEEKLY, moved])),
+            [
+                (date(1), "Weekly sync".to_string()),
+                (date(10), "Weekly sync (moved)".to_string()),
+                (date(15), "Weekly sync".to_string()),
+                (date(22), "Weekly sync".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn moved_instance_listed_before_its_series_is_still_matched() {
+        let moved = "UID:weekly\nSUMMARY:Moved\nRECURRENCE-ID;VALUE=DATE:20260608\n\
+                     DTSTART;VALUE=DATE:20260610\nDTEND;VALUE=DATE:20260611";
+
+        let found = june(&feed(&[moved, WEEKLY]));
+
+        assert_eq!(found.len(), 4);
+        assert!(!found.iter().any(|(day, _)| *day == date(8)), "got: {found:?}");
+    }
+
+    #[test]
+    fn moved_instance_of_a_timed_event_in_a_named_zone_is_matched() {
+        let series = "UID:games\nSUMMARY:Game night\n\
+                      DTSTART;TZID=America/Los_Angeles:20260602T190000\n\
+                      DTEND;TZID=America/Los_Angeles:20260602T210000\nRRULE:FREQ=WEEKLY;COUNT=3";
+        let moved = "UID:games\nSUMMARY:Game night (moved)\n\
+                     RECURRENCE-ID;TZID=America/Los_Angeles:20260609T190000\n\
+                     DTSTART;TZID=America/Los_Angeles:20260610T190000\n\
+                     DTEND;TZID=America/Los_Angeles:20260610T210000";
+
+        let found = june(&feed(&[series, moved]));
+
+        // Two left in the series, plus the moved one: not four.
+        assert_eq!(found.len(), 3, "got: {found:?}");
+        assert_eq!(found.iter().filter(|(_, summary)| summary == "Game night").count(), 2);
+    }
+
+    #[test]
+    fn moved_instance_counts_as_recurring() {
+        let moved = "UID:weekly\nSUMMARY:Moved\nRECURRENCE-ID;VALUE=DATE:20260608\n\
+                     DTSTART;VALUE=DATE:20260610\nDTEND;VALUE=DATE:20260611";
+        let events = parse_calendar(&feed(&[WEEKLY, moved])).unwrap();
+
+        // So it is not announced with a reminder, like the rest of its series.
+        assert!(expand(&events, date(1), date(30)).iter().all(|o| o.is_recurring));
+    }
+
+    #[test]
+    fn cancelled_instance_is_dropped() {
+        let cancelled = "UID:weekly\nSUMMARY:Weekly sync\nSTATUS:CANCELLED\n\
+                         RECURRENCE-ID;VALUE=DATE:20260608\n\
+                         DTSTART;VALUE=DATE:20260608\nDTEND;VALUE=DATE:20260609";
+
+        let days: Vec<NaiveDate> =
+            june(&feed(&[WEEKLY, cancelled])).into_iter().map(|(day, _)| day).collect();
+
+        assert_eq!(days, [date(1), date(15), date(22)]);
+    }
+
+    #[test]
+    fn cancelled_events_are_dropped() {
+        let single = "UID:picnic\nSUMMARY:Picnic\nSTATUS:CANCELLED\n\
+                      DTSTART;VALUE=DATE:20260605\nDTEND;VALUE=DATE:20260606";
+        let series = format!("{WEEKLY}\nSTATUS:CANCELLED");
+        let kept = "UID:dinner\nSUMMARY:Dinner\nSTATUS:CONFIRMED\n\
+                    DTSTART;VALUE=DATE:20260606\nDTEND;VALUE=DATE:20260607";
+
+        assert_eq!(june(&feed(&[single, &series, kept])), [(date(6), "Dinner".to_string())]);
+    }
+
+    #[test]
+    fn instance_of_another_event_leaves_a_series_alone() {
+        let other = "UID:something-else\nSUMMARY:Other\nRECURRENCE-ID;VALUE=DATE:20260608\n\
+                     DTSTART;VALUE=DATE:20260610\nDTEND;VALUE=DATE:20260611";
+
+        assert_eq!(june(&feed(&[WEEKLY, other])).len(), 5);
     }
 }
