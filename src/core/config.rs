@@ -158,7 +158,6 @@ pub enum MiddlewareKind {
     },
     AttendanceRelay {
         source_service_id: String,
-        source_room_id: Option<String>,
         dest_service_id: String,
         dest_room_id: String,
         session_start_message: String,
