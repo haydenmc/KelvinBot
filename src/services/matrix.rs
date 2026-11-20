@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
 use matrix_sdk::{
     Client, Room, RoomMemberships, RoomState,
+    authentication::matrix::MatrixSession,
     config::SyncSettings,
     encryption::{self, EncryptionSettings},
     event_handler::EventHandlerDropGuard,
@@ -103,6 +104,8 @@ pub struct MatrixService {
     user_id: MatrixUserId,
     password: SecretString,
     device_id: String,
+    /// Where the logged-in session is kept between runs of the process.
+    session_path: PathBuf,
     verification_device_id: Option<String>,
     max_image_size_bytes: u64,
     evt_tx: tokio::sync::mpsc::Sender<Event>,
@@ -129,6 +132,8 @@ impl MatrixService {
         sqlite_path.push("matrix");
         sqlite_path.push(id.to_string());
         std::fs::create_dir_all(&sqlite_path).expect("Failed to create storage directory");
+        // Kept beside the crypto store so the two are moved or deleted together.
+        let session_path = sqlite_path.join(SESSION_FILE);
 
         let client = Client::builder()
             .homeserver_url(homeserver_url.clone())
@@ -149,6 +154,7 @@ impl MatrixService {
             user_id,
             password,
             device_id,
+            session_path,
             verification_device_id,
             max_image_size_bytes,
             evt_tx,
@@ -740,8 +746,20 @@ impl Service for MatrixService {
 
         // Authenticate, unless an earlier `run` on this client already did: the
         // session outlives `run`, and logging in twice on one client panics.
+        //
+        // A session saved by an earlier process is restored rather than logging
+        // in again. Logging in with the password on every start re-registers
+        // the device, and a homeserver may then drop the device's encryption
+        // keys, after which nobody can share room keys with the bot.
         if self.client.matrix_auth().logged_in() {
             info!("already logged in; reusing the existing session");
+        } else if let Some(session) = load_session(&self.session_path, &self.device_id) {
+            self.client
+                .matrix_auth()
+                .restore_session(session, RoomLoadSettings::default())
+                .await
+                .context("restoring the saved session")?;
+            info!("restored the saved session");
         } else {
             match self
                 .client
@@ -753,6 +771,12 @@ impl Service for MatrixService {
             {
                 Ok(_) => {
                     info!("login successful");
+                    if let Some(session) = self.client.matrix_auth().session()
+                        && let Err(e) = save_session(&self.session_path, &session)
+                    {
+                        // Not fatal: the next start logs in again instead.
+                        warn!(error=%format!("{e:#}"), "could not save the session");
+                    }
                 }
                 Err(e) => {
                     error!(error=%e, "login error");
@@ -769,7 +793,13 @@ impl Service for MatrixService {
         // the bot was down) reaches any handler, and the background sync below resumes
         // from this response's token. Middlewares such as lychee_upload rely on that to
         // never bulk-upload old photos.
-        self.client.sync_once(SyncSettings::default()).await?;
+        if let Err(e) = self.client.sync_once(SyncSettings::default()).await {
+            if session_is_dead(e.client_api_error_kind()) {
+                forget_session(&self.session_path);
+                return Err(anyhow::Error::new(e).context(DEAD_SESSION));
+            }
+            return Err(e.into());
+        }
 
         // Set up event handlers before encryption setup so verification events are processed.
         // They are removed again when `run` returns.
@@ -778,6 +808,7 @@ impl Service for MatrixService {
         // Spawn sync task in background so verification events can be processed
         let client_for_sync = self.client.clone();
         let cancel_for_sync = cancel.child_token();
+        let session_path = self.session_path.clone();
         // Stops the background sync however `run` returns, including on an error.
         let _stop_sync = cancel_for_sync.clone().drop_guard();
         let sync_handle = tokio::spawn(async move {
@@ -792,10 +823,8 @@ impl Service for MatrixService {
                         if session_is_dead(e.client_api_error_kind()) {
                             // Retrying cannot help: every request on this
                             // session will be refused the same way.
-                            return Err(anyhow::Error::new(e).context(
-                                "the homeserver no longer accepts this session; \
-                                 restart the bot to log in again",
-                            ));
+                            forget_session(&session_path);
+                            return Err(anyhow::Error::new(e).context(DEAD_SESSION));
                         }
                         // Anything else (the network, the homeserver being
                         // down) is retried here, resuming from the last sync
@@ -1093,7 +1122,72 @@ impl Service for MatrixService {
     }
 }
 
-use matrix_sdk::ruma::api::error::ErrorKind;
+use matrix_sdk::{ruma::api::error::ErrorKind, store::RoomLoadSettings};
+
+/// File, inside the service's storage directory, holding the saved session.
+const SESSION_FILE: &str = "session.json";
+
+const DEAD_SESSION: &str =
+    "the homeserver no longer accepts this session; restart the bot to log in again";
+
+/// Reads the session saved by an earlier run, if there is a usable one for
+/// `device_id`. A session for another device is left alone and ignored: the
+/// configured device has changed, so a fresh login is wanted.
+fn load_session(path: &Path, device_id: &str) -> Option<MatrixSession> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(path=%path.display(), error=%e, "could not read the saved session");
+            return None;
+        }
+    };
+    let session: MatrixSession = match serde_json::from_str(&content) {
+        Ok(session) => session,
+        Err(e) => {
+            warn!(path=%path.display(), error=%e, "saved session is unreadable; ignoring it");
+            return None;
+        }
+    };
+    if session.meta.device_id != device_id {
+        warn!(
+            saved=%session.meta.device_id,
+            configured=%device_id,
+            "saved session is for a different device; ignoring it"
+        );
+        return None;
+    }
+    Some(session)
+}
+
+/// Saves the session so the next run can restore it. The file holds the
+/// access token, so it is readable by the owner only.
+fn save_session(path: &Path, session: &MatrixSession) -> Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+    let content = serde_json::to_vec(session)?;
+    // Removed first so the permissions apply even if an older file exists.
+    let _ = std::fs::remove_file(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    file.write_all(&content)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Discards the saved session once the homeserver has rejected it, so the
+/// next start of the process logs in with the password again.
+fn forget_session(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => warn!("discarded the saved session; the next start will log in again"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(path=%path.display(), error=%e, "could not discard the saved session"),
+    }
+}
 
 /// Whether a failed request means the session itself is gone (logged out,
 /// token revoked, account disabled), as opposed to a failure that may pass.
@@ -1132,6 +1226,76 @@ fn edited_text(content: &RoomMessageEventContent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(device_id: &str) -> MatrixSession {
+        MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: matrix_sdk::ruma::user_id!("@bot:example.org").to_owned(),
+                device_id: device_id.into(),
+            },
+            tokens: matrix_sdk::SessionTokens {
+                access_token: "secret-token".to_string(),
+                refresh_token: None,
+            },
+        }
+    }
+
+    #[test]
+    fn saved_session_is_loaded_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_FILE);
+
+        assert_eq!(load_session(&path, "DEV"), None, "nothing saved yet");
+        save_session(&path, &session("DEV")).unwrap();
+
+        assert_eq!(load_session(&path, "DEV"), Some(session("DEV")));
+    }
+
+    #[test]
+    fn saved_session_is_readable_by_the_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_FILE);
+        // An older, more widely readable file must not keep its permissions.
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save_session(&path, &session("DEV")).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn session_for_another_device_is_ignored_but_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_FILE);
+        save_session(&path, &session("OLD")).unwrap();
+
+        assert_eq!(load_session(&path, "NEW"), None);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn unreadable_session_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_FILE);
+        std::fs::write(&path, "{ not json").unwrap();
+
+        assert_eq!(load_session(&path, "DEV"), None);
+    }
+
+    #[test]
+    fn forgotten_session_is_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_FILE);
+        save_session(&path, &session("DEV")).unwrap();
+
+        forget_session(&path);
+        forget_session(&path); // already gone: no error
+
+        assert_eq!(load_session(&path, "DEV"), None);
+    }
 
     fn reaction(target: &str) -> ReactionInfo {
         ReactionInfo { target_event_id: target.to_string(), key: "+1".to_string() }
