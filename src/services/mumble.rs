@@ -24,8 +24,12 @@ use crate::core::bus::Command;
 use crate::core::event::{Event, EventKind, User};
 use crate::core::service::{Service, ServiceId};
 
+// The version the bot announces. Kept below 1.5.0 on purpose: a server sends
+// voice to 1.5+ clients in a newer packet format that the protocol crate
+// cannot parse, and a single such packet (anyone speaking) fails the read
+// and drops the connection. Older clients are sent the format it does parse.
 const VERSION_MAJOR: u16 = 1;
-const VERSION_MINOR: u8 = 5;
+const VERSION_MINOR: u8 = 4;
 const VERSION_PATCH: u8 = 0;
 
 /// How often a ping is sent to the server, which answers each one.
@@ -707,6 +711,13 @@ mod tests {
         // Each part lands in its own field.
         assert_eq!(version_v1(1, 2, 3), 0x0001_0203);
         assert_eq!(version_v2(1, 2, 3), 0x0001_0002_0003_0000);
+    }
+
+    #[test]
+    fn announced_version_is_older_than_the_new_voice_format() {
+        // Servers switch to a voice format the codec cannot parse at 1.5.0.
+        let announced = version_v1(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+        assert!(announced < version_v1(1, 5, 0), "announced {announced:#x}");
     }
 
     async fn service() -> MumbleService {
